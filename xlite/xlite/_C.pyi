@@ -1,7 +1,7 @@
 """Type stubs for :mod:`xlite._C`.
 
 This file mirrors the symbols exported by `csrc/_C.cpp`.
-The typing and docstrings are designed for Python 3.9 to 3.12.
+The typing and docstrings are designed for Python 3.11 onward (the abi3 floor).
 """
 
 from __future__ import annotations
@@ -16,17 +16,20 @@ class Runtime:
 
     Attributes:
         task_id (int): Current task slot used by multi-task parallel execution.
-        notify (object): Runtime notify handle used for cross-stream synchronization.
-        peer_notify (object): Peer notify handle used by the peer-stream sync path.
+        notify (int): Opaque aclrtNotify handle as an integer (created by
+            init_tensor_pool's XCCL stage; 0 while unset).
+        peer_notify (int): Peer aclrtNotify handle as an integer; only set
+            from Python, by the multi-task-parallel cross-wiring
+            (``rt0.peer_notify = rt1.notify``).
         multi_task_parallel (bool): Enables the dual-task scheduling path.
     """
 
     task_id: int = ...
     """Current task slot used by multi-task parallel execution."""
-    notify: object = ...
-    """Runtime notify handle used for cross-stream synchronization."""
-    peer_notify: object = ...
-    """Peer notify handle used by the peer-stream sync path."""
+    notify: int = ...
+    """Opaque aclrtNotify handle as an integer (0 while unset)."""
+    peer_notify: int = ...
+    """Peer aclrtNotify handle as an integer; set from Python for multi-task parallel."""
     multi_task_parallel: bool = ...
     """Enables the dual-task scheduling path."""
 
@@ -92,6 +95,13 @@ class Runtime:
 
         Returns:
             None: The runtime updates swizzle configuration.
+        """
+
+    def synchronize(self) -> None:
+        """Synchronize the runtime's current stream (block until queued work completes).
+
+        Returns:
+            None: The calling thread blocks until pending device work finishes.
         """
 
 class ModelConfig:
@@ -1145,10 +1155,10 @@ class Model:
                 ``[num_tokens, hidden_size]``, model dtype.
             aux_outputs (Sequence[torch.Tensor]): Aux hidden-state capture buffers, one per
                 entry in ``aux_layer_ids``, each shape ``[max_tokens, hidden_size]`` model
-                dtype; only the first ``num_tokens`` rows of each are written. Requires
-                ``aux_layer_ids`` to be set on the config (before
-                :meth:`init`). Passing ``aux_outputs=None`` is rejected by the binding;
-                use the overload without it for a regular forward.
+                dtype; only the first ``num_tokens`` rows of each are written. Capture
+                requires ``aux_layer_ids`` to be set on the config (before :meth:`init`);
+                with it unset, capture is silently skipped. Omit ``aux_outputs`` for a
+                regular forward without capture.
             curr_stream (int, default=0): Optional ACL stream pointer cast to integer.
 
         Returns:

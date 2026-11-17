@@ -7,8 +7,7 @@
 -r requirements.txt
 setuptools>=64.0.0,<82.0.0
 setuptools-scm>=10.0.0
-cmake>=3.22.0
-pybind11>=3.0.0
+cmake>=3.26.0
 tqdm
 safetensors
 tiktoken

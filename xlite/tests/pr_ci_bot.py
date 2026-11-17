@@ -262,17 +262,31 @@ def worktree_test_env(wt: Path) -> dict:
     return env
 
 
-def run_accuracy_tests(wt: Path) -> Check:
-    """Build the PR worktree and run the accuracy tests against it, so they
-    exercise the PR code rather than the venv's installed (main checkout)
-    copy."""
-    build_output, build_rc = build_xlite(wt)
+def run_accuracy_tests(wt: Path, build_output: str = "", build_rc: int = 0) -> Check:
+    """Run the accuracy tests against the PR worktree, so they exercise the PR
+    code rather than the venv's installed (main checkout) copy. The build is
+    done once by the caller (shared with binding_contract) and passed in."""
     if build_rc != 0:
         return Check("accuracy tests", "failed", build_output, note="PR build failed")
     env = worktree_test_env(wt)
     output, returncode = run_cmd(["bash", "tests/run_accuracy.sh"], wt / "xlite", UT_TIMEOUT, env=env)
     status = "passed" if returncode == 0 and "All accuracy tests PASSED!" in output else "failed"
     return Check("accuracy tests", status, output)
+
+
+def run_binding_contract_tests(wt: Path, build_output: str = "", build_rc: int = 0) -> Check:
+    """Run binding_contract against the freshly built PR worktree. Catches
+    _C.pyi vs TORCH_LIBRARY name drift and enum/value drift that would
+    otherwise bind None silently (silent-green). Shares the build with
+    accuracy tests."""
+    if build_rc != 0:
+        return Check("binding contract", "failed", build_output, note="PR build failed")
+    env = worktree_test_env(wt)
+    output, returncode = run_cmd(
+        [sys.executable, "tests/funcs/binding_contract.py", "--device", "0"], wt / "xlite", UT_TIMEOUT, env=env
+    )
+    status = "passed" if returncode == 0 and "contract wrappers probed" in output else "failed"
+    return Check("binding contract", status, output)
 
 
 def failed_sections_output(check: Check) -> str:
@@ -359,13 +373,19 @@ def process_pr(client: GitCodeClient, pr: dict, args: argparse.Namespace) -> Non
                     note="requires the pre-commit setup; rebase onto master",
                 )
             )
+            checks.append(Check("binding contract", "skipped", note="static checks did not run"))
             checks.append(Check("accuracy tests", "skipped", note="static checks did not run"))
         else:
             vllm_check = run_vllm_ascend_check(wt, args.vllm_ascend_dir, args.vllm_dir)
             checks.append(vllm_check)
             if static_passed and vllm_check.status == "passed":
-                checks.append(run_accuracy_tests(wt))
+                # Build once; both binding_contract and accuracy tests run against
+                # the same freshly built PR worktree.
+                build_output, build_rc = build_xlite(wt)
+                checks.append(run_binding_contract_tests(wt, build_output, build_rc))
+                checks.append(run_accuracy_tests(wt, build_output, build_rc))
             else:
+                checks.append(Check("binding contract", "skipped", note="static checks failed"))
                 checks.append(Check("accuracy tests", "skipped", note="static checks failed"))
 
         body = build_comment(sha, checks)

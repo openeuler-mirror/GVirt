@@ -3,8 +3,7 @@
 requires = [
     "setuptools>=64.0.0,<82.0.0",
     "setuptools-scm>=10.0.0",     # write_to_source needs 10.x; setup.py imports get_version at top level
-    "cmake>=3.22.0",
-    "pybind11>=3.0.0",
+    "cmake>=3.26.0",      # USE_SABI (Python3_add_library ... USE_SABI) requires CMake >= 3.26
     "torch>=2.5.1,<=2.10.0",      # use torch+cpu; make sure (torch: build version <= runtime version)
 ]
 build-backend = "setuptools.build_meta"
@@ -14,15 +13,14 @@ name = "xlite"
 dynamic = ["version"]
 description = "A lightweight, effective and easy-to-extend inference runtime"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = "MulanPSL-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "Huawei Euler OS Team" }]
 classifiers = [
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 # synchronize with requirements.txt when updating dependencies
@@ -34,7 +32,7 @@ dependencies = [
 # synchronize with requirements-dev.txt when updating dev dependencies
 dev = [
     "setuptools>=64.0.0,<82.0.0",
-    "cmake>=3.22.0",
+    "cmake>=3.26.0",      # USE_SABI (Python3_add_library ... USE_SABI) requires CMake >= 3.26
     "numpy<2.0.0",
     "tqdm",
     "safetensors",

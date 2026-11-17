@@ -11,7 +11,7 @@ import queue
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 import torch
 import torch.distributed as dist
@@ -95,7 +95,7 @@ class ModelArgs:
     # RoPE parameters
     partial_rotary_factor: float = 0.25  # Only 25% of head_dim gets rotary embeddings
     # the raw model config path
-    config_path: Optional[Path] = None
+    config_path: Path | None = None
 
     def __post_init__(self):
         self.max_num_batched_tokens = self.max_seq_len * self.max_batch_size
@@ -165,7 +165,7 @@ class ParallelEmbedding(nn.Module):
         return y
 
 
-def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+def linear(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
     return F.linear(x, weight, bias)
 
 
@@ -283,7 +283,7 @@ class MHA(nn.Module):
                 persistent=False,
             )
 
-    def forward(self, x, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]):
+    def forward(self, x, start_pos: int, freqs_cis: torch.Tensor, mask: torch.Tensor | None):
         bsz, seqlen, _ = x.shape
 
         # q_proj outputs both query and gate
@@ -643,7 +643,7 @@ class Block(nn.Module):
         self.layer_id = layer_id
 
     def forward(
-        self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor] = None
+        self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: torch.Tensor | None = None
     ) -> torch.Tensor:
         if self.is_full_attention:
             x = x + self.self_attn(self.input_layernorm(x), start_pos, freqs_cis, mask)

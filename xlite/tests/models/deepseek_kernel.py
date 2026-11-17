@@ -11,7 +11,7 @@ from typing import Optional
 import torch
 
 
-def weight_dequant(x: torch.Tensor, s: torch.Tensor, offset: Optional[torch.Tensor] = None) -> torch.Tensor:
+def weight_dequant(x: torch.Tensor, s: torch.Tensor, offset: torch.Tensor | None = None) -> torch.Tensor:
     """
     Dequantizes the given weight tensor using the provided scale (and optional offset).
 

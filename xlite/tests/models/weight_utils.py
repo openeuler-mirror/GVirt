@@ -10,7 +10,7 @@ import stat
 import sys
 from collections import defaultdict
 from collections.abc import Iterator
-from typing import Any, Optional
+from typing import Any
 
 import filelock
 import numpy as np
@@ -83,7 +83,7 @@ class Disabledtqdm(tqdm):
         super().__init__(*args, **kwargs, disable=True)
 
 
-def get_lock(model_name_or_path: str, cache_dir: Optional[str] = None):
+def get_lock(model_name_or_path: str, cache_dir: str | None = None):
     lock_dir = cache_dir if cache_dir is not None else "/tmp"
     lock_file_name = model_name_or_path.replace("/", "-") + ".lock"
     lock = filelock.FileLock(os.path.join(lock_dir, lock_file_name))
@@ -140,10 +140,10 @@ def convert_bin_to_safetensor_file(
 
 def prepare_hf_model_weights(
     model_name_or_path: str,
-    cache_dir: Optional[str] = None,
+    cache_dir: str | None = None,
     use_safetensors: bool = False,
     fall_back_to_pt: bool = True,
-    revision: Optional[str] = None,
+    revision: str | None = None,
 ) -> tuple[str, list[str], bool]:
     # Download model weights from huggingface.
     is_local = os.path.isdir(model_name_or_path)
@@ -181,9 +181,9 @@ def prepare_hf_model_weights(
 
 def hf_model_weights_iterator(
     model_name_or_path: str,
-    cache_dir: Optional[str] = None,
+    cache_dir: str | None = None,
     load_format: str = "auto",
-    revision: Optional[str] = None,
+    revision: str | None = None,
 ) -> Iterator[tuple[str, torch.Tensor]]:
     use_safetensors = False
     use_np_cache = False

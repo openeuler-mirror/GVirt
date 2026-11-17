@@ -1,41 +1,74 @@
 /*
  * Copyright (C) 2025. Huawei Technologies Co., Ltd. All rights reserved.
+ *
+ * _C.cpp — the abi3 SABI binding module for xlite (single self-contained TU).
+ *
+ * Built via `Python3_add_library(... USE_SABI 3.11 WITH_SOABI)` (CMakeLists.txt),
+ * producing xlite_sabi.abi3.so. Registers torch.ops.xlite_sabi.* /
+ * torch.classes.xlite_sabi.* through torch's dispatcher — no direct Python
+ * C-API contact — so a single wheel installs on any CPython 3.11+. The
+ * pure-Python xlite/_C.py shim loads this .so and re-exports the names so
+ * existing `from xlite._C import ...` call sites work unchanged.
+ *
+ * Layout (top to bottom):
+ *   1. includes
+ *   2. internal structs CModelAttnMeta / CModelAttnMetaV2 and class _CModel
+ *      (inherit torch::CustomClassHolder — internal to the binding layer)
+ *   3. wrapper free functions (XRuntime& + at::Tensor& -> XTensor -> XliteOp*)
+ *   4. holders for public C++ classes (RuntimeHolder / ConfigHolder /
+ *      CoreAssignerHolder) + TORCH_LIBRARY registration of all classes + ops
+ *
+ * Binding-boundary rules (verified by PoC):
+ *   - integral args are int64_t (IValue maps schema "int"->int64_t; uint32_t
+ *     fails a static_assert). Cast to uint32_t at the wrapper call.
+ *   - vector<uint32_t> struct fields are NOT supported by IValue; exposed via
+ *     opreg::Props::def_rw with int64 conversion (field type stays uint32_t
+ *     in C++).
+ *   - custom-class args arrive as c10::intrusive_ptr<Holder>.
+ *   - at::Tensor args arrive by value; in-place outputs work (shared storage).
+ *   - ops register through opreg::OpDefs: .def(name, op<&Fn>, {torch::arg...})
+ *     infers argument types from the adapter signature and merges the
+ *     torch::arg names/defaults into the schema (auto-inference alone names
+ *     args _0, _1, ... and cannot express defaults).
  */
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
+#include <ATen/core/op_registration/infer_schema.h>
+#include <torch/library.h>
+#include <torch/custom_class.h>
 #include <torch/torch.h>
-#include <torch/extension.h>
-#include <ATen/core/dispatch/Dispatcher.h>
+
+#include <memory>
 #include <optional>
+#include <vector>
+#include <string>
+#include <cstdint>
 #include <initializer_list>
-#include "xlite.h"
-#include "dsa_cp_weight.h"
-#include "core_assigner.h"
-#include "op.h"
-#include "auto_tuner.h"
-#include "debug.h"
+#include <limits>
+#include <stdexcept>
+#include <type_traits>
+#include "xlite.h"          // InitXTensor, XTensor
+#include "runtime.h"        // XRuntime (public; wrapped, not inherited)
+#include "model.h"          // XModel, XModelConfig, MatmulWeight, XModelAttnMeta
+#include "dsa_cp_weight.h"  // DsaCpWeightStorageShape, DsaCpWeightIsNZ
+#include "op.h"             // XliteOp* declarations
+#include "core_assigner.h"  // XCoreAssigner (public; wrapped)
+#include "auto_tuner.h"     // GetTileSizeOfCachedKV (vector<uint32_t> args)
+#include "debug.h"          // DBG_LOC
 
-namespace py = pybind11;
-
-struct CModelAttnMeta {
+struct CModelAttnMeta : torch::CustomClassHolder {
     std::vector<uint32_t> lens;
     std::vector<uint32_t> cachedLens;
     std::vector<std::vector<uint32_t>> blockTablesList;
     at::Tensor positions;
 };
 
-struct CModelAttnMetaV2 {
-    std::vector<uint32_t> lensCpu;        // [batch] host
-    std::vector<uint32_t> cachedLensCpu;  // [batch] host
-    at::Tensor positions;      // [batchedTokens] or [num_dims, batchedTokens] (mrope) int64 device
-    at::Tensor lens;           // [batch] int32 device
-    at::Tensor cachedLens;     // [batch] int32 device
-    at::Tensor queryStartLoc;  // [batch+1] int32 device, 0-prefixed prefix-sum of lens
-    std::vector<at::Tensor> slotMapping;  // hybrid: one main-KV table;
-                                          // per-cache: one per blockSizes entry
-    // [rows >= batch, ceil(maxSeqLen/blockSize)] int32 device, per kv cache; entries
-    // beyond this step's lens are stale. Hybrid family slots: [0]=main KV,
-    // [1..]=mamba state page ids ([batch, 1]) [+ KDA tail ring].
+struct CModelAttnMetaV2 : torch::CustomClassHolder {
+    std::vector<uint32_t> lensCpu;
+    std::vector<uint32_t> cachedLensCpu;
+    at::Tensor positions;
+    at::Tensor lens;
+    at::Tensor cachedLens;
+    at::Tensor queryStartLoc;
+    std::vector<at::Tensor> slotMapping;
     std::vector<at::Tensor> blockTables;
     // TODO: device int32 [num_seqs]; seq i reads block-table row [i] instead of row i
     std::optional<at::Tensor> blockTablesSeqMapping;
@@ -46,20 +79,13 @@ struct CModelAttnMetaV2 {
     std::vector<std::vector<at::Tensor>> slotMappingPerLayer;  // [n_layers][5]
 };
 
-// Reserved (see blockTablesSeqMapping): not consumed yet, reject at the bridge
-static void CheckBlockTablesSeqMapping(const CModelAttnMetaV2 &attnMeta)
-{
-    if (attnMeta.blockTablesSeqMapping.has_value()) {
-        throw std::runtime_error(
-            "AttnMetaV2.block_tables_seq_mapping is not supported yet, expect None");
-    }
-}
+void CheckBlockTablesSeqMapping(const CModelAttnMetaV2 &attnMeta);
 
-class _CModel
+class _CModel : public torch::CustomClassHolder
 {
 public:
     _CModel() {};
-    ~_CModel();
+    ~_CModel() override;
     void Init(struct XModelConfig &c, uint32_t rankId);
     void ForwardV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMeta,
                    std::vector<std::vector<at::Tensor>> &kvCache, at::Tensor &freqsCis,
@@ -828,10 +854,10 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     _kv.resize(c.nLayers);
     for (uint32_t i = 0; i < c.nLayers; i++) {
         if (c.attnType == XMODEL_ATTN_DSA) {
-            _kv[i].resize(!c.indexC8Mask.empty() && c.indexC8Mask[i] ? 4 : 3);
+            _kv[i].resize(i < c.indexC8Mask.size() && c.indexC8Mask[i] ? 4 : 3);
         } else if (c.attnType == XMODEL_ATTN_CXA) {
             // LI-C8 layers carry vllm's fp16 indexer-k scale pool as a 6th slot.
-            _kv[i].resize(!c.indexC8Mask.empty() && c.indexC8Mask[i] ? 6 : 5);
+            _kv[i].resize(i < c.indexC8Mask.size() && c.indexC8Mask[i] ? 6 : 5);
         } else {
             _kv[i].resize(2);
         }
@@ -961,10 +987,10 @@ void _CModel::ForwardV1(XRuntime &rt, at::Tensor &input, CModelAttnMeta &attnMet
     Forward(rt, input, _attnMeta, kvCache, freqsCisVec, output, currStream);
 }
 
-// Copy the CXA per-layer (block_tables/slot_mapping) vectors from the pybind
-// view (at::Tensor) to the runtime view (XTensor). Shared by all ForwardV2
-// variants. No-op when the host did not populate them (V1, non-CXA, or
-// DummyRun) — CXA consumers then fall back to the flat
+// Copy the CXA per-layer (block_tables/slot_mapping) vectors from the
+// Python-facing view (at::Tensor) to the runtime view (XTensor). Shared by all
+// ForwardV2 variants. No-op when the host did not populate them (V1, non-CXA,
+// or DummyRun) — CXA consumers then fall back to the flat
 // blockTables/slotMapping.
 static void InitAttnMetaV2PerLayer(XModelAttnMeta &dst, const CModelAttnMetaV2 &src)
 {
@@ -981,6 +1007,14 @@ static void InitAttnMetaV2PerLayer(XModelAttnMeta &dst, const CModelAttnMetaV2 &
         for (size_t p = 0; p < src.slotMappingPerLayer[l].size(); p++) {
             InitXTensor(dst.slotMappingPerLayer[l][p], src.slotMappingPerLayer[l][p]);
         }
+    }
+}
+
+void CheckBlockTablesSeqMapping(const CModelAttnMetaV2 &attnMeta)
+{
+    if (attnMeta.blockTablesSeqMapping.has_value()) {
+        throw std::runtime_error(
+            "AttnMetaV2.block_tables_seq_mapping is not supported yet, expect None");
     }
 }
 
@@ -3364,148 +3398,863 @@ void Conv1dAndSiLUPrefillPaged(XRuntime &rt, at::Tensor &input, at::Tensor &stat
     rt.Synchronize();
 }
 
-PYBIND11_MODULE(_C, m)
+// ===========================================================================
+// Cast<Dst>::go(Src): convert a dispatcher arg (Src) to the op's arg type
+// (Dst). Defined early so hand-written adapters (RuntimeHolder ctor,
+// configureSwizzle, setTaskId, model_init, op wrappers) share the same
+// guarded narrowing as the op<&Fn> path. RuntimeHolder/_rt-dependent
+// specializations (XRuntime&, const char*) stay further down.
+// ===========================================================================
+template <typename Dst>
+struct Cast {
+    template <typename V>
+    static auto go(V &&v) -> decltype(auto)
+    {
+        return std::forward<V>(v);
+    }
+};
+// Guarded int64->uint narrowing: pybind11 rejected out-of-range at the
+// boundary; a negative (e.g. -1 sentinel) would wrap to ~4e9 and feed
+// n_heads/head_dim/block_size as a huge allocation or loop bound.
+template <>
+struct Cast<uint32_t> {
+    static uint32_t go(int64_t v)
+    {
+        TORCH_CHECK(v >= 0 && v <= static_cast<int64_t>(UINT32_MAX),
+                    "argument out of range for uint32: ", v);
+        return static_cast<uint32_t>(v);
+    }
+};
+template <>
+struct Cast<uint64_t> {
+    static uint64_t go(int64_t v)
+    {
+        TORCH_CHECK(v >= 0, "argument out of range for uint64 (negative): ", v);
+        return static_cast<uint64_t>(v);
+    }
+};
+template <>
+struct Cast<uint8_t> {
+    static uint8_t go(int64_t v)
+    {
+        TORCH_CHECK(v >= 0 && v <= static_cast<int64_t>(UINT8_MAX),
+                    "argument out of range for uint8: ", v);
+        return static_cast<uint8_t>(v);
+    }
+};
+// Cast<int>/Cast<long>: signed, same width or wider than int64 — no wrap risk,
+// and EinsumMhtHtdMhd uses `int T = -1, int D = -1` sentinels, so no guard.
+template <>
+struct Cast<int> {
+    static int go(int64_t v)
+    {
+        return static_cast<int>(v);
+    }
+};
+template <>
+struct Cast<long> {
+    static long go(int64_t v)
+    {
+        return static_cast<long>(v);
+    }
+};
+template <>
+struct Cast<float> {
+    static float go(double v)
+    {
+        return static_cast<float>(v);
+    }
+};
+
+// ===========================================================================
+// Holders for public C++ classes (cannot inherit CustomClassHolder — would
+// leak torch deps into the public headers used by downstream C++ consumers).
+// ===========================================================================
+struct RuntimeHolder : torch::CustomClassHolder {
+    std::unique_ptr<XRuntime> rt;
+
+    // XRuntime ctor: (devid, sizeMB=0, rank=0, tp=1, dp=1, moeTp=1, moeEp=1)
+    RuntimeHolder(int64_t devid, double sizeMB, int64_t rank, int64_t tpSize, int64_t dpSize,
+                  int64_t moeTpSize, int64_t moeEpSize)
+    {
+        rt = std::make_unique<XRuntime>(Cast<uint32_t>::go(devid), static_cast<size_t>(sizeMB),
+                                        Cast<uint32_t>::go(rank), Cast<uint32_t>::go(tpSize),
+                                        Cast<uint32_t>::go(dpSize), Cast<uint32_t>::go(moeTpSize),
+                                        Cast<uint32_t>::go(moeEpSize));
+    }
+
+    void synchronize()
+    {
+        if (rt) {
+            rt->Synchronize();
+        }
+    }
+    void updateCoreNum(double util)
+    {
+        if (rt) {
+            rt->UpdateCoreNum(static_cast<float>(util));
+        }
+    }
+    int64_t initTensorPool(double sizeMB)
+    {
+        return rt ? static_cast<int64_t>(rt->InitTensorPool(static_cast<size_t>(sizeMB))) : -1;
+    }
+    void setCurrentContext()
+    {
+        if (rt) {
+            rt->SetCurrentContext();
+        }
+    }
+    void configureSwizzle(int64_t swizzle, bool useSwizzleTable)
+    {
+        if (rt) {
+            rt->ConfigureSwizzle(Cast<uint32_t>::go(swizzle), useSwizzleTable);
+        }
+    }
+    int64_t getTaskId() const
+    {
+        return rt ? static_cast<int64_t>(rt->taskId) : 0;
+    }
+    void setTaskId(int64_t v)
+    {
+        if (rt) {
+            rt->taskId = Cast<uint32_t>::go(v);
+        }
+    }
+    bool getMultiTaskParallel() const
+    {
+        return rt ? rt->multiTaskParallel : false;
+    }
+    void setMultiTaskParallel(bool v)
+    {
+        if (rt) {
+            rt->multiTaskParallel = v;
+        }
+    }
+    // notify/peerNotify are opaque aclrtNotify (void*) handles: notify is
+    // created in XRuntime::Init, peerNotify is only ever set from Python —
+    // MULTI_TASK_PARALLEL cross-wires them (rt0.peer_notify = rt1.notify).
+    // Expose the raw pointer value as an int64 round-trip; Python has no type
+    // that can hold the handle itself.
+    int64_t getNotify() const
+    {
+        return rt ? reinterpret_cast<int64_t>(rt->notify) : 0;
+    }
+    void setNotify(int64_t v)
+    {
+        if (rt) {
+            rt->notify = reinterpret_cast<aclrtNotify>(v);
+        }
+    }
+    int64_t getPeerNotify() const
+    {
+        return rt ? reinterpret_cast<int64_t>(rt->peerNotify) : 0;
+    }
+    void setPeerNotify(int64_t v)
+    {
+        if (rt) {
+            rt->peerNotify = reinterpret_cast<aclrtNotify>(v);
+        }
+    }
+};
+
+struct ConfigHolder : torch::CustomClassHolder {
+    XModelConfig cfg;
+
+    ConfigHolder() = default;
+};
+
+struct CoreAssignerHolder : torch::CustomClassHolder {
+    std::unique_ptr<XCoreAssigner> ca;
+    CoreAssignerHolder(double prefillRatio)
+    {
+        ca = std::make_unique<XCoreAssigner>(static_cast<float>(prefillRatio));
+    }
+    double assignCore(bool isDecode)
+    {
+        return ca ? ca->AssignCore(isDecode) : 0.0;
+    }
+    void releaseCore(bool isDecode)
+    {
+        if (ca) {
+            ca->ReleaseCore(isDecode);
+        }
+    }
+};
+
+// ===========================================================================
+// Op call bridge: call_op<&Fn>(...) adapts dispatcher-level argument types
+// (intrusive_ptr<RuntimeHolder>, int64_t, double) to the op implementations'
+// types (XRuntime&, uint32_t, float) via the OpWrap template below. The
+// opreg::op<&Fn> adapters and the three hand-written wrappers further down
+// all funnel through this.
+// ===========================================================================
+static XRuntime &_rt(c10::intrusive_ptr<RuntimeHolder> &h)
 {
-    py::class_<XRuntime>(m, "Runtime")
-        .def(py::init<uint32_t, size_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t>(),
-             py::arg("devid"), py::kw_only(), py::arg("size") = 0, py::arg("rank") = 0,
-             py::arg("tp_size") = 1, py::arg("dp_size") = 1, py::arg("moe_tp_size") = 1,
-             py::arg("moe_ep_size") = 1)
-        .def_readwrite("task_id", &XRuntime::taskId)
-        .def_readwrite("notify", &XRuntime::notify)
-        .def_readwrite("peer_notify", &XRuntime::peerNotify)
-        .def_readwrite("multi_task_parallel", &XRuntime::multiTaskParallel)
-        .def("update_core_num", &XRuntime::UpdateCoreNum, py::arg("util"))
-        .def("init_tensor_pool", &XRuntime::InitTensorPool, py::arg("size"))
-        .def("set_current_context", &XRuntime::SetCurrentContext)
-        .def("configure_swizzle", &XRuntime::ConfigureSwizzle, py::arg("swizzle"),
-             py::arg("use_swizzle_table"));
+    return *h->rt;
+}
 
-    py::class_<XModelConfig>(m, "ModelConfig")
-        .def(py::init<>())
-        .def_readwrite("vocab_size", &XModelConfig::vocabSize)
-        .def_readwrite("hidden_size", &XModelConfig::hiddenSize)
-        .def_readwrite("n_layers", &XModelConfig::nLayers)
-        .def_readwrite("attn_type", &XModelConfig::attnType)
-        .def_readwrite("n_heads", &XModelConfig::nHeads)
-        .def_readwrite("n_kv_heads", &XModelConfig::nKvHeads)
-        .def_readwrite("head_dim", &XModelConfig::headDim)
-        .def_readwrite("nope_head_dim", &XModelConfig::nopeHeadDim)
-        .def_readwrite("rope_head_dim", &XModelConfig::ropeHeadDim)
-        .def_readwrite("v_head_dim", &XModelConfig::vHeadDim)
-        .def_readwrite("q_lora_rank", &XModelConfig::qLoraRank)
-        .def_readwrite("kv_lora_rank", &XModelConfig::kvLoraRank)
-        .def_readwrite("quant_attn_weight_transpose",
-                       &XModelConfig::quantAttnWeightTrans)  // only for quantization
-        .def_readwrite("quant_attn_weight_nz",
-                       &XModelConfig::quantAttnWeightNz)  // only for quantization
-        .def_readwrite("norm_eps", &XModelConfig::normEps)
-        .def_readwrite("rope_theta", &XModelConfig::ropeTheta)
-        .def_readwrite("softmax_scale", &XModelConfig::softmaxScale)
-        .def_readwrite("n_dense_layers", &XModelConfig::nDenseLayers)
-        .def_readwrite("n_routed_experts", &XModelConfig::nRoutedExperts)
-        .def_readwrite("num_redundant_experts", &XModelConfig::numRedundantExperts)
-        .def_readwrite("n_shared_experts", &XModelConfig::nSharedExperts)
-        .def_readwrite("n_expert_groups", &XModelConfig::nExpertGroups)
-        .def_readwrite("n_limited_groups", &XModelConfig::nLimitedGroups)
-        .def_readwrite("n_act_experts", &XModelConfig::nActExperts)
-        .def_readwrite("intermediate_size", &XModelConfig::intermediateSize)
-        .def_readwrite("moe_intermediate_size", &XModelConfig::moeIntermediateSize)
-        .def_readwrite("route_scale", &XModelConfig::routeScale)
-        .def_readwrite("def_tp_size", &XModelConfig::defTpSize)
-        .def_readwrite("def_dp_size", &XModelConfig::defDpSize)
-        .def_readwrite("moe_ep_size", &XModelConfig::moeEpSize)
-        .def_readwrite("moe_tp_size", &XModelConfig::moeTPSize)
-        .def_readwrite("max_seq_len", &XModelConfig::maxSeqLen)
-        .def_readwrite("max_batch_size", &XModelConfig::maxBatch)
-        .def_readwrite("max_m", &XModelConfig::maxBatchedTokens)
-        .def_readwrite("max_num_batched_tokens", &XModelConfig::maxBatchedTokens)
-        .def_readwrite("num_spec_tokens", &XModelConfig::numSpecTokens)
-        .def_readwrite("block_size", &XModelConfig::blockSize)
-        .def_readwrite("block_sizes", &XModelConfig::blockSizes)
-        .def_readwrite("weight_nz", &XModelConfig::weightNZ)
-        .def_readwrite("experts_weight_transpose", &XModelConfig::expertsWeightTrans)
-        .def_readwrite("experts_weight_nz", &XModelConfig::expertsWeightNZ)
-        .def_readwrite("gate_captured", &XModelConfig::gateCaptured)
-        .def_readwrite("mla_wuv_weight_nz", &XModelConfig::mlaWuvWeightNZ)
-        .def_readwrite("mla_wukt_weight_nz", &XModelConfig::mlaWuktWeightNZ)
-        .def_readwrite("qkv_bias", &XModelConfig::addBias)
-        .def_readwrite("qk_norm", &XModelConfig::qkNorm)
-        .def_readwrite("qk_norm_full", &XModelConfig::qkNormFull)
-        .def_readwrite("attn_output_gate", &XModelConfig::attnOutputGate)
-        .def_readwrite("scoring_func", &XModelConfig::scoringFunc)
-        .def_readwrite("norm_topk_prob", &XModelConfig::normTopKProb)
-        .def_readwrite("mrope_section", &XModelConfig::mropeSection)
-        .def_readwrite("mrope_interleaved", &XModelConfig::mropeInterleaved)
-        .def_readwrite("deepstack_num_level", &XModelConfig::deepstackNumLevel)
-        .def_readwrite("index_head_dim", &XModelConfig::indexHeadDim)
-        .def_readwrite("index_n_heads", &XModelConfig::indexNHeads)
-        .def_readwrite("index_topk", &XModelConfig::indexTopK)
-        .def_readwrite("index_softmax_scale", &XModelConfig::indexSoftmaxScale)
-        .def_readwrite("index_rope_interleaved", &XModelConfig::indexRopeInterleaved)
-        .def_readwrite("index_full_mask", &XModelConfig::indexFullMask)
-        .def_readwrite("index_c8_mask", &XModelConfig::indexC8Mask)
-        .def_readwrite("enable_dsa_cp", &XModelConfig::enableDsaCp)
-        .def_readwrite("linear_num_k_heads", &XModelConfig::linearNumKHeads)
-        .def_readwrite("linear_num_v_heads", &XModelConfig::linearNumVHeads)
-        .def_readwrite("linear_key_head_dim", &XModelConfig::linearKeyHeadDim)
-        .def_readwrite("linear_value_head_dim", &XModelConfig::linearValueHeadDim)
-        .def_readwrite("linear_conv_kernel_dim", &XModelConfig::linearConvKernelDim)
-        .def_readwrite("full_attention_interval", &XModelConfig::fullAttentionInterval)
-        .def_readwrite("o_groups", &XModelConfig::oGroups)
-        .def_readwrite("o_lora_rank", &XModelConfig::oLoraRank)
-        .def_readwrite("window_size", &XModelConfig::windowSize)
-        .def_readwrite("compress_rope_theta", &XModelConfig::compressRopeTheta)
-        .def_readwrite("original_seq_len", &XModelConfig::originalSeqLen)
-        .def_readwrite("rope_factor", &XModelConfig::ropeFactor)
-        .def_readwrite("beta_fast", &XModelConfig::betaFast)
-        .def_readwrite("beta_slow", &XModelConfig::betaSlow)
-        .def_readwrite("hc_mult", &XModelConfig::hcMult)
-        .def_readwrite("hc_sinkhorn_iters", &XModelConfig::hcSinkhornIters)
-        .def_readwrite("hc_eps", &XModelConfig::hcEps)
-        .def_readwrite("swiglu_limit", &XModelConfig::swigluLimit)
-        .def_readwrite("n_hash_layers", &XModelConfig::nHashLayers)
-        .def_readwrite("compress_ratios", &XModelConfig::compressRatios)
-        .def_readwrite("aux_layer_ids", &XModelConfig::auxLayerIds);
+// FnTraits: extract return type and arg-type tuple from a function pointer.
+template <typename T>
+struct FnTraits;
+template <typename R, typename... Args>
+struct FnTraits<R (*)(Args...)> {
+    using Ret = R;
+    using ArgsTup = std::tuple<Args...>;
+    static constexpr size_t N = sizeof...(Args);
+};
 
-    py::class_<CModelAttnMeta>(m, "AttnMeta")
-        .def(py::init<>())
-        .def_readwrite("lens", &CModelAttnMeta::lens)
-        .def_readwrite("cached_lens", &CModelAttnMeta::cachedLens)
-        .def_readwrite("block_tables_cpu", &CModelAttnMeta::blockTablesList)
-        .def_readwrite("positions", &CModelAttnMeta::positions);
+// Cast specializations depending on RuntimeHolder/_rt (defined above);
+// scalar specializations live earlier, before the holders.
+template <>
+struct Cast<XRuntime &> {
+    static XRuntime &go(c10::intrusive_ptr<RuntimeHolder> h)
+    {
+        return _rt(h);
+    }
+};
+template <>
+struct Cast<const char *> {
+    static const char *go(const std::string &v)
+    {
+        return v.c_str();
+    }
+};
 
-    py::class_<CModelAttnMetaV2>(m, "AttnMetaV2")
-        .def(py::init<>())
-        .def_readwrite("lens", &CModelAttnMetaV2::lens)
-        .def_readwrite("cached_lens", &CModelAttnMetaV2::cachedLens)
-        .def_readwrite("positions", &CModelAttnMetaV2::positions)
-        .def_readwrite("lens_cpu", &CModelAttnMetaV2::lensCpu)
-        .def_readwrite("cached_lens_cpu", &CModelAttnMetaV2::cachedLensCpu)
-        .def_readwrite("query_start_loc", &CModelAttnMetaV2::queryStartLoc)
-        .def_readwrite("slot_mapping", &CModelAttnMetaV2::slotMapping)
-        .def_readwrite("block_tables", &CModelAttnMetaV2::blockTables)
-        .def_readwrite("block_tables_seq_mapping", &CModelAttnMetaV2::blockTablesSeqMapping)
-        .def_readwrite("block_tables_per_layer", &CModelAttnMetaV2::blockTablesPerLayer)
-        .def_readwrite("slot_mapping_per_layer", &CModelAttnMetaV2::slotMappingPerLayer);
+// RetCast<Src, Dst>: convert an op's return value to the dispatcher return type.
+template <typename Src, typename Dst>
+struct RetCast {
+    static Dst go(Src v)
+    {
+        return static_cast<Dst>(std::move(v));
+    }
+};
 
-    py::enum_<XModelAttnType>(m, "AttnType")
-        .value("AttnMHA", XModelAttnType::XMODEL_ATTN_MHA)
-        .value("AttnMLA", XModelAttnType::XMODEL_ATTN_MLA)
-        .value("AttnDSA", XModelAttnType::XMODEL_ATTN_DSA)
-        .value("AttnHybridGdn", XModelAttnType::XMODEL_ATTN_HYBRID_GDN)
-        .value("AttnHybridKda", XModelAttnType::XMODEL_ATTN_HYBRID_KDA)
-        .value("AttnCxA", XModelAttnType::XMODEL_ATTN_CXA)
-        .export_values();
+// OpWrap<Fn, Idx, DRet>::run(args...) forwards dispatcher args to Fn, casting
+// each arg via Cast<Fn's arg type>::go, and casts the return via RetCast. Dst
+// arg types and Src arg types are both deduced (Dst from &Fn, Src from args),
+// so call sites need no explicit type list.
+template <auto Fn, typename Idx, typename DRet>
+struct OpWrap;
+template <auto Fn, size_t... I, typename DRet>
+struct OpWrap<Fn, std::index_sequence<I...>, DRet> {
+    using FT = FnTraits<decltype(Fn)>;
+    using Dst = typename FT::ArgsTup;
+    static_assert(sizeof...(I) == FT::N, "OpWrap arg count mismatch");
+    template <typename... A>
+    static auto run(A &&...a) -> DRet
+    {
+        auto t = std::forward_as_tuple(std::forward<A>(a)...);
+        if constexpr (std::is_void_v<typename FT::Ret>) {
+            Fn(Cast<std::tuple_element_t<I, Dst>>::go(std::get<I>(t))...);
+        } else {
+            return RetCast<typename FT::Ret, DRet>::go(
+                Fn(Cast<std::tuple_element_t<I, Dst>>::go(std::get<I>(t))...));
+        }
+    }
+};
 
-    py::enum_<XModelScoringFuncType>(m, "ScoringFuncType")
-        .value("ScoringFuncSoftmax", XModelScoringFuncType::XMODEL_SCORING_FUNC_SOFTMAX)
-        .value("ScoringFuncSigmoid", XModelScoringFuncType::XMODEL_SCORING_FUNC_SIGMOID)
-        .value("ScoringFuncSqrtsoftplus", XModelScoringFuncType::XMODEL_SCORING_FUNC_SQRTSOFTPLUS)
-        .export_values();
+// call_op<Fn, DRet>(args...): convenience wrapper that forwards to OpWrap.
+// DRet defaults to the op's own return type; pass int64_t for ops whose
+// uint32_t/uint64_t return must be widened for the dispatcher.
+template <auto Fn, typename DRet = typename FnTraits<decltype(Fn)>::Ret, typename... A>
+auto call_op(A &&...a) -> DRet
+{
+    return OpWrap<Fn, std::make_index_sequence<FnTraits<decltype(Fn)>::N>, DRet>::run(
+        std::forward<A>(a)...);
+}
 
-    py::class_<_CModel>(m, "Model")
-        .def(py::init<>())
+// Hand-written wrappers for the three ops whose argument prep goes beyond
+// call_op's cast layer: muls remaps the calcNum sentinel (INT64_MAX ->
+// UINT32_MAX), split narrows vector<int64_t> to the vector<uint32_t> that
+// Split mutates in place, and get_tile_size_of_cached_kv narrows int64 lists
+// to the host uint32 vectors GetTileSizeOfCachedKV takes. All other ops
+// register via op<&Fn>.
+static void muls_op(c10::intrusive_ptr<RuntimeHolder> rt, at::Tensor input, double scale,
+                    at::Tensor output, int64_t calcOffset, int64_t calcNum)
+{
+    // The C++ side takes uint32_t; pybind11 rejected out-of-range values at the
+    // boundary, so guard the narrowing here instead of wrapping silently.
+    // INT64_MAX stays valid as the "all elements" sentinel mapped below.
+    TORCH_CHECK(calcOffset >= 0, "muls: calc_offset must be non-negative, got ", calcOffset);
+    TORCH_CHECK(calcNum >= 0 && (calcNum <= static_cast<int64_t>(UINT32_MAX) ||
+                                 calcNum == std::numeric_limits<int64_t>::max()),
+                "muls: calc_num out of range for uint32, got ", calcNum);
+    Muls(_rt(rt), input, static_cast<float>(scale), output, static_cast<uint32_t>(calcOffset),
+         static_cast<uint32_t>(calcNum == std::numeric_limits<int64_t>::max()
+                                   ? UINT32_MAX
+                                   : static_cast<uint64_t>(calcNum)));
+}
+static void split_op(c10::intrusive_ptr<RuntimeHolder> rt, at::Tensor in_,
+                     std::vector<at::Tensor> outputs, const std::vector<int64_t> &sizes,
+                     int64_t numPackets)
+{
+    // Split takes std::vector<uint32_t>& (lvalue ref, mutated in place); the
+    // dispatcher passes std::vector<int64_t>, so build the narrowed vector here.
+    // Guard the narrowing: pybind11 rejected out-of-range values at the
+    // boundary instead of wrapping silently.
+    std::vector<uint32_t> sizes32;
+    sizes32.reserve(sizes.size());
+    for (auto s : sizes) {
+        TORCH_CHECK(s >= 0 && s <= static_cast<int64_t>(UINT32_MAX),
+                    "split: sizes element out of range for uint32, got ", s);
+        sizes32.push_back(static_cast<uint32_t>(s));
+    }
+    TORCH_CHECK(numPackets >= 0 && numPackets <= static_cast<int64_t>(UINT32_MAX),
+                "split: num_packets out of range for uint32, got ", numPackets);
+    Split(_rt(rt), in_, outputs, sizes32, static_cast<uint32_t>(numPackets));
+}
+static int64_t get_tile_size_of_cached_kv_op(const std::vector<int64_t> &cachedLens,
+                                             const std::vector<int64_t> &queryLens,
+                                             int64_t headNumInGroup, int64_t nKVHeads,
+                                             int64_t blockSize, int64_t aicNum)
+{
+    // GetTileSizeOfCachedKV takes host uint32 vectors; narrow the int64 lists
+    // the Python side passes (pybind11 accepted List[int] directly; torch's
+    // dispatcher passes std::vector<int64_t>). Guard the narrowing like
+    // split_op — pybind11 rejected out-of-range values at the boundary.
+    std::vector<uint32_t> cl, ql;
+    cl.reserve(cachedLens.size());
+    ql.reserve(queryLens.size());
+    for (auto v : cachedLens) {
+        TORCH_CHECK(v >= 0 && v <= static_cast<int64_t>(UINT32_MAX),
+                    "get_tile_size_of_cached_kv: cached_lens element out of range for uint32, got ",
+                    v);
+        cl.push_back(static_cast<uint32_t>(v));
+    }
+    for (auto v : queryLens) {
+        TORCH_CHECK(v >= 0 && v <= static_cast<int64_t>(UINT32_MAX),
+                    "get_tile_size_of_cached_kv: query_lens element out of range for uint32, got ",
+                    v);
+        ql.push_back(static_cast<uint32_t>(v));
+    }
+    return static_cast<int64_t>(GetTileSizeOfCachedKV(
+        cl, ql, Cast<uint32_t>::go(headNumInGroup), Cast<uint32_t>::go(nKVHeads),
+        Cast<uint32_t>::go(blockSize), Cast<uint32_t>::go(aicNum)));
+}
+
+// ===========================================================================
+// Model.forward method adapters (torch::class_ has no overloading — each
+// distinct signature gets its own method; the primary V1 variant keeps the
+// plain `forward` name, the others carry suffixes).
+// ===========================================================================
+// forward (V1, no aux): rt, input, attnMeta, kvCache, freqsCis, output, currStream
+static void model_forward_v1(const c10::intrusive_ptr<_CModel> &self,
+                             const c10::intrusive_ptr<RuntimeHolder> &rt, at::Tensor input,
+                             const c10::intrusive_ptr<CModelAttnMeta> &attnMeta,
+                             std::vector<std::vector<at::Tensor>> kvCache, at::Tensor freqsCis,
+                             at::Tensor output,
+                             const std::optional<std::vector<at::Tensor>> &auxOutputs,
+                             int64_t currStream)
+{
+    // An omitted or empty aux list means "no capture"; the aux-taking ForwardV1
+    // overload handles it the same way as the no-aux overload (Set/Clear on an
+    // empty vector is a no-op).
+    std::vector<at::Tensor> aux = auxOutputs.value_or(std::vector<at::Tensor>{});
+    self->ForwardV1(*rt->rt, input, *attnMeta, kvCache, freqsCis, output, aux,
+                    static_cast<uint64_t>(currStream));
+}
+static void model_forward_get_logits(const c10::intrusive_ptr<_CModel> &self,
+                                     const c10::intrusive_ptr<RuntimeHolder> &rt, at::Tensor input,
+                                     at::Tensor indices, at::Tensor output, int64_t currStream)
+{
+    self->ForwardGetLogits(*rt->rt, input, indices, output, static_cast<uint64_t>(currStream));
+}
+static void model_forward_and_get_logits(const c10::intrusive_ptr<_CModel> &self,
+                                         const c10::intrusive_ptr<RuntimeHolder> &rt,
+                                         at::Tensor input,
+                                         const c10::intrusive_ptr<CModelAttnMeta> &attnMeta,
+                                         std::vector<std::vector<at::Tensor>> kvCache,
+                                         at::Tensor freqsCis, at::Tensor indices, at::Tensor output,
+                                         int64_t currStream)
+{
+    self->ForwardAndGetLogitsV1(*rt->rt, input, *attnMeta, kvCache, freqsCis, indices, output,
+                                static_cast<uint64_t>(currStream));
+}
+static void model_forward_with_inputs_embeds_v1(
+    const c10::intrusive_ptr<_CModel> &self, const c10::intrusive_ptr<RuntimeHolder> &rt,
+    at::Tensor input, const c10::intrusive_ptr<CModelAttnMeta> &attnMeta,
+    std::vector<std::vector<at::Tensor>> kvCache, at::Tensor freqsCis, at::Tensor output,
+    const std::optional<std::vector<at::Tensor>> &auxOutputs, int64_t currStream,
+    std::vector<at::Tensor> deepstackInput, const std::optional<at::Tensor> &inputIds)
+{
+    std::vector<at::Tensor> aux = auxOutputs.value_or(std::vector<at::Tensor>{});
+    self->ForwardWithInputsEmbedsV1(*rt->rt, input, *attnMeta, kvCache, freqsCis, output, aux,
+                                    static_cast<uint64_t>(currStream), deepstackInput,
+                                    inputIds.value_or(at::Tensor()));
+}
+static void model_forward_v2(const c10::intrusive_ptr<_CModel> &self,
+                             const c10::intrusive_ptr<RuntimeHolder> &rt, at::Tensor input,
+                             const c10::intrusive_ptr<CModelAttnMetaV2> &attnMeta,
+                             std::vector<std::vector<at::Tensor>> kvCache,
+                             std::vector<at::Tensor> freqsCis, at::Tensor output,
+                             const std::optional<std::vector<at::Tensor>> &auxOutputs,
+                             int64_t currStream)
+{
+    std::vector<at::Tensor> aux = auxOutputs.value_or(std::vector<at::Tensor>{});
+    self->ForwardV2(*rt->rt, input, *attnMeta, kvCache, freqsCis, output, aux,
+                    static_cast<uint64_t>(currStream));
+}
+static void model_forward_and_get_logits_v2(const c10::intrusive_ptr<_CModel> &self,
+                                            const c10::intrusive_ptr<RuntimeHolder> &rt,
+                                            at::Tensor input,
+                                            const c10::intrusive_ptr<CModelAttnMetaV2> &attnMeta,
+                                            std::vector<std::vector<at::Tensor>> kvCache,
+                                            std::vector<at::Tensor> freqsCis, at::Tensor indices,
+                                            at::Tensor output, int64_t currStream)
+{
+    self->ForwardAndGetLogitsV2(*rt->rt, input, *attnMeta, kvCache, freqsCis, indices, output,
+                                static_cast<uint64_t>(currStream));
+}
+static void model_forward_with_inputs_embeds_v2(
+    const c10::intrusive_ptr<_CModel> &self, const c10::intrusive_ptr<RuntimeHolder> &rt,
+    at::Tensor input, const c10::intrusive_ptr<CModelAttnMetaV2> &attnMeta,
+    std::vector<std::vector<at::Tensor>> kvCache, at::Tensor freqsCis, at::Tensor output,
+    const std::optional<std::vector<at::Tensor>> &auxOutputs, int64_t currStream,
+    std::vector<at::Tensor> deepstackInput, const std::optional<at::Tensor> &inputIds)
+{
+    std::vector<at::Tensor> aux = auxOutputs.value_or(std::vector<at::Tensor>{});
+    self->ForwardWithInputsEmbedsV2(*rt->rt, input, *attnMeta, kvCache, freqsCis, output, aux,
+                                    static_cast<uint64_t>(currStream), deepstackInput,
+                                    inputIds.value_or(at::Tensor()));
+}
+static void model_init(const c10::intrusive_ptr<_CModel> &self,
+                       const c10::intrusive_ptr<ConfigHolder> &config, int64_t rank)
+{
+    self->Init(config->cfg, Cast<uint32_t>::go(rank));
+}
+static int64_t model_get_tensor_pool_size(const c10::intrusive_ptr<_CModel> &self, int64_t dbg)
+{
+    return static_cast<int64_t>(self->GetTensorPoolSize(static_cast<int>(dbg)));
+}
+
+// ===========================================================================
+// Class registration
+// ===========================================================================
+// Op registration in the TORCH_LIBRARY(xlite_sabi, m) block below.
+// opreg::OpDefs(m).def(name, fn, args...) mirrors torch::class_::def's
+// initializer_list<torch::arg> API: argument types and returns are inferred
+// from the registered function's C++ signature, while the optional torch::arg
+// entries supply the two things a signature cannot express — argument names
+// (auto-inferred schemas name them positionally _0, _1, ...) and default
+// values. Types therefore cannot drift from the implementation. The schema is
+// unqualified; the library namespace xlite_sabi is prepended automatically.
+// Leave the arg list out for positional-only ops.
+namespace opreg
+{
+
+// Builds the registration schema: infers types/returns from the registered
+// function's C++ signature, then applies argument names and defaults from the
+// torch::arg list (the mechanism torch::class_::def uses internally via
+// class_base::withNewArguments). std::optional<T> parameters already infer as
+// `T?`, so None defaults need no type annotation. Return names are dropped
+// (canonical unnamed form, as in hand-written schemas). The arity check
+// doubles as a drift guard: changing the function signature without updating
+// the torch::arg list fails at library load with a clear message instead of
+// registering a mismatched schema.
+template <typename FuncType>
+std::string makeSchema(const char *name, const std::vector<torch::arg> &args)
+{
+    auto inferred = c10::inferFunctionSchemaFlattenedReturns<FuncType>();
+    const auto &oldArgs = inferred.arguments();
+    std::vector<torch::arg> all = args;
+    if (all.empty()) {
+        for (const auto &a : oldArgs) {
+            all.push_back(torch::arg(a.name()));
+        }
+    }
+    TORCH_CHECK(all.size() == oldArgs.size(), name, ": got ", all.size(), " torch::arg entries",
+                " for ", oldArgs.size(), " C++ parameters; keep the torch::arg list in sync with",
+                " the registered function signature");
+    std::vector<c10::Argument> patched;
+    patched.reserve(oldArgs.size());
+    bool seen_default = false;
+    for (size_t i = 0; i < oldArgs.size(); ++i) {
+        // Torch schemas require non-defaulted arguments to precede defaulted
+        // ones (FunctionSchema::checkSchema), but the C++ signatures ported
+        // from pybind11 interleave them (e.g. compressor's required
+        // weighted_sum follows the optional ape/norm/freqs). Keep such
+        // signatures loadable by marking every non-defaulted argument after
+        // the first defaulted one keyword-only — the same exemption
+        // checkSchema gives list-typed arguments. Call sites must pass those
+        // by keyword, which the .pyi stubs document with a `*` marker.
+        const bool defaulted = all[i].value_.has_value();
+        const bool kwonly =
+            seen_default && !defaulted && oldArgs[i].type()->kind() != c10::ListType::Kind;
+        seen_default = seen_default || defaulted;
+        patched.emplace_back(all[i].name_, oldArgs[i].type(), oldArgs[i].N(), all[i].value_,
+                             kwonly || oldArgs[i].kwarg_only());
+    }
+    std::vector<c10::Argument> returns;
+    returns.reserve(inferred.returns().size());
+    for (const auto &r : inferred.returns()) {
+        returns.emplace_back("", r.type(), r.N(), std::nullopt, r.kwarg_only());
+    }
+    c10::FunctionSchema schema(name, "", std::move(patched), std::move(returns),
+                               inferred.is_vararg(), inferred.is_varret());
+    return c10::toString(schema);
+}
+
+// Chainable op registration over torch::Library, giving TORCH_LIBRARY blocks
+// the same .def(name, fn, {torch::arg(...) ...}) shape as torch::class_.
+class OpDefs
+{
+public:
+    explicit OpDefs(torch::Library &m) : m_(m)
+    {
+    }
+
+    template <typename FuncType>
+    OpDefs &def(const char *name, FuncType fn, const std::vector<torch::arg> &args = {})
+    {
+        m_.def(makeSchema<FuncType>(name, args).c_str(), fn);
+        return *this;
+    }
+
+private:
+    // Single-use registration builder chained through *this; never copied or
+    // assigned, so the reference member's disabled copy semantics are moot.
+    torch::Library &m_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
+};
+
+// IValue-side type for an op implementation parameter: the dispatcher only
+// carries int64_t/double/bool/std::string/at::Tensor/custom classes, so
+// narrow types widen to their dispatcher forms — the same mapping the
+// hand-written _op wrappers used to encode. Types the dispatcher can
+// represent (at::Tensor, bool, std::string, std::optional/std::vector of
+// tensors) pass through unchanged.
+template <typename T>
+struct IValueArg {
+    using D = std::remove_cv_t<std::remove_reference_t<T>>;
+    using type = std::conditional_t<
+        std::is_same_v<D, XRuntime>, c10::intrusive_ptr<RuntimeHolder>,
+        std::conditional_t<
+            std::is_same_v<D, const char *>, std::string,
+            std::conditional_t<std::is_same_v<D, float>, double,
+                               std::conditional_t<(std::is_integral_v<D> || std::is_enum_v<D>) &&
+                                                      !std::is_same_v<D, bool>,
+                                                  int64_t, D>>>>;
+};
+
+// IValue-side type for an op implementation return value (same mapping).
+template <typename T>
+struct IValueRet {
+    using D = std::remove_cv_t<std::remove_reference_t<T>>;
+    using type = std::conditional_t<
+        std::is_same_v<D, const char *>, std::string,
+        std::conditional_t<std::is_same_v<D, float>, double,
+                           std::conditional_t<(std::is_integral_v<D> || std::is_enum_v<D>) &&
+                                                  !std::is_same_v<D, bool>,
+                                              int64_t, D>>>;
+};
+
+// op<&Fn> replaces the hand-written xxx_op wrapper functions: a functor whose
+// operator() carries the IValue-mapped signature of Fn (so schema inference
+// yields the same schema the wrappers used to provide), forwarding through
+// call_op, which narrows each argument back to Fn's types.
+template <auto Fn, typename ArgsTup>
+class OpAdapterT;
+template <auto Fn, typename... Params>
+class OpAdapterT<Fn, std::tuple<Params...>>
+{
+public:
+    typename IValueRet<typename FnTraits<decltype(Fn)>::Ret>::type operator()(
+        typename IValueArg<Params>::type... args) const
+    {
+        using Ret = typename IValueRet<typename FnTraits<decltype(Fn)>::Ret>::type;
+        return call_op<Fn, Ret>(args...);
+    }
+};
+template <auto Fn>
+using OpAdapter = OpAdapterT<Fn, typename FnTraits<decltype(Fn)>::ArgsTup>;
+
+template <auto Fn>
+inline constexpr OpAdapter<Fn> op{};
+
+// Decomposes a pointer-to-data-member `T C::*` into Class=C, Field=T.
+template <typename M>
+struct MemberPtrTraits;
+template <typename C, typename T>
+struct MemberPtrTraits<T C::*> {
+    using Class = C;
+    using Field = T;
+};
+
+// A def_rw-bound field lives either directly on the holder (AttnMeta/
+// AttnMetaV2) or inside ConfigHolder::cfg; the member pointer's class says
+// which.
+template <typename Holder, typename C, typename T>
+static T &fieldRef(const c10::intrusive_ptr<Holder> &h, T C::*field)
+{
+    if constexpr (std::is_same_v<C, Holder>) {
+        return (*h).*field;
+    } else {
+        static_assert(std::is_same_v<C, XModelConfig>,
+                      "def_rw fields must live on the holder or in ConfigHolder::cfg");
+        return h->cfg.*field;
+    }
+}
+
+// IValue-side type for a property field: the dispatcher only carries
+// int64_t/double/bool/std::string/at::Tensor and lists of those, so other
+// field types convert at the boundary —
+//   vector<uint32_t>/vector<bool>   <-> ListInt (std::vector<int64_t>)
+//   vector<vector<uint32_t>>        <-> ListListInt (per-row conversion)
+//   float                           <-> double
+//   bool                            <-> bool  (before the integral branch)
+//   integral/enum                   <-> int64_t
+// Anything else passes through and must be dispatcher-native (at::Tensor,
+// std::optional<at::Tensor>, std::vector<at::Tensor>, ...); a type IValue
+// cannot hold fails to compile at the def_rw site.
+template <typename T>
+struct IValueField {
+    using type = std::conditional_t<
+        std::is_same_v<T, std::vector<uint32_t>> || std::is_same_v<T, std::vector<bool>>,
+        std::vector<int64_t>,
+        std::conditional_t<
+            std::is_same_v<T, std::vector<std::vector<uint32_t>>>,
+            std::vector<std::vector<int64_t>>,
+            std::conditional_t<
+                std::is_same_v<T, float>, double,
+                std::conditional_t<
+                    std::is_same_v<T, bool>, bool,
+                    std::conditional_t<std::is_integral_v<T> || std::is_enum_v<T>, int64_t, T>>>>>;
+};
+
+// Getter/setter for one field. Unlike op<&Fn> (compile-time function pointer
+// as template argument), these capture a runtime pointer-to-member in the
+// returned lambda — the same stateful-functor pattern torch's own
+// class_::def_readwrite uses — which is what lets def_rw take &Class::field
+// instead of a macro token. One instantiation per field type, so all
+// properties of the same type share the functor code.
+template <typename Holder, typename C, typename T>
+static auto propGetter(T C::*field)
+{
+    using D = typename IValueField<T>::type;
+    return [field](const c10::intrusive_ptr<Holder> &h) -> D {
+        auto &f = fieldRef(h, field);
+        if constexpr (std::is_same_v<D, std::vector<int64_t>>) {
+            std::vector<int64_t> o;
+            o.reserve(f.size());
+            for (auto v : f) {
+                o.push_back(static_cast<int64_t>(v));
+            }
+            return o;
+        } else if constexpr (std::is_same_v<D, std::vector<std::vector<int64_t>>>) {
+            std::vector<std::vector<int64_t>> o;
+            for (auto &r : f) {
+                std::vector<int64_t> row;
+                row.reserve(r.size());
+                for (auto v : r) {
+                    row.push_back(static_cast<int64_t>(v));
+                }
+                o.push_back(std::move(row));
+            }
+            return o;
+        } else {
+            return static_cast<D>(f);
+        }
+    };
+}
+
+template <typename Holder, typename C, typename T>
+static auto propSetter(T C::*field)
+{
+    using D = typename IValueField<T>::type;
+    return [field](const c10::intrusive_ptr<Holder> &h, const D &v) {
+        auto &f = fieldRef(h, field);
+        // The list/unsigned narrowings below used to be rejected by pybind11's
+        // int->uint32 casters; guard them so out-of-range values fail loudly
+        // instead of wrapping. vector<bool> keeps Python truthiness semantics.
+        if constexpr (std::is_same_v<D, std::vector<int64_t>>) {
+            f.clear();
+            for (auto x : v) {
+                if constexpr (std::is_same_v<typename T::value_type, uint32_t>) {
+                    TORCH_CHECK(x >= 0 && x <= static_cast<int64_t>(UINT32_MAX),
+                                "uint32 list element out of range: ", x);
+                }
+                f.push_back(static_cast<typename T::value_type>(x));
+            }
+        } else if constexpr (std::is_same_v<D, std::vector<std::vector<int64_t>>>) {
+            f.clear();
+            for (auto &r : v) {
+                std::vector<typename T::value_type::value_type> row;
+                for (auto x : r) {
+                    TORCH_CHECK(x >= 0 && x <= static_cast<int64_t>(UINT32_MAX),
+                                "uint32 list element out of range: ", x);
+                    row.push_back(static_cast<typename T::value_type::value_type>(x));
+                }
+                f.push_back(std::move(row));
+            }
+        } else {
+            if constexpr (std::is_integral_v<T> && !std::is_signed_v<T> &&
+                          !std::is_same_v<T, bool>) {
+                TORCH_CHECK(v >= 0 && static_cast<uint64_t>(v) <=
+                                          static_cast<uint64_t>(std::numeric_limits<T>::max()),
+                            "value out of range for unsigned field: ", v);
+            }
+            f = static_cast<T>(v);
+        }
+    };
+}
+
+// Chainable property registration, giving custom-class blocks the same
+// .def_rw("name", &Class::field) shape as torch::class_::def_readwrite.
+// def_readwrite only covers IValue-native field types; def_rw routes the
+// numeric/list conversions above. The bound field may live on the holder
+// itself or in ConfigHolder::cfg.
+template <typename Holder>
+class Props
+{
+public:
+    explicit Props(torch::class_<Holder> &c) : c_(c)
+    {
+    }
+
+    template <typename C, typename T>
+    Props &def_rw(const char *name, T C::*field)
+    {
+        c_.def_property(name, propGetter<Holder>(field), propSetter<Holder>(field));
+        return *this;
+    }
+
+private:
+    // Single-use registration builder chained through *this; never copied or
+    // assigned, so the reference member's disabled copy semantics are moot.
+    torch::class_<Holder> &c_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
+};
+
+}  // namespace opreg
+
+TORCH_LIBRARY(xlite_sabi, m)
+{
+    m.class_<RuntimeHolder>("Runtime")
+        .def(torch::init<int64_t, double, int64_t, int64_t, int64_t, int64_t, int64_t>(), "",
+             {torch::arg("devid"), torch::arg("size") = 0.0, torch::arg("rank") = 0,
+              torch::arg("tp_size") = 1, torch::arg("dp_size") = 1, torch::arg("moe_tp_size") = 1,
+              torch::arg("moe_ep_size") = 1})
+        .def("synchronize", &RuntimeHolder::synchronize)
+        .def("update_core_num", &RuntimeHolder::updateCoreNum, "", {torch::arg("util")})
+        .def("init_tensor_pool", &RuntimeHolder::initTensorPool, "", {torch::arg("size")})
+        .def("set_current_context", &RuntimeHolder::setCurrentContext)
+        .def("configure_swizzle", &RuntimeHolder::configureSwizzle, "",
+             {torch::arg("swizzle"), torch::arg("use_swizzle_table")})
+        .def_property("task_id", &RuntimeHolder::getTaskId, &RuntimeHolder::setTaskId)
+        .def_property("multi_task_parallel", &RuntimeHolder::getMultiTaskParallel,
+                      &RuntimeHolder::setMultiTaskParallel)
+        .def_property("notify", &RuntimeHolder::getNotify, &RuntimeHolder::setNotify)
+        .def_property("peer_notify", &RuntimeHolder::getPeerNotify, &RuntimeHolder::setPeerNotify);
+
+    // Fields live in ConfigHolder::cfg; def_rw resolves that from the member
+    // pointer's class and converts non-IValue field types at the boundary.
+    opreg::Props(m.class_<ConfigHolder>("ModelConfig").def(torch::init<>()))
+        .def_rw("vocab_size", &XModelConfig::vocabSize)
+        .def_rw("hidden_size", &XModelConfig::hiddenSize)
+        .def_rw("n_layers", &XModelConfig::nLayers)
+        .def_rw("attn_type", &XModelConfig::attnType)
+        .def_rw("n_heads", &XModelConfig::nHeads)
+        .def_rw("n_kv_heads", &XModelConfig::nKvHeads)
+        .def_rw("head_dim", &XModelConfig::headDim)
+        .def_rw("nope_head_dim", &XModelConfig::nopeHeadDim)
+        .def_rw("rope_head_dim", &XModelConfig::ropeHeadDim)
+        .def_rw("v_head_dim", &XModelConfig::vHeadDim)
+        .def_rw("q_lora_rank", &XModelConfig::qLoraRank)
+        .def_rw("kv_lora_rank", &XModelConfig::kvLoraRank)
+        .def_rw("quant_attn_weight_transpose", &XModelConfig::quantAttnWeightTrans)
+        .def_rw("quant_attn_weight_nz", &XModelConfig::quantAttnWeightNz)
+        .def_rw("norm_eps", &XModelConfig::normEps)
+        .def_rw("rope_theta", &XModelConfig::ropeTheta)
+        .def_rw("softmax_scale", &XModelConfig::softmaxScale)
+        .def_rw("n_dense_layers", &XModelConfig::nDenseLayers)
+        .def_rw("n_routed_experts", &XModelConfig::nRoutedExperts)
+        .def_rw("num_redundant_experts", &XModelConfig::numRedundantExperts)
+        .def_rw("n_shared_experts", &XModelConfig::nSharedExperts)
+        .def_rw("n_expert_groups", &XModelConfig::nExpertGroups)
+        .def_rw("n_limited_groups", &XModelConfig::nLimitedGroups)
+        .def_rw("n_act_experts", &XModelConfig::nActExperts)
+        .def_rw("intermediate_size", &XModelConfig::intermediateSize)
+        .def_rw("moe_intermediate_size", &XModelConfig::moeIntermediateSize)
+        .def_rw("route_scale", &XModelConfig::routeScale)
+        .def_rw("def_tp_size", &XModelConfig::defTpSize)
+        .def_rw("def_dp_size", &XModelConfig::defDpSize)
+        .def_rw("moe_ep_size", &XModelConfig::moeEpSize)
+        .def_rw("moe_tp_size", &XModelConfig::moeTPSize)
+        .def_rw("max_seq_len", &XModelConfig::maxSeqLen)
+        .def_rw("max_batch_size", &XModelConfig::maxBatch)
+        .def_rw("max_m", &XModelConfig::maxBatchedTokens)
+        .def_rw("max_num_batched_tokens", &XModelConfig::maxBatchedTokens)
+        .def_rw("num_spec_tokens", &XModelConfig::numSpecTokens)
+        .def_rw("block_size", &XModelConfig::blockSize)
+        .def_rw("block_sizes", &XModelConfig::blockSizes)
+        .def_rw("weight_nz", &XModelConfig::weightNZ)
+        .def_rw("experts_weight_transpose", &XModelConfig::expertsWeightTrans)
+        .def_rw("experts_weight_nz", &XModelConfig::expertsWeightNZ)
+        .def_rw("gate_captured", &XModelConfig::gateCaptured)
+        .def_rw("mla_wuv_weight_nz", &XModelConfig::mlaWuvWeightNZ)
+        .def_rw("mla_wukt_weight_nz", &XModelConfig::mlaWuktWeightNZ)
+        .def_rw("qkv_bias", &XModelConfig::addBias)
+        .def_rw("qk_norm", &XModelConfig::qkNorm)
+        .def_rw("qk_norm_full", &XModelConfig::qkNormFull)
+        .def_rw("attn_output_gate", &XModelConfig::attnOutputGate)
+        .def_rw("scoring_func", &XModelConfig::scoringFunc)
+        .def_rw("norm_topk_prob", &XModelConfig::normTopKProb)
+        .def_rw("mrope_section", &XModelConfig::mropeSection)
+        .def_rw("mrope_interleaved", &XModelConfig::mropeInterleaved)
+        .def_rw("deepstack_num_level", &XModelConfig::deepstackNumLevel)
+        .def_rw("index_head_dim", &XModelConfig::indexHeadDim)
+        .def_rw("index_n_heads", &XModelConfig::indexNHeads)
+        .def_rw("index_topk", &XModelConfig::indexTopK)
+        .def_rw("index_softmax_scale", &XModelConfig::indexSoftmaxScale)
+        .def_rw("index_rope_interleaved", &XModelConfig::indexRopeInterleaved)
+        .def_rw("index_full_mask", &XModelConfig::indexFullMask)
+        .def_rw("index_c8_mask", &XModelConfig::indexC8Mask)
+        .def_rw("enable_dsa_cp", &XModelConfig::enableDsaCp)
+        .def_rw("linear_num_k_heads", &XModelConfig::linearNumKHeads)
+        .def_rw("linear_num_v_heads", &XModelConfig::linearNumVHeads)
+        .def_rw("linear_key_head_dim", &XModelConfig::linearKeyHeadDim)
+        .def_rw("linear_value_head_dim", &XModelConfig::linearValueHeadDim)
+        .def_rw("linear_conv_kernel_dim", &XModelConfig::linearConvKernelDim)
+        .def_rw("full_attention_interval", &XModelConfig::fullAttentionInterval)
+        .def_rw("o_groups", &XModelConfig::oGroups)
+        .def_rw("o_lora_rank", &XModelConfig::oLoraRank)
+        .def_rw("window_size", &XModelConfig::windowSize)
+        .def_rw("compress_rope_theta", &XModelConfig::compressRopeTheta)
+        .def_rw("original_seq_len", &XModelConfig::originalSeqLen)
+        .def_rw("rope_factor", &XModelConfig::ropeFactor)
+        .def_rw("beta_fast", &XModelConfig::betaFast)
+        .def_rw("beta_slow", &XModelConfig::betaSlow)
+        .def_rw("hc_mult", &XModelConfig::hcMult)
+        .def_rw("hc_sinkhorn_iters", &XModelConfig::hcSinkhornIters)
+        .def_rw("hc_eps", &XModelConfig::hcEps)
+        .def_rw("swiglu_limit", &XModelConfig::swigluLimit)
+        .def_rw("n_hash_layers", &XModelConfig::nHashLayers)
+        .def_rw("compress_ratios", &XModelConfig::compressRatios)
+        .def_rw("aux_layer_ids", &XModelConfig::auxLayerIds);
+
+    opreg::Props(m.class_<CModelAttnMeta>("AttnMeta").def(torch::init<>()))
+        .def_rw("lens", &CModelAttnMeta::lens)
+        .def_rw("cached_lens", &CModelAttnMeta::cachedLens)
+        .def_rw("block_tables_cpu", &CModelAttnMeta::blockTablesList)
+        .def_rw("positions", &CModelAttnMeta::positions);
+
+    opreg::Props(m.class_<CModelAttnMetaV2>("AttnMetaV2").def(torch::init<>()))
+        .def_rw("lens", &CModelAttnMetaV2::lens)
+        .def_rw("cached_lens", &CModelAttnMetaV2::cachedLens)
+        .def_rw("positions", &CModelAttnMetaV2::positions)
+        .def_rw("lens_cpu", &CModelAttnMetaV2::lensCpu)
+        .def_rw("cached_lens_cpu", &CModelAttnMetaV2::cachedLensCpu)
+        .def_rw("query_start_loc", &CModelAttnMetaV2::queryStartLoc)
+        .def_rw("slot_mapping", &CModelAttnMetaV2::slotMapping)
+        .def_rw("block_tables", &CModelAttnMetaV2::blockTables)
+        .def_rw("block_tables_seq_mapping", &CModelAttnMetaV2::blockTablesSeqMapping)
+        .def_rw("block_tables_per_layer", &CModelAttnMetaV2::blockTablesPerLayer)
+        .def_rw("slot_mapping_per_layer", &CModelAttnMetaV2::slotMappingPerLayer);
+
+    m.class_<_CModel>("Model")
+        .def(torch::init<>())
+        // Weight tensor fields (at::Tensor / std::vector<at::Tensor>) — IValue
+        // supports these directly, so def_readwrite ports the pybind11
+        // .def_readwrite lines verbatim. Field names mirror xlite/_C.pyi.
         .def_readwrite("embed", &_CModel::embed)
         .def_readwrite("norm", &_CModel::norm)
         .def_readwrite("norm_bias", &_CModel::normBias)
@@ -3626,384 +4375,489 @@ PYBIND11_MODULE(_C, m)
         .def_readwrite("hc_head_fn", &_CModel::hcHeadFn)
         .def_readwrite("hc_head_base", &_CModel::hcHeadBase)
         .def_readwrite("hc_head_scale", &_CModel::hcHeadScale)
-        .def("init", &_CModel::Init, "model init", py::arg("config"), py::arg("rank") = 0)
-        .def("forward",
-             py::overload_cast<XRuntime &, at::Tensor &, CModelAttnMeta &,
-                               std::vector<std::vector<at::Tensor>> &, at::Tensor &, at::Tensor &,
-                               std::vector<at::Tensor> &, uint64_t>(&_CModel::ForwardV1),
-             "forward", py::kw_only(), py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
-             py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"), py::arg("aux_outputs"),
-             py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
-        .def("forward",
-             py::overload_cast<XRuntime &, at::Tensor &, CModelAttnMeta &,
-                               std::vector<std::vector<at::Tensor>> &, at::Tensor &, at::Tensor &,
-                               uint64_t>(&_CModel::ForwardV1),
-             "forward", py::kw_only(), py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
-             py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
-             py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
-        .def("forward_get_logits", &_CModel::ForwardGetLogits, "forward_get_logits", py::kw_only(),
-             py::arg("rt"), py::arg("input"), py::arg("indices"), py::arg("output"),
-             py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
-        .def("forward_and_get_logits", &_CModel::ForwardAndGetLogitsV1, "forward_and_get_logits",
-             py::kw_only(), py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
-             py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("indices"), py::arg("output"),
-             py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
-        .def("forward_with_inputs_embeds",
-             py::overload_cast<XRuntime &, at::Tensor &, CModelAttnMeta &,
-                               std::vector<std::vector<at::Tensor>> &, at::Tensor &, at::Tensor &,
-                               std::vector<at::Tensor> &, uint64_t, std::vector<at::Tensor> &,
-                               const std::optional<at::Tensor> &>(
-                 &_CModel::ForwardWithInputsEmbedsV1),
-             "forward_with_inputs_embeds", py::kw_only(), py::arg("rt"), py::arg("input"),
-             py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
-             py::arg("aux_outputs"), py::arg("curr_stream") = 0,
-             py::arg("deepstack_input") = std::vector<at::Tensor>{},
-             py::arg("input_ids") = std::nullopt, py::call_guard<py::gil_scoped_release>())
-        .def("forward_with_inputs_embeds",
-             py::overload_cast<XRuntime &, at::Tensor &, CModelAttnMeta &,
-                               std::vector<std::vector<at::Tensor>> &, at::Tensor &, at::Tensor &,
-                               uint64_t, std::vector<at::Tensor> &,
-                               const std::optional<at::Tensor> &>(
-                 &_CModel::ForwardWithInputsEmbedsV1),
-             "forward_with_inputs_embeds", py::kw_only(), py::arg("rt"), py::arg("input"),
-             py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
-             py::arg("curr_stream") = 0, py::arg("deepstack_input") = std::vector<at::Tensor>{},
-             py::arg("input_ids") = std::nullopt, py::call_guard<py::gil_scoped_release>())
-        .def("forward_v2",
-             py::overload_cast<XRuntime &, at::Tensor &, CModelAttnMetaV2 &,
-                               std::vector<std::vector<at::Tensor>> &, std::vector<at::Tensor> &,
-                               at::Tensor &, std::vector<at::Tensor> &, uint64_t>(
-                 &_CModel::ForwardV2),
-             "forward_v2", py::kw_only(), py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
-             py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"), py::arg("aux_outputs"),
-             py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
-        .def("forward_v2",
-             py::overload_cast<XRuntime &, at::Tensor &, CModelAttnMetaV2 &,
-                               std::vector<std::vector<at::Tensor>> &, std::vector<at::Tensor> &,
-                               at::Tensor &, uint64_t>(&_CModel::ForwardV2),
-             "forward_v2", py::kw_only(), py::arg("rt"), py::arg("input"), py::arg("attn_meta"),
-             py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
-             py::arg("curr_stream") = 0, py::call_guard<py::gil_scoped_release>())
-        .def("forward_and_get_logits_v2", &_CModel::ForwardAndGetLogitsV2,
-             "forward_and_get_logits_v2", py::kw_only(), py::arg("rt"), py::arg("input"),
-             py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("indices"),
-             py::arg("output"), py::arg("curr_stream") = 0,
-             py::call_guard<py::gil_scoped_release>())
-        .def("forward_with_inputs_embeds_v2",
-             py::overload_cast<XRuntime &, at::Tensor &, CModelAttnMetaV2 &,
-                               std::vector<std::vector<at::Tensor>> &, at::Tensor &, at::Tensor &,
-                               std::vector<at::Tensor> &, uint64_t, std::vector<at::Tensor> &,
-                               const std::optional<at::Tensor> &>(
-                 &_CModel::ForwardWithInputsEmbedsV2),
-             "forward_with_inputs_embeds_v2", py::kw_only(), py::arg("rt"), py::arg("input"),
-             py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
-             py::arg("aux_outputs"), py::arg("curr_stream") = 0,
-             py::arg("deepstack_input") = std::vector<at::Tensor>{},
-             py::arg("input_ids") = std::nullopt, py::call_guard<py::gil_scoped_release>())
-        .def("forward_with_inputs_embeds_v2",
-             py::overload_cast<XRuntime &, at::Tensor &, CModelAttnMetaV2 &,
-                               std::vector<std::vector<at::Tensor>> &, at::Tensor &, at::Tensor &,
-                               uint64_t, std::vector<at::Tensor> &,
-                               const std::optional<at::Tensor> &>(
-                 &_CModel::ForwardWithInputsEmbedsV2),
-             "forward_with_inputs_embeds_v2", py::kw_only(), py::arg("rt"), py::arg("input"),
-             py::arg("attn_meta"), py::arg("kv_cache"), py::arg("freqs_cis"), py::arg("output"),
-             py::arg("curr_stream") = 0, py::arg("deepstack_input") = std::vector<at::Tensor>{},
-             py::arg("input_ids") = std::nullopt, py::call_guard<py::gil_scoped_release>())
-        .def("get_tensor_pool_size", &_CModel::GetTensorPoolSize, "get_tensor_pool_size",
-             py::kw_only(), py::arg("dbg") = 0);
+        // Methods. torch::class_ has no overloading, so each forward variant
+        // gets a distinct name; the V1 adapter keeps the plain `forward` name.
+        //
+        // GIL: pybind11 used call_guard<gil_scoped_release> on these (and
+        // CoreAssigner below). torch::class_ has no call_guard, but the invoke
+        // bridge (runAndInsertCall, pybind_utils.h) runs callee.run(stack) under
+        // gil_scoped_release — equivalent; verified by assign_core blocking on
+        // cv.wait without stalling other Python threads. If torch changes that
+        // bridge, blocking methods (assign_core, forward) could hold the GIL.
+        .def("init", &model_init, "",
+             {torch::arg("config"), torch::arg("rank") = static_cast<int64_t>(0)})
+        .def("forward", &model_forward_v1, "",
+             {torch::arg("rt"), torch::arg("input"), torch::arg("attn_meta"),
+              torch::arg("kv_cache"), torch::arg("freqs_cis"), torch::arg("output"),
+              torch::arg("aux_outputs") = torch::arg::none(),
+              torch::arg("curr_stream") = static_cast<int64_t>(0)})
+        .def("forward_get_logits", &model_forward_get_logits, "",
+             {torch::arg("rt"), torch::arg("input"), torch::arg("indices"), torch::arg("output"),
+              torch::arg("curr_stream") = static_cast<int64_t>(0)})
+        .def("forward_and_get_logits", &model_forward_and_get_logits, "",
+             {torch::arg("rt"), torch::arg("input"), torch::arg("attn_meta"),
+              torch::arg("kv_cache"), torch::arg("freqs_cis"), torch::arg("indices"),
+              torch::arg("output"), torch::arg("curr_stream") = static_cast<int64_t>(0)})
+        .def("forward_with_inputs_embeds", &model_forward_with_inputs_embeds_v1, "",
+             {torch::arg("rt"), torch::arg("input"), torch::arg("attn_meta"),
+              torch::arg("kv_cache"), torch::arg("freqs_cis"), torch::arg("output"),
+              torch::arg("aux_outputs") = torch::arg::none(),
+              torch::arg("curr_stream") = static_cast<int64_t>(0),
+              torch::arg("deepstack_input") = std::vector<at::Tensor>{},
+              torch::arg("input_ids") = torch::arg::none()})
+        .def("forward_v2", &model_forward_v2, "",
+             {torch::arg("rt"), torch::arg("input"), torch::arg("attn_meta"),
+              torch::arg("kv_cache"), torch::arg("freqs_cis"), torch::arg("output"),
+              torch::arg("aux_outputs") = torch::arg::none(),
+              torch::arg("curr_stream") = static_cast<int64_t>(0)})
+        .def("forward_and_get_logits_v2", &model_forward_and_get_logits_v2, "",
+             {torch::arg("rt"), torch::arg("input"), torch::arg("attn_meta"),
+              torch::arg("kv_cache"), torch::arg("freqs_cis"), torch::arg("indices"),
+              torch::arg("output"), torch::arg("curr_stream") = static_cast<int64_t>(0)})
+        .def("forward_with_inputs_embeds_v2", &model_forward_with_inputs_embeds_v2, "",
+             {torch::arg("rt"), torch::arg("input"), torch::arg("attn_meta"),
+              torch::arg("kv_cache"), torch::arg("freqs_cis"), torch::arg("output"),
+              torch::arg("aux_outputs") = torch::arg::none(),
+              torch::arg("curr_stream") = static_cast<int64_t>(0),
+              torch::arg("deepstack_input") = std::vector<at::Tensor>{},
+              torch::arg("input_ids") = torch::arg::none()})
+        .def("get_tensor_pool_size", &model_get_tensor_pool_size, "", {torch::arg("dbg") = 0});
 
-    py::class_<XCoreAssigner>(m, "CoreAssigner")
-        .def(py::init<float>(), py::arg("prefill_ratio"))
-        .def("assign_core", &XCoreAssigner::AssignCore, py::arg("is_decode"),
-             py::call_guard<py::gil_scoped_release>())
-        .def("release_core", &XCoreAssigner::ReleaseCore, py::arg("is_decode"),
-             py::call_guard<py::gil_scoped_release>());
-
-    // kernels
-    m.def("all_gather", &AllGather, py::arg("rt"), py::arg("out"), py::arg("in_"), py::kw_only(),
-          py::arg("comm_type") = 0);
-    m.def("reduce_scatter", &ReduceScatter, py::arg("rt"), py::arg("out"), py::arg("in_"),
-          py::kw_only(), py::arg("comm_type") = 0);
-    m.def("all_reduce", &AllReduce, py::arg("rt"), py::arg("out"), py::arg("in_"), py::kw_only(),
-          py::arg("comm_type") = 0);
-    m.def("dsa_cp_metadata", &DsaCpMetadata, py::arg("rt"), py::arg("query_start_loc"),
-          py::arg("query_lens"), py::arg("cached_lens"), py::arg("local_query_start_loc"),
-          py::arg("local_query_lens"), py::arg("local_cached_lens"), py::arg("local_slot_mapping"),
-          py::arg("shard_begin"), py::arg("shard_end"));
-    m.def("dsa_cp_write_kv_cache_by_slot", &DsaCpWriteKVCacheBySlot, py::arg("rt"),
-          py::arg("input"), py::arg("cache"), py::arg("slot_mapping"), py::arg("num_tokens"),
-          py::arg("block_size"));
-    m.def("alltoallv", &AlltoAllV, py::arg("rt"), py::arg("out"), py::arg("in_"),
-          py::arg("send_counts"), py::arg("recv_counts"), py::arg("sdispls"), py::arg("rdispls"),
-          py::kw_only(), py::arg("comm_type") = 0);
-    m.def("add", &Add, py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"));
-    m.def("bench_empty", &BenchEmpty,
-          "empty kernel launch overhead probe (variant: aiv/aic/mix, returns block count)",
-          py::arg("rt"), py::arg("variant"), py::kw_only(), py::arg("block_num") = 0);
-    m.def("bench_scalar", &BenchScalar,
-          "scalar dependent-chain micro-benchmark (variant: <op>_aiv|_aic, returns block count)",
-          py::arg("rt"), py::arg("variant"), py::arg("out"), py::kw_only(), py::arg("seed") = 3,
-          py::arg("iters") = 1000000, py::arg("block_num") = 0);
+    m.class_<CoreAssignerHolder>("CoreAssigner")
+        .def(torch::init<double>(), "", {torch::arg("prefill_ratio")})
+        .def("assign_core", &CoreAssignerHolder::assignCore, "", {torch::arg("is_decode")})
+        .def("release_core", &CoreAssignerHolder::releaseCore, "", {torch::arg("is_decode")});
+    using opreg::op;
+    opreg::OpDefs ops(m);
+    ops.def("add", op<&Add>, {torch::arg("rt"), torch::arg("x"), torch::arg("y"), torch::arg("z")})
+        .def("all_gather", op<&AllGather>,
+             {torch::arg("rt"), torch::arg("out"), torch::arg("in_"),
+              torch::arg("comm_type") = static_cast<int64_t>(0)})
+        .def("reduce_scatter", op<&ReduceScatter>,
+             {torch::arg("rt"), torch::arg("out"), torch::arg("in_"),
+              torch::arg("comm_type") = static_cast<int64_t>(0)})
+        .def("all_reduce", op<&AllReduce>,
+             {torch::arg("rt"), torch::arg("out"), torch::arg("in_"),
+              torch::arg("comm_type") = static_cast<int64_t>(0)})
+        .def("alltoallv", op<&AlltoAllV>,
+             {torch::arg("rt"), torch::arg("out"), torch::arg("in_"), torch::arg("send_counts"),
+              torch::arg("recv_counts"), torch::arg("sdispls"), torch::arg("rdispls"),
+              torch::arg("comm_type") = static_cast<int64_t>(0)})
+        .def("dsa_cp_metadata", op<&DsaCpMetadata>,
+             {torch::arg("rt"), torch::arg("query_start_loc"), torch::arg("query_lens"),
+              torch::arg("cached_lens"), torch::arg("local_query_start_loc"),
+              torch::arg("local_query_lens"), torch::arg("local_cached_lens"),
+              torch::arg("local_slot_mapping"), torch::arg("shard_begin"), torch::arg("shard_end")})
+        .def("dsa_cp_write_kv_cache_by_slot", op<&DsaCpWriteKVCacheBySlot>,
+             {torch::arg("rt"), torch::arg("input"), torch::arg("cache"),
+              torch::arg("slot_mapping"), torch::arg("num_tokens"), torch::arg("block_size")})
+        .def("bench_empty", op<&BenchEmpty>,
+             {torch::arg("rt"), torch::arg("variant"),
+              torch::arg("block_num") = static_cast<int64_t>(0)})
+        .def("bench_scalar", op<&BenchScalar>,
+             {torch::arg("rt"), torch::arg("variant"), torch::arg("out"), torch::arg("seed") = 3.0,
+              torch::arg("iters") = static_cast<int64_t>(1000000),
+              torch::arg("block_num") = static_cast<int64_t>(0)});
 #ifdef MICROBENCH_TIMED
-    m.def("bench_timed", &BenchTimed,
-          "timed scalar micro-benchmark with in-kernel cycle sampling (returns block count)",
-          py::arg("rt"), py::arg("variant"), py::arg("out"), py::arg("ticks"), py::kw_only(),
-          py::arg("seed") = 3, py::arg("iters") = 1000000, py::arg("block_num") = 0);
-    m.def("bench_mte", &BenchMte,
-          "MTE memory micro-benchmark with in-kernel cycle sampling (returns block count)",
-          py::arg("rt"), py::arg("variant"), py::arg("src"), py::arg("dst"), py::arg("ticks"),
-          py::arg("bytes"), py::kw_only(), py::arg("iters") = 1, py::arg("block_num") = 0);
-    m.def("bench_vec", &BenchVec,
-          "vector-op micro-benchmark with in-kernel cycle sampling (returns block count)",
-          py::arg("rt"), py::arg("variant"), py::arg("src"), py::arg("out"), py::arg("ticks"),
-          py::arg("elems"), py::kw_only(), py::arg("iters") = 1, py::arg("block_num") = 0);
-    m.def("bench_cube", &BenchCube,
-          "cube matmul micro-benchmark with in-kernel cycle sampling (returns block count)",
-          py::arg("rt"), py::arg("variant"), py::arg("a"), py::arg("b"), py::arg("c"),
-          py::arg("ticks"), py::arg("m0"), py::arg("n0"), py::arg("k0"), py::kw_only(),
-          py::arg("block_num") = 0);
+    ops.def("bench_timed", op<&BenchTimed>,
+            {torch::arg("rt"), torch::arg("variant"), torch::arg("out"), torch::arg("ticks"),
+             torch::arg("seed") = 3.0, torch::arg("iters") = static_cast<int64_t>(1000000),
+             torch::arg("block_num") = static_cast<int64_t>(0)})
+        .def("bench_mte", op<&BenchMte>,
+             {torch::arg("rt"), torch::arg("variant"), torch::arg("src"), torch::arg("dst"),
+              torch::arg("ticks"), torch::arg("bytes"),
+              torch::arg("iters") = static_cast<int64_t>(1),
+              torch::arg("block_num") = static_cast<int64_t>(0)})
+        .def("bench_vec", op<&BenchVec>,
+             {torch::arg("rt"), torch::arg("variant"), torch::arg("src"), torch::arg("out"),
+              torch::arg("ticks"), torch::arg("elems"),
+              torch::arg("iters") = static_cast<int64_t>(1),
+              torch::arg("block_num") = static_cast<int64_t>(0)})
+        .def("bench_cube", op<&BenchCube>,
+             {torch::arg("rt"), torch::arg("variant"), torch::arg("a"), torch::arg("b"),
+              torch::arg("c"), torch::arg("ticks"), torch::arg("m0"), torch::arg("n0"),
+              torch::arg("k0"), torch::arg("block_num") = static_cast<int64_t>(0)});
 #endif  // MICROBENCH_TIMED
-    m.def("matmul", &Matmul, "matmul", py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"),
-          py::kw_only(), py::arg("weight_nz") = false, py::arg("transpose") = false);
-    m.def("matmul_bench", &MatmulBench, py::arg("rt"), py::arg("x"), py::arg("y"), py::arg("z"),
-          py::arg("x_warmup"), py::arg("y_warmup"), py::arg("z_warmup"), py::arg("iterations"),
-          py::arg("warmup_iterations"), py::kw_only(), py::arg("weight_nz") = false,
-          py::arg("transpose") = false);
-    m.def("matmul_with_bias", &MatmulWithBias, "matmul_with_bias", py::arg("rt"), py::arg("x"),
-          py::arg("y"), py::arg("z"), py::arg("bias"), py::kw_only(), py::arg("weight_nz") = false);
-    m.def("embed", &Embed, py::arg("rt"), py::arg("weight"), py::arg("in_"), py::arg("out"),
-          py::arg("start"), py::arg("end"));
-    m.def("rmsnorm", &RMSNorm, "rmsnorm", py::arg("rt"), py::arg("in_"), py::arg("norm"),
-          py::arg("out"), py::arg("norm_eps"), py::kw_only(), py::arg("norm_dim") = 0,
-          py::arg("cnt_per_token") = 1, py::arg("in_start_offset") = 0,
-          py::arg("out_start_offset") = 0, py::arg("variance") = std::nullopt);
-    m.def("rmsnorm_variance_only", &RMSNormVarianceOnly, "rmsnorm_variance_only", py::arg("rt"),
-          py::arg("in_"), py::arg("out"), py::arg("norm_eps"), py::kw_only(),
-          py::arg("norm_dim") = 0, py::arg("cnt_per_token") = 1, py::arg("in_start_offset") = 0,
-          py::arg("out_start_offset") = 0);
-    m.def("rmsnorm_with_bias", &RMSNormWithBias, "rmsnorm_with_bias", py::arg("rt"), py::arg("in_"),
-          py::arg("norm"), py::arg("norm_bias"), py::arg("out"), py::arg("norm_eps"), py::kw_only(),
-          py::arg("norm_dim") = 0, py::arg("cnt_per_token") = 1, py::arg("in_start_offset") = 0,
-          py::arg("out_start_offset") = 0);
-    m.def("layernorm", &LayerNorm, py::arg("rt"), py::arg("in_"), py::arg("norm"),
-          py::arg("norm_bias"), py::arg("out"), py::arg("norm_eps"), py::arg("norm_dim"));
-    m.def("l2norm", &L2Norm, py::arg("rt"), py::arg("in_"), py::arg("out"), py::arg("norm_eps"),
-          py::kw_only(), py::arg("norm_dim") = 0);
-    m.def("add_bias", &AddBias, py::arg("rt"), py::arg("in_"), py::arg("weight"), py::arg("out"));
-    m.def("silu_and_mul", &SiluAndMul, py::arg("rt"), py::arg("in_"), py::arg("out"), py::kw_only(),
-          py::arg("swiglu_limit") = 0.0f);
-    m.def("sigmoid_gate_mul", &SigmoidGateMul, py::arg("rt"), py::arg("attn"), py::arg("gate"),
-          py::arg("out"));
-    m.def("rope_and_cache", &RopeAndCache, "rope_and_cache", py::arg("rt"), py::arg("inout"),
-          py::arg("k_cache"), py::arg("v_cache"), py::arg("position"), py::arg("cosin"),
-          py::arg("slot_mapping"), py::arg("n_heads"), py::arg("n_kv_heads"), py::arg("head_dim"),
-          py::arg("rot_dim"), py::arg("block_size"), py::arg("is_neox"), py::kw_only(),
-          py::arg("mrope_mask_h") = 0, py::arg("mrope_mask_w") = 0);
-    m.def("attention", &Attention, py::arg("rt"), py::arg("qkv"), py::arg("k_cache"),
-          py::arg("v_cache"), py::arg("output"), py::arg("query_start_loc"), py::arg("lens"),
-          py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"),
-          py::arg("n_kv_heads"), py::arg("head_dim"), py::arg("block_size"), py::arg("batch"),
-          py::kw_only(), py::arg("enable_flash_attention") = false,
-          py::arg("tile_size_of_cached_kv") = 8192);
-    m.def("add_and_rmsnorm", &AddAndRMSNorm, py::arg("rt"), py::arg("in_"), py::arg("add_in_out"),
-          py::arg("norm"), py::arg("out"), py::arg("norm_eps"));
-    m.def("softmax_topk", &SoftmaxTopK, py::arg("rt"), py::arg("scores"), py::arg("indices"),
-          py::arg("out_weights"), py::arg("out_routing"), py::arg("top_k"),
-          py::arg("norm_top_k_prob"));
-    m.def("sigmoid_topk", &SigmoidTopK, py::arg("rt"), py::arg("scores"), py::arg("indices"),
-          py::arg("bias"), py::arg("scale"), py::arg("out_weights"), py::arg("out_routing"),
-          py::arg("n_group"), py::arg("n_topk_group"), py::arg("top_k"),
-          py::arg("norm_top_k_prob"));
-    m.def("sqrtsoftplus_hash_topk", &SqrtsoftplusHashTopK, py::arg("rt"), py::arg("scores"),
-          py::arg("indices"), py::arg("bias"), py::arg("input_ids"), py::arg("tid2eid"),
-          py::arg("out_weights"), py::arg("routing_map"), py::arg("scale"), py::arg("top_k"),
-          py::arg("hash"));
-    m.def("topk", &TopK, py::arg("rt"), py::arg("scores"), py::arg("indices"),
-          py::arg("outIndices"), py::arg("query_lens"), py::arg("cached_lens"), py::arg("k"));
-    m.def("cast_up", &CastUp, py::arg("rt"), py::arg("in_"), py::arg("out"));
-    m.def("permutation", &Permutation, py::arg("rt"), py::arg("in_"), py::arg("routing"),
-          py::arg("start"), py::arg("end"), py::arg("out"), py::arg("unp_idx"), py::arg("counts"),
-          py::kw_only(), py::arg("scale_in") = py::none(), py::arg("scale_out") = py::none());
-    m.def("unpermutation", &UnPermutation, py::arg("rt"), py::arg("in_"), py::arg("routing"),
-          py::arg("weights"), py::arg("start"), py::arg("end"), py::arg("out"), py::arg("unp_idx"));
-    m.def("remap_gate_outputs", &RemapGateOutputs, py::arg("rt"), py::arg("w_in"), py::arg("r_in"),
-          py::arg("w_out"), py::arg("r_out"), py::arg("log2phy"));
-    m.def("group_matmul", &GroupMatmul, py::arg("rt"), py::arg("in_"), py::arg("weights"),
-          py::arg("scales"), py::arg("counts"), py::arg("start"), py::arg("end"),
-          py::arg("out_dim"), py::arg("in_dim"), py::arg("output"), py::arg("weight_nz"),
-          py::arg("transpose"));
-    m.def("softmax", &Softmax, py::arg("rt"), py::arg("x"), py::arg("calc_len"),
-          py::arg("is_long"));
-    m.def("rope_complex", &RopeComplex, "rope_complex", py::arg("rt"), py::arg("n_local_heads"),
-          py::arg("step_dim"), py::arg("rope_dim"), py::arg("input_with_r"), py::arg("freqs"),
-          py::arg("position"), py::arg("output"), py::kw_only(), py::arg("inverse") = false,
-          py::arg("out_interleaved") = false, py::arg("min_position") = 0,
-          py::arg("do_rotate") = false);
-    m.def("rope_complex_and_cache", &RopeComplexAndCache, "rope_complex_and_cache", py::arg("rt"),
-          py::arg("n_local_heads"), py::arg("step_dim"), py::arg("rope_dim"), py::arg("offset"),
-          py::arg("vdim"), py::arg("input_with_r"), py::arg("freqs"), py::arg("position"),
-          py::arg("block_size"), py::arg("v_cache"), py::arg("slot_mapping"), py::kw_only(),
-          py::arg("out_interleaved") = false, py::arg("do_rotate") = false);
-    m.def("mla_prepare", &MlaPrepare, py::arg("rt"), py::arg("attn_qkvc"), py::arg("q_norm"),
-          py::arg("q_norm_bias"), py::arg("attn_norm_qc"), py::arg("kv_norm"),
-          py::arg("kv_norm_bias"), py::arg("attn_norm_kvc"), py::arg("freqs"), py::arg("position"),
-          py::arg("q_lora_rank"), py::arg("kv_lora_rank"), py::arg("rope_head_dim"),
-          py::arg("block_size"), py::arg("k_cache"), py::arg("pe_cache"), py::arg("slot_mapping"),
-          py::arg("norm_eps"), py::arg("k_scale_cache") = py::none());
-    m.def("mla_cache_c8", &MlaCacheC8, py::arg("rt"), py::arg("latent"), py::arg("pe"),
-          py::arg("slot_mapping"), py::arg("cache"), py::arg("pe_cache"), py::arg("k_scale_cache"));
-    m.def("indexer_prepare", &IndexerPrepare, py::arg("rt"), py::arg("kw"), py::arg("k_norm"),
-          py::arg("k_norm_bias"), py::arg("freqs"), py::arg("position"), py::arg("index_head_dim"),
-          py::arg("index_n_heads"), py::arg("rope_head_dim"), py::arg("block_size"),
-          py::arg("index_k_cache"), py::arg("slot_mapping"), py::arg("norm_eps"), py::arg("q"),
-          py::arg("scale"), py::arg("top_k"), py::arg("is_long"), py::kw_only(),
-          py::arg("k_scale_cache") = py::none(), py::arg("q8") = py::none(),
-          py::arg("q_scale") = py::none(), py::arg("scaled_weights") = py::none());
-    m.def("indexer_k_cache_c8", &IndexerKCacheC8, py::arg("rt"), py::arg("k"), py::arg("k_norm"),
-          py::arg("k_norm_bias"), py::arg("freqs"), py::arg("position"), py::arg("slot_mapping"),
-          py::arg("k_cache"), py::arg("scale_cache"), py::kw_only(), py::arg("norm_eps") = 1e-6f);
-    m.def("quant_cache_c8", &QuantCacheC8, py::arg("rt"), py::arg("x"), py::arg("slot_mapping"),
-          py::arg("k_cache"), py::arg("k_scale_cache"), py::arg("block_size"));
-    m.def("quant_q_c8", &QuantQC8, py::arg("rt"), py::arg("q"), py::arg("head_weight"),
-          py::arg("q8"), py::arg("scaled_weights"), py::arg("rotate_scale"));
-    m.def("compressor", &Compressor, "compressor", py::arg("rt"), py::arg("kv"), py::arg("score"),
-          py::kw_only(), py::arg("ape") = std::nullopt, py::arg("norm") = std::nullopt,
-          py::arg("freqs") = std::nullopt, py::arg("weighted_sum"), py::arg("query_start_loc"),
-          py::arg("query_lens"), py::arg("cached_lens") = std::nullopt, py::arg("batch"),
-          py::arg("n_total_blocks"), py::arg("ratio"), py::arg("overlap"), py::arg("head_dim"),
-          py::arg("rope_head_dim"), py::arg("norm_eps"), py::arg("compress_kv") = std::nullopt,
-          py::arg("compress_positions"), py::arg("compress_slot_mapping"),
-          py::arg("compress_block_size"), py::arg("state") = std::nullopt,
-          py::arg("state_slot_mapping") = std::nullopt, py::arg("state_block_table") = std::nullopt,
-          py::arg("state_block_size"), py::arg("do_rotate") = false);
-    m.def("quant", &Quant, py::arg("rt"), py::arg("x"), py::arg("scale_reciprocal"),
-          py::arg("offset"), py::arg("out"));
-    m.def("quant_dynamic", &QuantDyn, py::arg("rt"), py::arg("x"), py::arg("scale"),
-          py::arg("out"));
-    m.def("msd_merge_dequant", &MSDMergeDequant, "msd_merge_dequant", py::arg("rt"),
-          py::arg("y_merged"), py::arg("scale_biases"), py::arg("counts"),
-          py::arg("per_token_scale"), py::arg("out"));
-    m.def("matmul_dequant", &MatmulDeQuant, "matmul_dequant", py::arg("rt"), py::arg("x"),
-          py::arg("y"), py::arg("bias"), py::arg("deq_scale"), py::arg("z"), py::kw_only(),
-          py::arg("weight_nz") = false, py::arg("transpose") = false);
-    m.def("fusion_operator_matmul_dequant_pipeline", &FusionOperatorMatmulDequantPipeline,
-          "fusion_operator_matmul_dequant_pipeline", py::arg("rt"), py::arg("x"), py::arg("weight"),
-          py::arg("out"), py::arg("bias"), py::arg("deq_scale"), py::kw_only(),
-          py::arg("weight_nz") = false, py::arg("transpose") = false, py::arg("out_scale"),
-          py::arg("num"));
-    m.def("fused_quant_matmul_dequant", &FusedQuantMatmulDequant, "fused_quant_matmul_dequant",
-          py::arg("rt"), py::arg("x"), py::kw_only(), py::arg("quant_scale_rec") = std::nullopt,
-          py::arg("quant_offset") = std::nullopt, py::arg("weight"), py::arg("out"),
-          py::arg("bias") = std::nullopt, py::arg("deq_scale") = std::nullopt, py::arg("x_quant"),
-          py::arg("out_scale") = std::nullopt, py::arg("num") = std::nullopt, py::arg("dyn_quant"),
-          py::arg("weight_nz") = false, py::arg("transpose") = false);
-    m.def("dequant", &DeQuant, py::arg("rt"), py::arg("in_"), py::arg("scale"), py::arg("out"),
-          py::arg("has_scale"));
-    m.def("mla_v2", &MLAV2, py::arg("rt"), py::arg("q_with_qr"), py::arg("qr"), py::arg("k_cache"),
-          py::arg("pe_cache"), py::arg("wuk_t"), py::arg("wuv"), py::arg("output"),
-          py::arg("query_start_loc"), py::arg("lens"), py::arg("cached_lens"),
-          py::arg("block_tables"), py::arg("n_heads"), py::arg("rope_head_dim"),
-          py::arg("nope_head_dim"), py::arg("v_head_dim"), py::arg("kv_lora_rank"),
-          py::arg("block_size"), py::arg("batch"), py::arg("scale"), py::arg("topk_indices"),
-          py::kw_only(), py::arg("top_k") = 0, py::arg("nz") = false,
-          py::arg("enable_flash_attention") = false, py::arg("tile_size_of_cached_kv") = 8192,
-          py::arg("dense") = false, py::arg("k_scale_cache") = py::none());
-    m.def("dsa_cp_gather_mla", &DsaCpGatherMLA, py::arg("rt"), py::arg("q_absorb"), py::arg("qr"),
-          py::arg("k_cache"), py::arg("pe_cache"), py::arg("output"), py::arg("query_start_loc"),
-          py::arg("query_lens"), py::arg("cached_lens"), py::arg("block_tables"),
-          py::arg("topk_indices"), py::arg("scale"));
-    m.def("gather_sparse_kv_cache", &GatherSparseKVCache, py::arg("rt"), py::arg("k_cache"),
-          py::arg("pe_cache"), py::arg("block_tables"), py::arg("topk_indices"),
-          py::arg("query_start_loc"), py::arg("lens"), py::arg("cached_lens"),
-          py::arg("k_dense_cache"), py::arg("pe_dense_cache"), py::arg("batch"),
-          py::arg("index_topk"), py::arg("block_size"), py::arg("kv_lora_rank"),
-          py::arg("rope_head_dim"), py::kw_only(), py::arg("kv_heads") = 1,
-          py::arg("compress_ratio") = 1, py::arg("burst_copy_size") = GM_UB_BURST_SIZE,
-          py::arg("k_scale_cache") = py::none());
-    m.def("cxa", &CXA, "cxa", py::arg("rt"), py::arg("q"), py::arg("swa_k_cache"),
-          py::arg("compress_k_cache"), py::arg("swa_block_tables"),
-          py::arg("compress_block_tables"), py::arg("swa_block_size"),
-          py::arg("compress_block_size"), py::arg("attn_sink"), py::arg("output"), py::arg("batch"),
-          py::arg("query_start_loc"), py::arg("lens"), py::arg("cached_lens"), py::arg("n_heads"),
-          py::arg("head_dim"), py::arg("scale"), py::arg("window_size"), py::arg("compress_ratio"),
-          py::arg("index_topk"), py::arg("topk_indices"), py::kw_only(),
-          py::arg("enable_flash_attention") = false, py::arg("tile_size_of_cached_kv") = 8192,
-          py::arg("dense") = false);
-    m.def("indexer_scores", &IndexerScores, py::arg("rt"), py::arg("q"), py::arg("k_cache"),
-          py::arg("weight"), py::arg("scores"), py::arg("query_start_loc"), py::arg("lens"),
-          py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"), py::arg("head_dim"),
-          py::arg("block_size"), py::arg("batch"));
-    m.def("indexer_topk", &IndexerTopK, py::arg("rt"), py::arg("q"), py::arg("k_cache"),
-          py::arg("weight"), py::arg("topk_indices"), py::arg("query_start_loc"), py::arg("lens"),
-          py::arg("cached_lens"), py::arg("block_tables"), py::arg("n_heads"), py::arg("head_dim"),
-          py::arg("block_size"), py::arg("batch"), py::arg("top_k"), py::kw_only(),
-          py::arg("k_scale_cache") = py::none(), py::arg("compress_ratio") = 1,
-          py::arg("kv_split") = 0, py::arg("q_tile") = 0);
-    m.def("muls", &Muls, py::arg("rt"), py::arg("input"), py::arg("scale"), py::arg("output"),
-          py::kw_only(), py::arg("calc_offset") = 0, py::arg("calc_num") = UINT32_MAX);
-    m.def("experts_counts_sum", &ExpertsCountsSum, py::arg("rt"), py::arg("experts_counts_input"),
-          py::arg("tokens_per_epgroup"), py::arg("experts_counts_output"),
-          py::arg("n_routed_experts"));
-    m.def("reorder_moe", &ReorderMoE, py::arg("rt"), py::arg("in_"), py::arg("out"),
-          py::arg("counts"), py::arg("hidden_size"), py::arg("local_start"), py::arg("local_end"),
-          py::arg("forward"));
-    m.def("linear_att_proj", &LinearAttProj, py::arg("rt"), py::arg("x"), py::arg("W_qkv"),
-          py::arg("W_z"), py::arg("W_b"), py::arg("W_a"), py::arg("mix_qkv"), py::arg("z"),
-          py::arg("b"), py::arg("a"), py::arg("m"), py::arg("n"), py::arg("v"), py::arg("h"),
-          py::arg("k"));
-    m.def("transpose_1_2", &Transpose_1_2, py::arg("rt"), py::arg("input"), py::arg("output"));
-    m.def("linear_att_conv_and_silu_paged", &LinearAttConv1dAndSiLUPaged, py::arg("rt"),
-          py::arg("mix_qkv"), py::arg("conv_state"), py::arg("weight"), py::arg("output"),
-          py::arg("state_indices"), py::kw_only(), py::arg("cached_lens") = std::nullopt,
-          py::arg("state_block_size") = 0, py::arg("aligned") = false);
-    m.def("split_col", &SplitCol, py::arg("rt"), py::arg("in"), py::pos_only(), py::arg("outputs"));
-    m.def("concat", &Concat, py::arg("rt"), py::arg("inputs"), py::arg("out"));
-    m.def("concat_col", &ConcatCol, py::arg("rt"), py::arg("inputs"), py::arg("out"));
-    m.def("split", &Split, py::arg("rt"), py::arg("in"), py::pos_only(), py::arg("outputs"),
-          py::arg("sizes"), py::arg("num_packets"));
-    m.def("beta_decay", &BetaDecay, py::arg("rt"), py::arg("b"), py::arg("a"), py::arg("A_log"),
-          py::arg("dt_bias"), py::arg("beta"), py::arg("g"), py::arg("bsz"), py::arg("seqlen"),
-          py::arg("num_v_heads"));
-    m.def("silu_gate_mul", &SiluGateMul, py::kw_only(), py::arg("rt"), py::arg("normed"),
-          py::arg("gate"), py::arg("out"));
-    m.def("recurrent_gated_delta_rule_prefill_paged", &RecurrentGatedDeltaRulePrefillPaged,
-          py::kw_only(), py::arg("rt"), py::arg("query"), py::arg("key"), py::arg("value"),
-          py::arg("beta"), py::arg("g"), py::arg("state"), py::arg("out"), py::arg("indices"),
-          py::arg("starts"), py::arg("initial"), py::arg("num_key_heads"),
-          py::arg("num_value_heads"), py::arg("k_dim"), py::arg("v_dim"));
-    m.def("conv1d_and_silu_prefill_paged", &Conv1dAndSiLUPrefillPaged, py::kw_only(), py::arg("rt"),
-          py::arg("input"), py::arg("state"), py::arg("weight"), py::arg("output"),
-          py::arg("indices"), py::arg("starts"), py::arg("initial"));
-    m.def("recurrent_gated_delta_rule_paged", &RecurrentGatedDeltaRulePaged, py::arg("rt"),
-          py::arg("query"), py::arg("key"), py::arg("value"), py::arg("beta"), py::arg("g"),
-          py::arg("state"), py::arg("out"), py::arg("state_indices"), py::arg("num_key_heads"),
-          py::arg("num_value_heads"), py::arg("k_dim"), py::arg("v_dim"), py::kw_only(),
-          py::arg("cached_lens") = std::nullopt, py::arg("state_block_size") = 0,
-          py::arg("aligned") = false);
-    m.def("einsum_mht_hdt_mhd", &EinsumMhtHdtMhd, "einsum_mht_hdt_mhd", py::arg("rt"),
-          py::arg("mht"), py::arg("hdt"), py::arg("mhd"), py::arg("m"), py::arg("h"), py::arg("t"),
-          py::arg("d"), py::kw_only(), py::arg("weight_nz") = false);
-    m.def("einsum_mht_htd_mhd", &EinsumMhtHtdMhd, "einsum_mht_htd_mhd", py::arg("rt"),
-          py::arg("mht"), py::arg("htd"), py::arg("mhd"), py::arg("m"), py::arg("h"), py::arg("t"),
-          py::arg("d"), py::kw_only(), py::arg("weight_nz") = false);
-    m.def("unpack_activation", &UnpackActivation, py::arg("rt"), py::arg("input"),
-          py::arg("output"));
-    m.def("hc_act", &HcAct, py::arg("rt"), py::arg("mixes"), py::arg("hc_scale"),
-          py::arg("hc_base"), py::arg("post"), py::arg("comb"), py::arg("hc_mult"), py::arg("eps"),
-          py::arg("sinkhorn_iters"), py::arg("x_resid"), py::arg("output"));
-    m.def("hc_post", &HcPost, py::arg("rt"), py::arg("x"), py::arg("post"), py::arg("comb"),
-          py::arg("residual"), py::arg("y"), py::arg("m"), py::arg("hc_mult"), py::arg("hidden"));
-    m.def("hc_split_sinkhorn", &HcSplitSinkhorn, py::arg("rt"), py::arg("mixes"),
-          py::arg("hc_scale"), py::arg("hc_base"), py::arg("pre"), py::arg("post"), py::arg("comb"),
-          py::arg("hc_mult"), py::arg("eps"), py::arg("sinkhorn_iters"));
-    m.def("hc_pre", &HcPre, py::arg("rt"), py::arg("x_resid"), py::arg("pre"), py::arg("output"),
-          py::arg("m"), py::arg("hc_mult"), py::arg("hidden"));
-    // funcs
-    m.def("print", &Print, "print", py::arg("x"), py::kw_only(), py::arg("name") = "",
-          py::arg("row") = 6, py::arg("col") = 6);
-    m.def("get_tile_size_of_cached_kv", &GetTileSizeOfCachedKV,
-          "Get optimal tile size for cached KV based on workload", py::arg("cached_lens"),
-          py::arg("query_lens"), py::arg("head_num_in_group"), py::arg("n_kv_heads"),
-          py::arg("block_size"), py::arg("aic_num"));
+    ops.def("matmul", op<&Matmul>,
+            {torch::arg("rt"), torch::arg("x"), torch::arg("y"), torch::arg("z"),
+             torch::arg("weight_nz") = false, torch::arg("transpose") = false})
+        .def("matmul_bench", op<&MatmulBench>,
+             {torch::arg("rt"), torch::arg("x"), torch::arg("y"), torch::arg("z"),
+              torch::arg("x_warmup"), torch::arg("y_warmup"), torch::arg("z_warmup"),
+              torch::arg("iterations"), torch::arg("warmup_iterations"),
+              torch::arg("weight_nz") = false, torch::arg("transpose") = false})
+        .def("matmul_with_bias", op<&MatmulWithBias>,
+             {torch::arg("rt"), torch::arg("x"), torch::arg("y"), torch::arg("z"),
+              torch::arg("bias"), torch::arg("weight_nz") = false})
+        .def("embed", op<&Embed>,
+             {torch::arg("rt"), torch::arg("weight"), torch::arg("in_"), torch::arg("out"),
+              torch::arg("start"), torch::arg("end")})
+        .def("rmsnorm", op<&RMSNorm>,
+             {torch::arg("rt"), torch::arg("in_"), torch::arg("norm"), torch::arg("out"),
+              torch::arg("norm_eps"), torch::arg("norm_dim") = static_cast<int64_t>(0),
+              torch::arg("cnt_per_token") = static_cast<int64_t>(1),
+              torch::arg("in_start_offset") = static_cast<int64_t>(0),
+              torch::arg("out_start_offset") = static_cast<int64_t>(0),
+              torch::arg("variance") = torch::arg::none()})
+        .def("rmsnorm_variance_only", op<&RMSNormVarianceOnly>,
+             {torch::arg("rt"), torch::arg("in_"), torch::arg("out"), torch::arg("norm_eps"),
+              torch::arg("norm_dim") = static_cast<int64_t>(0),
+              torch::arg("cnt_per_token") = static_cast<int64_t>(1),
+              torch::arg("in_start_offset") = static_cast<int64_t>(0),
+              torch::arg("out_start_offset") = static_cast<int64_t>(0)})
+        .def("rmsnorm_with_bias", op<&RMSNormWithBias>,
+             {torch::arg("rt"), torch::arg("in_"), torch::arg("norm"), torch::arg("norm_bias"),
+              torch::arg("out"), torch::arg("norm_eps"),
+              torch::arg("norm_dim") = static_cast<int64_t>(0),
+              torch::arg("cnt_per_token") = static_cast<int64_t>(1),
+              torch::arg("in_start_offset") = static_cast<int64_t>(0),
+              torch::arg("out_start_offset") = static_cast<int64_t>(0)})
+        .def("layernorm", op<&LayerNorm>,
+             {torch::arg("rt"), torch::arg("in_"), torch::arg("norm"), torch::arg("norm_bias"),
+              torch::arg("out"), torch::arg("norm_eps"), torch::arg("norm_dim")})
+        .def("l2norm", op<&L2Norm>,
+             {torch::arg("rt"), torch::arg("in_"), torch::arg("out"), torch::arg("norm_eps"),
+              torch::arg("norm_dim") = static_cast<int64_t>(0)})
+        .def("add_bias", op<&AddBias>,
+             {torch::arg("rt"), torch::arg("in_"), torch::arg("weight"), torch::arg("out")})
+        .def("silu_and_mul", op<&SiluAndMul>,
+             {torch::arg("rt"), torch::arg("in_"), torch::arg("out"),
+              torch::arg("swiglu_limit") = 0.0})
+        .def("sigmoid_gate_mul", op<&SigmoidGateMul>,
+             {torch::arg("rt"), torch::arg("attn"), torch::arg("gate"), torch::arg("out")})
+        .def("rope_and_cache", op<&RopeAndCache>,
+             {torch::arg("rt"), torch::arg("inout"), torch::arg("k_cache"), torch::arg("v_cache"),
+              torch::arg("position"), torch::arg("cosin"), torch::arg("slot_mapping"),
+              torch::arg("n_heads"), torch::arg("n_kv_heads"), torch::arg("head_dim"),
+              torch::arg("rot_dim"), torch::arg("block_size"), torch::arg("is_neox"),
+              torch::arg("mrope_mask_h") = static_cast<int64_t>(0),
+              torch::arg("mrope_mask_w") = static_cast<int64_t>(0)})
+        .def("attention", op<&Attention>,
+             {torch::arg("rt"), torch::arg("qkv"), torch::arg("k_cache"), torch::arg("v_cache"),
+              torch::arg("output"), torch::arg("query_start_loc"), torch::arg("lens"),
+              torch::arg("cached_lens"), torch::arg("block_tables"), torch::arg("n_heads"),
+              torch::arg("n_kv_heads"), torch::arg("head_dim"), torch::arg("block_size"),
+              torch::arg("batch"), torch::arg("enable_flash_attention") = false,
+              torch::arg("tile_size_of_cached_kv") = static_cast<int64_t>(8192)})
+        .def("add_and_rmsnorm", op<&AddAndRMSNorm>,
+             {torch::arg("rt"), torch::arg("in_"), torch::arg("add_in_out"), torch::arg("norm"),
+              torch::arg("out"), torch::arg("norm_eps")})
+        .def("softmax_topk", op<&SoftmaxTopK>,
+             {torch::arg("rt"), torch::arg("scores"), torch::arg("indices"),
+              torch::arg("out_weights"), torch::arg("out_routing"), torch::arg("top_k"),
+              torch::arg("norm_top_k_prob")})
+        .def("sigmoid_topk", op<&SigmoidTopK>,
+             {torch::arg("rt"), torch::arg("scores"), torch::arg("indices"), torch::arg("bias"),
+              torch::arg("scale"), torch::arg("out_weights"), torch::arg("out_routing"),
+              torch::arg("n_group"), torch::arg("n_topk_group"), torch::arg("top_k"),
+              torch::arg("norm_top_k_prob")})
+        .def("sqrtsoftplus_hash_topk", op<&SqrtsoftplusHashTopK>,
+             {torch::arg("rt"), torch::arg("scores"), torch::arg("indices"), torch::arg("bias"),
+              torch::arg("input_ids"), torch::arg("tid2eid"), torch::arg("out_weights"),
+              torch::arg("routing_map"), torch::arg("scale"), torch::arg("top_k"),
+              torch::arg("hash")})
+        .def("topk", op<&TopK>,
+             {torch::arg("rt"), torch::arg("scores"), torch::arg("indices"),
+              torch::arg("outIndices"), torch::arg("query_lens"), torch::arg("cached_lens"),
+              torch::arg("k")})
+        .def("cast_up", op<&CastUp>, {torch::arg("rt"), torch::arg("in_"), torch::arg("out")})
+        .def("permutation", op<&Permutation>,
+             {torch::arg("rt"), torch::arg("in_"), torch::arg("routing"), torch::arg("start"),
+              torch::arg("end"), torch::arg("out"), torch::arg("unp_idx"), torch::arg("counts"),
+              torch::arg("scale_in") = torch::arg::none(),
+              torch::arg("scale_out") = torch::arg::none()})
+        .def("unpermutation", op<&UnPermutation>,
+             {torch::arg("rt"), torch::arg("in_"), torch::arg("routing"), torch::arg("weights"),
+              torch::arg("start"), torch::arg("end"), torch::arg("out"), torch::arg("unp_idx")})
+        .def("remap_gate_outputs", op<&RemapGateOutputs>,
+             {torch::arg("rt"), torch::arg("w_in"), torch::arg("r_in"), torch::arg("w_out"),
+              torch::arg("r_out"), torch::arg("log2phy")})
+        .def("group_matmul", op<&GroupMatmul>,
+             {torch::arg("rt"), torch::arg("in_"), torch::arg("weights"), torch::arg("scales"),
+              torch::arg("counts"), torch::arg("start"), torch::arg("end"), torch::arg("out_dim"),
+              torch::arg("in_dim"), torch::arg("output"), torch::arg("weight_nz"),
+              torch::arg("transpose")})
+        .def("softmax", op<&Softmax>,
+             {torch::arg("rt"), torch::arg("x"), torch::arg("calc_len"), torch::arg("is_long")})
+        .def(
+            "rope_complex", op<&RopeComplex>,
+            {torch::arg("rt"), torch::arg("n_local_heads"), torch::arg("step_dim"),
+             torch::arg("rope_dim"), torch::arg("input_with_r"), torch::arg("freqs"),
+             torch::arg("position"), torch::arg("output"), torch::arg("inverse") = false,
+             torch::arg("out_interleaved") = false,
+             torch::arg("min_position") = static_cast<int64_t>(0), torch::arg("do_rotate") = false})
+        .def("rope_complex_and_cache", op<&RopeComplexAndCache>,
+             {torch::arg("rt"), torch::arg("n_local_heads"), torch::arg("step_dim"),
+              torch::arg("rope_dim"), torch::arg("offset"), torch::arg("vdim"),
+              torch::arg("input_with_r"), torch::arg("freqs"), torch::arg("position"),
+              torch::arg("block_size"), torch::arg("v_cache"), torch::arg("slot_mapping"),
+              torch::arg("out_interleaved") = false, torch::arg("do_rotate") = false})
+        .def("mla_prepare", op<&MlaPrepare>,
+             {torch::arg("rt"), torch::arg("attn_qkvc"), torch::arg("q_norm"),
+              torch::arg("q_norm_bias"), torch::arg("attn_norm_qc"), torch::arg("kv_norm"),
+              torch::arg("kv_norm_bias"), torch::arg("attn_norm_kvc"), torch::arg("freqs"),
+              torch::arg("position"), torch::arg("q_lora_rank"), torch::arg("kv_lora_rank"),
+              torch::arg("rope_head_dim"), torch::arg("block_size"), torch::arg("k_cache"),
+              torch::arg("pe_cache"), torch::arg("slot_mapping"), torch::arg("norm_eps"),
+              torch::arg("k_scale_cache") = torch::arg::none()})
+        .def("mla_cache_c8", op<&MlaCacheC8>,
+             {torch::arg("rt"), torch::arg("latent"), torch::arg("pe"), torch::arg("slot_mapping"),
+              torch::arg("cache"), torch::arg("pe_cache"), torch::arg("k_scale_cache")})
+        .def("indexer_prepare", op<&IndexerPrepare>,
+             {torch::arg("rt"),
+              torch::arg("kw"),
+              torch::arg("k_norm"),
+              torch::arg("k_norm_bias"),
+              torch::arg("freqs"),
+              torch::arg("position"),
+              torch::arg("index_head_dim"),
+              torch::arg("index_n_heads"),
+              torch::arg("rope_head_dim"),
+              torch::arg("block_size"),
+              torch::arg("index_k_cache"),
+              torch::arg("slot_mapping"),
+              torch::arg("norm_eps"),
+              torch::arg("q"),
+              torch::arg("scale"),
+              torch::arg("top_k"),
+              torch::arg("is_long"),
+              torch::arg("k_scale_cache") = torch::arg::none(),
+              torch::arg("q8") = torch::arg::none(),
+              torch::arg("q_scale") = torch::arg::none(),
+              torch::arg("scaled_weights") = torch::arg::none()})
+        .def("indexer_k_cache_c8", op<&IndexerKCacheC8>,
+             {torch::arg("rt"), torch::arg("k"), torch::arg("k_norm"), torch::arg("k_norm_bias"),
+              torch::arg("freqs"), torch::arg("position"), torch::arg("slot_mapping"),
+              torch::arg("k_cache"), torch::arg("scale_cache"), torch::arg("norm_eps") = 1e-06})
+        .def("quant_cache_c8", op<&QuantCacheC8>,
+             {torch::arg("rt"), torch::arg("x"), torch::arg("slot_mapping"), torch::arg("k_cache"),
+              torch::arg("k_scale_cache"), torch::arg("block_size")})
+        .def("quant_q_c8", op<&QuantQC8>,
+             {torch::arg("rt"), torch::arg("q"), torch::arg("head_weight"), torch::arg("q8"),
+              torch::arg("scaled_weights"), torch::arg("rotate_scale")})
+        .def("compressor", op<&Compressor>,
+             {torch::arg("rt"),
+              torch::arg("kv"),
+              torch::arg("score"),
+              torch::arg("ape") = torch::arg::none(),
+              torch::arg("norm") = torch::arg::none(),
+              torch::arg("freqs") = torch::arg::none(),
+              torch::arg("weighted_sum"),
+              torch::arg("query_start_loc"),
+              torch::arg("query_lens"),
+              torch::arg("cached_lens") = torch::arg::none(),
+              torch::arg("batch"),
+              torch::arg("n_total_blocks"),
+              torch::arg("ratio"),
+              torch::arg("overlap"),
+              torch::arg("head_dim"),
+              torch::arg("rope_head_dim"),
+              torch::arg("norm_eps"),
+              torch::arg("compress_kv") = torch::arg::none(),
+              torch::arg("compress_positions"),
+              torch::arg("compress_slot_mapping"),
+              torch::arg("compress_block_size"),
+              torch::arg("state") = torch::arg::none(),
+              torch::arg("state_slot_mapping") = torch::arg::none(),
+              torch::arg("state_block_table") = torch::arg::none(),
+              torch::arg("state_block_size"),
+              torch::arg("do_rotate") = false})
+        .def("quant", op<&Quant>,
+             {torch::arg("rt"), torch::arg("x"), torch::arg("scale_reciprocal"),
+              torch::arg("offset"), torch::arg("out")})
+        .def("quant_dynamic", op<&QuantDyn>,
+             {torch::arg("rt"), torch::arg("x"), torch::arg("scale"), torch::arg("out")})
+        .def("msd_merge_dequant", op<&MSDMergeDequant>,
+             {torch::arg("rt"), torch::arg("y_merged"), torch::arg("scale_biases"),
+              torch::arg("counts"), torch::arg("per_token_scale"), torch::arg("out")})
+        .def("matmul_dequant", op<&MatmulDeQuant>,
+             {torch::arg("rt"), torch::arg("x"), torch::arg("y"), torch::arg("bias"),
+              torch::arg("deq_scale"), torch::arg("z"), torch::arg("weight_nz") = false,
+              torch::arg("transpose") = false})
+        .def("fusion_operator_matmul_dequant_pipeline", op<&FusionOperatorMatmulDequantPipeline>,
+             {torch::arg("rt"), torch::arg("x"), torch::arg("weight"), torch::arg("out"),
+              torch::arg("bias"), torch::arg("deq_scale"), torch::arg("weight_nz") = false,
+              torch::arg("transpose") = false, torch::arg("out_scale"), torch::arg("num")})
+        .def("fused_quant_matmul_dequant", op<&FusedQuantMatmulDequant>,
+             {torch::arg("rt"), torch::arg("x"), torch::arg("quant_scale_rec") = torch::arg::none(),
+              torch::arg("quant_offset") = torch::arg::none(), torch::arg("weight"),
+              torch::arg("out"), torch::arg("bias") = torch::arg::none(),
+              torch::arg("deq_scale") = torch::arg::none(), torch::arg("x_quant"),
+              torch::arg("out_scale") = torch::arg::none(), torch::arg("num") = torch::arg::none(),
+              torch::arg("dyn_quant"), torch::arg("weight_nz") = false,
+              torch::arg("transpose") = false})
+        .def("dequant", op<&DeQuant>,
+             {torch::arg("rt"), torch::arg("in_"), torch::arg("scale"), torch::arg("out"),
+              torch::arg("has_scale")})
+        .def("mla_v2", op<&MLAV2>,
+             {torch::arg("rt"),
+              torch::arg("q_with_qr"),
+              torch::arg("qr"),
+              torch::arg("k_cache"),
+              torch::arg("pe_cache"),
+              torch::arg("wuk_t"),
+              torch::arg("wuv"),
+              torch::arg("output"),
+              torch::arg("query_start_loc"),
+              torch::arg("lens"),
+              torch::arg("cached_lens"),
+              torch::arg("block_tables"),
+              torch::arg("n_heads"),
+              torch::arg("rope_head_dim"),
+              torch::arg("nope_head_dim"),
+              torch::arg("v_head_dim"),
+              torch::arg("kv_lora_rank"),
+              torch::arg("block_size"),
+              torch::arg("batch"),
+              torch::arg("scale"),
+              torch::arg("topk_indices"),
+              torch::arg("top_k") = static_cast<int64_t>(0),
+              torch::arg("nz") = false,
+              torch::arg("enable_flash_attention") = false,
+              torch::arg("tile_size_of_cached_kv") = static_cast<int64_t>(8192),
+              torch::arg("dense") = false,
+              torch::arg("k_scale_cache") = torch::arg::none()})
+        .def("dsa_cp_gather_mla", op<&DsaCpGatherMLA>,
+             {torch::arg("rt"), torch::arg("q_absorb"), torch::arg("qr"), torch::arg("k_cache"),
+              torch::arg("pe_cache"), torch::arg("output"), torch::arg("query_start_loc"),
+              torch::arg("query_lens"), torch::arg("cached_lens"), torch::arg("block_tables"),
+              torch::arg("topk_indices"), torch::arg("scale")})
+        .def("gather_sparse_kv_cache", op<&GatherSparseKVCache>,
+             {torch::arg("rt"), torch::arg("k_cache"), torch::arg("pe_cache"),
+              torch::arg("block_tables"), torch::arg("topk_indices"), torch::arg("query_start_loc"),
+              torch::arg("lens"), torch::arg("cached_lens"), torch::arg("k_dense_cache"),
+              torch::arg("pe_dense_cache"), torch::arg("batch"), torch::arg("index_topk"),
+              torch::arg("block_size"), torch::arg("kv_lora_rank"), torch::arg("rope_head_dim"),
+              torch::arg("kv_heads") = static_cast<int64_t>(1),
+              torch::arg("compress_ratio") = static_cast<int64_t>(1),
+              torch::arg("burst_copy_size") = static_cast<int64_t>(GM_UB_BURST_SIZE),
+              torch::arg("k_scale_cache") = torch::arg::none()})
+        .def("cxa", op<&CXA>,
+             {torch::arg("rt"),
+              torch::arg("q"),
+              torch::arg("swa_k_cache"),
+              torch::arg("compress_k_cache"),
+              torch::arg("swa_block_tables"),
+              torch::arg("compress_block_tables"),
+              torch::arg("swa_block_size"),
+              torch::arg("compress_block_size"),
+              torch::arg("attn_sink"),
+              torch::arg("output"),
+              torch::arg("batch"),
+              torch::arg("query_start_loc"),
+              torch::arg("lens"),
+              torch::arg("cached_lens"),
+              torch::arg("n_heads"),
+              torch::arg("head_dim"),
+              torch::arg("scale"),
+              torch::arg("window_size"),
+              torch::arg("compress_ratio"),
+              torch::arg("index_topk"),
+              torch::arg("topk_indices"),
+              torch::arg("enable_flash_attention") = false,
+              torch::arg("tile_size_of_cached_kv") = static_cast<int64_t>(8192),
+              torch::arg("dense") = false})
+        .def("indexer_scores", op<&IndexerScores>,
+             {torch::arg("rt"), torch::arg("q"), torch::arg("k_cache"), torch::arg("weight"),
+              torch::arg("scores"), torch::arg("query_start_loc"), torch::arg("lens"),
+              torch::arg("cached_lens"), torch::arg("block_tables"), torch::arg("n_heads"),
+              torch::arg("head_dim"), torch::arg("block_size"), torch::arg("batch")})
+        .def("indexer_topk", op<&IndexerTopK>,
+             {torch::arg("rt"), torch::arg("q"), torch::arg("k_cache"), torch::arg("weight"),
+              torch::arg("topk_indices"), torch::arg("query_start_loc"), torch::arg("lens"),
+              torch::arg("cached_lens"), torch::arg("block_tables"), torch::arg("n_heads"),
+              torch::arg("head_dim"), torch::arg("block_size"), torch::arg("batch"),
+              torch::arg("top_k"), torch::arg("k_scale_cache") = torch::arg::none(),
+              torch::arg("compress_ratio") = static_cast<int64_t>(1),
+              torch::arg("kv_split") = static_cast<int64_t>(0),
+              torch::arg("q_tile") = static_cast<int64_t>(0)})
+        .def("muls", muls_op,
+             {torch::arg("rt"), torch::arg("input"), torch::arg("scale"), torch::arg("output"),
+              torch::arg("calc_offset") = static_cast<int64_t>(0),
+              torch::arg("calc_num") = static_cast<int64_t>(4294967295)})
+        .def(
+            "experts_counts_sum", op<&ExpertsCountsSum>,
+            {torch::arg("rt"), torch::arg("experts_counts_input"), torch::arg("tokens_per_epgroup"),
+             torch::arg("experts_counts_output"), torch::arg("n_routed_experts")})
+        .def("reorder_moe", op<&ReorderMoE>,
+             {torch::arg("rt"), torch::arg("in_"), torch::arg("out"), torch::arg("counts"),
+              torch::arg("hidden_size"), torch::arg("local_start"), torch::arg("local_end"),
+              torch::arg("forward")})
+        .def("linear_att_proj", op<&LinearAttProj>,
+             {torch::arg("rt"), torch::arg("x"), torch::arg("W_qkv"), torch::arg("W_z"),
+              torch::arg("W_b"), torch::arg("W_a"), torch::arg("mix_qkv"), torch::arg("z"),
+              torch::arg("b"), torch::arg("a"), torch::arg("m"), torch::arg("n"), torch::arg("v"),
+              torch::arg("h"), torch::arg("k")})
+        .def("transpose_1_2", op<&Transpose_1_2>,
+             {torch::arg("rt"), torch::arg("input"), torch::arg("output")})
+        .def("linear_att_conv_and_silu_paged", op<&LinearAttConv1dAndSiLUPaged>,
+             {torch::arg("rt"), torch::arg("mix_qkv"), torch::arg("conv_state"),
+              torch::arg("weight"), torch::arg("output"), torch::arg("state_indices"),
+              torch::arg("cached_lens") = torch::arg::none(),
+              torch::arg("state_block_size") = static_cast<int64_t>(0),
+              torch::arg("aligned") = false})
+        .def("split_col", op<&SplitCol>,
+             {torch::arg("rt"), torch::arg("in_"), torch::arg("outputs")})
+        .def("concat", op<&Concat>, {torch::arg("rt"), torch::arg("inputs"), torch::arg("out")})
+        .def("concat_col", op<&ConcatCol>,
+             {torch::arg("rt"), torch::arg("inputs"), torch::arg("out")})
+        .def("split", split_op,
+             {torch::arg("rt"), torch::arg("in_"), torch::arg("outputs"), torch::arg("sizes"),
+              torch::arg("num_packets")})
+        .def("beta_decay", op<&BetaDecay>,
+             {torch::arg("rt"), torch::arg("b"), torch::arg("a"), torch::arg("A_log"),
+              torch::arg("dt_bias"), torch::arg("beta"), torch::arg("g"), torch::arg("bsz"),
+              torch::arg("seqlen"), torch::arg("num_v_heads")})
+        .def("einsum_mht_hdt_mhd", op<&EinsumMhtHdtMhd>,
+             {torch::arg("rt"), torch::arg("mht"), torch::arg("hdt"), torch::arg("mhd"),
+              torch::arg("m"), torch::arg("h"), torch::arg("t"), torch::arg("d"),
+              torch::arg("weight_nz") = false})
+        .def("einsum_mht_htd_mhd", op<&EinsumMhtHtdMhd>,
+             {torch::arg("rt"), torch::arg("mht"), torch::arg("htd"), torch::arg("mhd"),
+              torch::arg("m"), torch::arg("h"), torch::arg("t"), torch::arg("d"),
+              torch::arg("weight_nz") = false})
+        .def("unpack_activation", op<&UnpackActivation>,
+             {torch::arg("rt"), torch::arg("input"), torch::arg("output")})
+        .def("hc_act", op<&HcAct>,
+             {torch::arg("rt"), torch::arg("mixes"), torch::arg("hc_scale"), torch::arg("hc_base"),
+              torch::arg("post"), torch::arg("comb"), torch::arg("hc_mult"), torch::arg("eps"),
+              torch::arg("sinkhorn_iters"), torch::arg("x_resid"), torch::arg("output")})
+        .def("hc_post", op<&HcPost>,
+             {torch::arg("rt"), torch::arg("x"), torch::arg("post"), torch::arg("comb"),
+              torch::arg("residual"), torch::arg("y"), torch::arg("m"), torch::arg("hc_mult"),
+              torch::arg("hidden")})
+        .def("hc_split_sinkhorn", op<&HcSplitSinkhorn>,
+             {torch::arg("rt"), torch::arg("mixes"), torch::arg("hc_scale"), torch::arg("hc_base"),
+              torch::arg("pre"), torch::arg("post"), torch::arg("comb"), torch::arg("hc_mult"),
+              torch::arg("eps"), torch::arg("sinkhorn_iters")})
+        .def("hc_pre", op<&HcPre>,
+             {torch::arg("rt"), torch::arg("x_resid"), torch::arg("pre"), torch::arg("output"),
+              torch::arg("m"), torch::arg("hc_mult"), torch::arg("hidden")})
+        .def("silu_gate_mul", op<&SiluGateMul>,
+             {torch::arg("rt"), torch::arg("normed"), torch::arg("gate"), torch::arg("out")})
+        .def("recurrent_gated_delta_rule_prefill_paged", op<&RecurrentGatedDeltaRulePrefillPaged>,
+             {torch::arg("rt"), torch::arg("query"), torch::arg("key"), torch::arg("value"),
+              torch::arg("beta"), torch::arg("g"), torch::arg("state"), torch::arg("out"),
+              torch::arg("indices"), torch::arg("starts"), torch::arg("initial"),
+              torch::arg("num_key_heads"), torch::arg("num_value_heads"), torch::arg("k_dim"),
+              torch::arg("v_dim")})
+        .def("conv1d_and_silu_prefill_paged", op<&Conv1dAndSiLUPrefillPaged>,
+             {torch::arg("rt"), torch::arg("input"), torch::arg("state"), torch::arg("weight"),
+              torch::arg("output"), torch::arg("indices"), torch::arg("starts"),
+              torch::arg("initial")})
+        .def("print", op<&Print>,
+             {torch::arg("x"), torch::arg("name") = std::string(""),
+              torch::arg("row") = static_cast<int64_t>(6),
+              torch::arg("col") = static_cast<int64_t>(6)})
+        .def("get_tile_size_of_cached_kv", get_tile_size_of_cached_kv_op,
+             {torch::arg("cached_lens"), torch::arg("query_lens"), torch::arg("head_num_in_group"),
+              torch::arg("n_kv_heads"), torch::arg("block_size"), torch::arg("aic_num")})
+        .def("recurrent_gated_delta_rule_paged", op<&RecurrentGatedDeltaRulePaged>,
+             {torch::arg("rt"), torch::arg("query"), torch::arg("key"), torch::arg("value"),
+              torch::arg("beta"), torch::arg("g"), torch::arg("state"), torch::arg("out"),
+              torch::arg("state_indices"), torch::arg("num_key_heads"),
+              torch::arg("num_value_heads"), torch::arg("k_dim"), torch::arg("v_dim"),
+              torch::arg("cached_lens") = torch::arg::none(),
+              torch::arg("state_block_size") = static_cast<int64_t>(0),
+              torch::arg("aligned") = false});
 }

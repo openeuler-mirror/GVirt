@@ -103,9 +103,9 @@ class ModelArgs:
     index_head_dim: int = 128
     index_topk: int = 2048
     indexer_rope_interleave: bool = False
-    index_full_mask: Optional[list[bool]] = None
+    index_full_mask: list[bool] | None = None
     # the raw model config path
-    config_path: Optional[Path] = None
+    config_path: Path | None = None
 
     def __post_init__(self):
         self.max_num_batched_tokens = self.max_seq_len * self.max_batch_size
@@ -347,7 +347,7 @@ def quantize_npu(
 
 
 def linear(
-    x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None, is_row_parallel: bool = False
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None, is_row_parallel: bool = False
 ) -> torch.Tensor:
     """
     Applies a linear transformation to the incoming data: y = xA^T + b.
@@ -764,7 +764,7 @@ class Indexer(torch.nn.Module):
             )
 
     def forward(
-        self, x: torch.Tensor, qr: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor]
+        self, x: torch.Tensor, qr: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: torch.Tensor | None
     ):
         bsz, seqlen, _ = x.size()
         end_pos = start_pos + seqlen
@@ -875,8 +875,8 @@ class MLA(nn.Module):
         x: torch.Tensor,
         start_pos: int,
         freqs_cis: torch.Tensor,
-        mask: Optional[torch.Tensor],
-        topk_cache: Optional[dict] = None,
+        mask: torch.Tensor | None,
+        topk_cache: dict | None = None,
     ):
         """
         Forward pass for the Multi-Head Latent Attention (MLA) Layer.
@@ -1281,8 +1281,8 @@ class Block(nn.Module):
         x: torch.Tensor,
         start_pos: int,
         freqs_cis: torch.Tensor,
-        mask: Optional[torch.Tensor],
-        topk_cache: Optional[dict] = None,
+        mask: torch.Tensor | None,
+        topk_cache: dict | None = None,
     ) -> torch.Tensor:
         """
         Forward pass for the GLM4MoELite block.
@@ -1316,8 +1316,8 @@ class Block(nn.Module):
         x: torch.Tensor,
         start_pos: int,
         freqs_cis: torch.Tensor,
-        mask: Optional[torch.Tensor],
-        topk_cache: Optional[dict] = None,
+        mask: torch.Tensor | None,
+        topk_cache: dict | None = None,
     ) -> torch.Tensor:
         """
         Forward pass for the GLM4MoELite block.

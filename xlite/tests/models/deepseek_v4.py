@@ -11,7 +11,7 @@ import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 import torch
 import torch.distributed as dist
@@ -148,7 +148,7 @@ class ModelArgs:
     moe_tp_size: int = 1
     quantization: Literal["none", "w8a8"] = "w8a8"
     # the raw model config path
-    config_path: Optional[Path] = None
+    config_path: Path | None = None
 
 
 class ParallelEmbedding(nn.Module):
@@ -178,7 +178,7 @@ class ParallelEmbedding(nn.Module):
         return y
 
 
-def linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+def linear(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
     """Dispatches to weight_dequant+F.linear for int8 weight, else F.linear.
 
     V4 w8a8 dynamic: weight is int8 with per-row weight_scale / weight_offset,
@@ -660,7 +660,7 @@ class Gate(nn.Module):
         else:
             self.bias = nn.Parameter(torch.empty(args.n_routed_experts, dtype=torch.float32))
 
-    def forward(self, x: torch.Tensor, input_ids: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, input_ids: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         scores = F.linear(x.float(), self.weight.float())
         if self.score_func == "softmax":
             scores = scores.softmax(dim=-1)
@@ -693,7 +693,7 @@ class Expert(nn.Module):
         self.w2 = Linear(inter_dim, dim, dtype=torch.int8)
         self.swiglu_limit = swiglu_limit
 
-    def forward(self, x: torch.Tensor, weights: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, weights: torch.Tensor | None = None) -> torch.Tensor:
         dtype = x.dtype
         y = self.w13(x).float()
         gate, up = torch.split(y, y.shape[-1] // 2, dim=-1)
@@ -790,7 +790,7 @@ class Block(nn.Module):
         y = post.unsqueeze(-1) * x.unsqueeze(-2) + torch.sum(comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2)
         return y.type_as(x)
 
-    def forward(self, x: torch.Tensor, start_pos: int, input_ids: Optional[torch.Tensor]) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, start_pos: int, input_ids: torch.Tensor | None) -> torch.Tensor:
         residual = x
         x, post, comb = self.hc_pre(x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
         x = self.attn_norm(x)

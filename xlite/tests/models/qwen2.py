@@ -8,7 +8,7 @@
 # ===============================================================================
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 
 @dataclass
@@ -31,7 +31,7 @@ class Qwen2ModelArgs:
     qk_norm: bool = False
     model_type: str = "qwen2"
     # the raw model config path
-    config_path: Optional[Path] = None
+    config_path: Path | None = None
 
     def __post_init__(self):
         self.max_num_batched_tokens = self.max_seq_len * self.max_batch_size
