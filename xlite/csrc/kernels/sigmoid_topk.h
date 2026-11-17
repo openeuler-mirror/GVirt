@@ -98,6 +98,15 @@ public:
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
         copy_gm_to_ubuf_align_b32(indicesIn, indicesGm, 0, 1, nRoutedExperts * sizeof(uint32_t), 0,
                                   0, 0, 0);
+        // The correction bias is a token-invariant constant, yet it used to ride the per-token
+        // MTE2->V flag chain in CopyInScores(): with M=8192 that re-DMA'ed the same 1KB 8192
+        // times and made MTE2 the longest pipeline (41% of task duration). Copy it ONCE here,
+        // before the loop, fenced by the same PIPE_ALL barrier as the indices copy -- the
+        // pattern already used by sqrtsoftplus_hash_topk.h.
+        if (biasGm != nullptr) {
+            copy_gm_to_ubuf_align_b32(biasIn, biasGm, 0, 1, nRoutedExperts * sizeof(float), 0, 0, 0,
+                                      0);
+        }
         pipe_barrier(PIPE_ALL);
         if (biasGm == nullptr) {
             // Models with no e_score_correction_bias (GLM-4.7-Flash routes on plain sigmoid) pass
@@ -192,10 +201,7 @@ public:
                                       nRoutedExperts * sizeof(Dtype), 0, 0, 0, 0);
             pipe_barrier(PIPE_V);
         }
-        if (biasGm != nullptr) {
-            copy_gm_to_ubuf_align_b32(biasIn, biasGm, 0, 1, nRoutedExperts * sizeof(float), 0, 0, 0,
-                                      0);
-        }
+        // Only the scores depend on the token; bias was hoisted to Run().
         set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
     }
 
