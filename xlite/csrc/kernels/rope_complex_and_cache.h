@@ -4,7 +4,6 @@
 #pragma once
 #include "kernel_operator.h"
 #include "kernel_macro.h"
-#include "ub_alloc.h"
 
 #define UBA(T) __ubuf__ T *
 
@@ -65,46 +64,57 @@ __aicore__ __inline__ void rope_complex_and_cache(
     int rotateRepeat = DIV_ROUND_UP(vdim * nLocalHeads, calcPad);
 
     int maxCnt = 256;
-    UbAlloc ub;
-    UBA(Dtype)
-    inputs[2] = {ub.AllocBytesAs<Dtype>(ROUND_UP(totalInputBytes, VECTOR_MAX_BYTESIZE)),
-                 ub.AllocBytesAs<Dtype>(ROUND_UP(totalInputBytes, VECTOR_MAX_BYTESIZE))};
-    UBA(float)
-    freqs[2] = {ub.AllocBytesAs<float>(ROUND_UP(freqsBytes, VECTOR_MAX_BYTESIZE)),
-                ub.AllocBytesAs<float>(ROUND_UP(freqsBytes, VECTOR_MAX_BYTESIZE))};
-    UBA(Dtype)
-    outs[2] = {ub.AllocBytesAs<Dtype>(ROUND_UP(totalInputBytes, VECTOR_MAX_BYTESIZE)),
-               ub.AllocBytesAs<Dtype>(ROUND_UP(totalInputBytes, VECTOR_MAX_BYTESIZE))};
-    UBA(Dtype)
-    vRemain =
-        ub.AllocBytesAs<Dtype>(need_v_cache ? ROUND_UP(totalVRemainBytes, VECTOR_MAX_BYTESIZE) : 0);
+    uint64_t off = 0;
+    UBA(Dtype) input0 = reinterpret_cast<UBA(Dtype)>(off);
+    off += ROUND_UP(totalInputBytes, VECTOR_MAX_BYTESIZE);
+    UBA(Dtype) input1 = reinterpret_cast<UBA(Dtype)>(off);
+    off += ROUND_UP(totalInputBytes, VECTOR_MAX_BYTESIZE);
+    UBA(float) freqs0 = reinterpret_cast<UBA(float)>(off);
+    off += ROUND_UP(freqsBytes, VECTOR_MAX_BYTESIZE);
+    UBA(float) freqs1 = reinterpret_cast<UBA(float)>(off);
+    off += ROUND_UP(freqsBytes, VECTOR_MAX_BYTESIZE);
+    UBA(Dtype) out0 = reinterpret_cast<UBA(Dtype)>(off);
+    off += ROUND_UP(totalInputBytes, VECTOR_MAX_BYTESIZE);
+    UBA(Dtype) out1 = reinterpret_cast<UBA(Dtype)>(off);
+    off += ROUND_UP(totalInputBytes, VECTOR_MAX_BYTESIZE);
+    UBA(Dtype) vRemain = reinterpret_cast<UBA(Dtype)>(off);
+    off += need_v_cache ? ROUND_UP(totalVRemainBytes, VECTOR_MAX_BYTESIZE) : 0;
 
-    UBA(float) inOutFP32 = ub.AllocBytesAs<float>(ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE));
-    UBA(float) x_even = ub.AllocBytesAs<float>(ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE));
-    UBA(float) x_odd = ub.AllocBytesAs<float>(ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE));
-    UBA(float) cos = ub.AllocBytesAs<float>(ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE));
-    UBA(float) sin = ub.AllocBytesAs<float>(ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE));
-    UBA(float) x_even_cos = ub.AllocBytesAs<float>(ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE));
-    UBA(float) x_odd_sin = ub.AllocBytesAs<float>(ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE));
-    UBA(float) x_even_sin = ub.AllocBytesAs<float>(ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE));
-    UBA(float) x_odd_cos = ub.AllocBytesAs<float>(ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE));
-    UBA(uint64_t)
-    positionUB =
-        ub.AllocBytesAs<uint64_t>(ROUND_UP(maxCnt * sizeof(uint64_t), VECTOR_MAX_BYTESIZE));
-    UBA(uint32_t)
-    slotMappingUB = ub.AllocBytesAs<uint32_t>(
-        need_v_cache ? ROUND_UP(maxCnt * sizeof(uint32_t), VECTOR_MAX_BYTESIZE) : 0);
+    UBA(float) inOutFP32 = reinterpret_cast<UBA(float)>(off);
+    off += ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE);
+    UBA(float) x_even = reinterpret_cast<UBA(float)>(off);
+    off += ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE);
+    UBA(float) x_odd = reinterpret_cast<UBA(float)>(off);
+    off += ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE);
+    UBA(float) cos = reinterpret_cast<UBA(float)>(off);
+    off += ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE);
+    UBA(float) sin = reinterpret_cast<UBA(float)>(off);
+    off += ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE);
+    UBA(float) x_even_cos = reinterpret_cast<UBA(float)>(off);
+    off += ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE);
+    UBA(float) x_odd_sin = reinterpret_cast<UBA(float)>(off);
+    off += ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE);
+    UBA(float) x_even_sin = reinterpret_cast<UBA(float)>(off);
+    off += ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE);
+    UBA(float) x_odd_cos = reinterpret_cast<UBA(float)>(off);
+    off += ROUND_UP(totalRopeFPBytes, VECTOR_MAX_BYTESIZE);
+    UBA(uint64_t) positionUB = reinterpret_cast<UBA(uint64_t)>(off);
+    off += ROUND_UP((maxCnt) * sizeof(uint64_t), VECTOR_MAX_BYTESIZE);
+    UBA(uint32_t) slotMappingUB = reinterpret_cast<UBA(uint32_t)>(off);
+    off += need_v_cache ? ROUND_UP((maxCnt) * sizeof(uint32_t), VECTOR_MAX_BYTESIZE) : 0;
     // outInterleaved path: single-head scratch for interleaved [r0,i0,r1,i1,...]
     // (reused per head) + fixed vgather index table filled once on the scalar unit.
-    UBA(float)
-    interleavedFP32Head =
-        ub.AllocBytesAs<float>(outInterleaved ? ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE) : 0);
-    UBA(uint32_t)
-    vgatherIndicesUB = ub.AllocBytesAs<uint32_t>(
-        outInterleaved ? ROUND_UP(ropeDim * sizeof(uint32_t), VECTOR_MAX_BYTESIZE) : 0);
-    UBA(float)
-    rotateFP32 = ub.AllocBytesAs<float>(
-        (doRotate && fullHeadLoad) ? ROUND_UP(totalHeadFPBytes, VECTOR_MAX_BYTESIZE) : 0);
+    UBA(float) interleavedFP32Head = reinterpret_cast<UBA(float)>(off);
+    off += outInterleaved ? ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE) : 0;
+    UBA(uint32_t) vgatherIndicesUB = reinterpret_cast<UBA(uint32_t)>(off);
+    off += outInterleaved ? ROUND_UP(ropeDim * sizeof(uint32_t), VECTOR_MAX_BYTESIZE) : 0;
+    UBA(float) rotateFP32 = reinterpret_cast<UBA(float)>(off);
+    off += (doRotate && fullHeadLoad) ? ROUND_UP(totalHeadFPBytes, VECTOR_MAX_BYTESIZE) : 0;
+    assert(off <= UB_SIZE);
+
+    UBA(Dtype) inputs[2] = {input0, input1};
+    UBA(float) freqs[2] = {freqs0, freqs1};
+    UBA(Dtype) outs[2] = {out0, out1};
 
     int taskNum = nTokens;
     if (nextCoreOffset) {

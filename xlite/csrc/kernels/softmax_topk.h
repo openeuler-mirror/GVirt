@@ -8,7 +8,6 @@
 #pragma once
 #include "kernel_macro.h"
 #include "kernel_operator.h"
-#include "ub_alloc.h"
 
 #ifdef __DAV_C220_VEC__
 constexpr uint32_t BIT_SIZE_OF_U32 = 32;
@@ -50,22 +49,31 @@ public:
         uint32_t idxPad = MAX(pad, sortPad);
         uint32_t padDtype =
             ROUND_UP(numRoutedExperts, VECTOR_MAX_BYTESIZE / sizeof(Dtype)) * sizeof(Dtype);
-        UbAlloc ub;
-        socresIn = ub.AllocBytesAs<float>(pad);
-        indicesIn = ub.AllocBytesAs<uint32_t>(idxPad);
-        routingMapOut = ub.AllocBytesAs<uint32_t>(pad);
-        weightsOut = ub.AllocBytesAs<float>(pad);
-        calc = ub.AllocBytesAs<float>(idxPad);
-        reduceTmp = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
-        sortTmp = ub.AllocBytesAs<float>(2 * idxPad);
-        sortMrgTmp = ub.AllocBytesAs<float>(2 * idxPad);
-        weightsTopK = ub.AllocBytesAs<float>(VECTOR_MAX_BYTESIZE);
+        uint64_t off = 0;
+        socresIn = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += pad;
+        indicesIn = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
+        off += idxPad;
+        routingMapOut = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
+        off += pad;
+        weightsOut = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += pad;
+        calc = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += idxPad;
+        reduceTmp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += VECTOR_MAX_BYTESIZE;
+        sortTmp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += 2 * idxPad;
+        sortMrgTmp = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += 2 * idxPad;
+        weightsTopK = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += VECTOR_MAX_BYTESIZE;
+        indicesTopK = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
         if constexpr (std::is_same<Dtype, bfloat16_t>::value) {
-            indicesTopK = ub.AllocBytesAs<uint32_t>(pad);
-            socresInTmp = ub.AllocBytesAs<Dtype>(padDtype);
-            weightsOutTmp = ub.AllocBytesAs<Dtype>(pad);
-        } else {
-            indicesTopK = ub.AllocBytesAs<uint32_t>(pad);
+            off += pad;
+            socresInTmp = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+            off += padDtype;
+            weightsOutTmp = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
         }
     }
 

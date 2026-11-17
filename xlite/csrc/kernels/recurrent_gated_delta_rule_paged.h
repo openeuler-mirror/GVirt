@@ -8,7 +8,6 @@
 #pragma once
 #include "kernel_macro.h"
 #include "../gdn_metadata.h"
-#include "ub_alloc.h"
 
 #ifdef __DAV_C220_VEC__
 template <typename Dtype>
@@ -51,32 +50,50 @@ public:
         this->gateFp32 = gateFp32;
 
         // 64 V rows keep even K=128 well below the A2 192 KiB UB limit.
-        UbAlloc ub;
-        ioTmp = ub.AllocBytesAs<Dtype>(512);
-        constexpr uint64_t stateTmpBytes =
-            std::is_same<Dtype, float>::value ? 0 : 64 * 128 * sizeof(Dtype);
-        stateTmp = ub.AllocBytesAs<Dtype>(stateTmpBytes);
-        stateTmp2 = ub.AllocBytesAs<Dtype>(stateTmpBytes);
-        qF = ub.AllocBytesAs<float>(512);
-        kF = ub.AllocBytesAs<float>(512);
-        vF = ub.AllocBytesAs<float>(512);
-        stateF = ub.AllocBytesAs<float>(64 * 128 * 4);
-        stateF2 = ub.AllocBytesAs<float>(64 * 128 * 4);
-        product = ub.AllocBytesAs<float>(64 * 128 * 4);
-        delta = ub.AllocBytesAs<float>(256);
-        outF = ub.AllocBytesAs<float>(512);
-        reduceTail = ub.AllocBytesAs<float>(256);
-        deltaBlocks = ub.AllocBytesAs<float>(64 * 32);
-        qF2 = ub.AllocBytesAs<float>(512);
-        kF2 = ub.AllocBytesAs<float>(512);
-        vF2 = ub.AllocBytesAs<float>(512);
-        qStage =
-            ub.AllocBytesAs<Dtype>(std::is_same<Dtype, float>::value ? 0 : 128 * sizeof(Dtype));
-        kStage =
-            ub.AllocBytesAs<Dtype>(std::is_same<Dtype, float>::value ? 0 : 128 * sizeof(Dtype));
-        vStage = ub.AllocBytesAs<Dtype>(std::is_same<Dtype, float>::value ? 0 : 64 * sizeof(Dtype));
-        decayRow = ub.AllocBytesAs<float>(GATE_CAP * 4);
-        betaRow = ub.AllocBytesAs<float>(GATE_CAP * 4);
+        uint64_t off = 0;
+        ioTmp = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+        off += 512;
+        stateTmp = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+        off += std::is_same<Dtype, float>::value ? 0 : 64 * 128 * sizeof(Dtype);
+        stateTmp2 = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+        off += std::is_same<Dtype, float>::value ? 0 : 64 * 128 * sizeof(Dtype);
+        qF = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += 512;
+        kF = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += 512;
+        vF = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += 512;
+        stateF = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += 64 * 128 * 4;
+        stateF2 = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += 64 * 128 * 4;
+        product = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += 64 * 128 * 4;
+        delta = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += 256;
+        outF = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += 512;
+        reduceTail = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += 256;
+        deltaBlocks = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += 64 * 32;
+        qF2 = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += 512;
+        kF2 = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += 512;
+        vF2 = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += 512;
+        qStage = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+        off += std::is_same<Dtype, float>::value ? 0 : 128 * sizeof(Dtype);
+        kStage = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+        off += std::is_same<Dtype, float>::value ? 0 : 128 * sizeof(Dtype);
+        vStage = reinterpret_cast<__ubuf__ Dtype *>((uintptr_t)off);
+        off += std::is_same<Dtype, float>::value ? 0 : 64 * sizeof(Dtype);
+        decayRow = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += GATE_CAP * 4;
+        betaRow = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
+        off += GATE_CAP * 4;
+        assert(off <= UB_SIZE);
     }
 
     __aicore__ inline void LoadVector(__ubuf__ float *dst, __gm__ Dtype *src, uint32_t count)

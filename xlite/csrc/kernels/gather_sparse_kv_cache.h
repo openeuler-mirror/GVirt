@@ -6,7 +6,6 @@
 #include "kernel_param.h"
 #include "kernel_operator.h"
 #include "debug.h"
-#include "ub_alloc.h"
 
 #define CNT_ONE_LOOP GATHER_SPARSE_KV_CACHE_CNT_ONE_LOOP
 #define C8_CNT_ONE_LOOP GATHER_SPARSE_KV_CACHE_C8_CNT_ONE_LOOP
@@ -96,7 +95,7 @@ __aicore__ __inline__ void gather_sparse_kv_cache(
     uint32_t burstCopyCnt =
         CLAMP(burstSize / (kvLoraRank * sizeof(Dtype)), 1u, MIN(tokensPerTask, blockSize));
 
-    UbAlloc ub;
+    uint64_t off = 0;
     __ubuf__ OutDtype *kBufs[GATHER_SPARSE_KV_CACHE_BUF_NUM];
     __ubuf__ uint32_t *topks[GATHER_SPARSE_KV_CACHE_BUF_NUM];
 #ifndef XLITE_GATHER_SPARSE_KV_CACHE_NOPE
@@ -107,32 +106,41 @@ __aicore__ __inline__ void gather_sparse_kv_cache(
     __ubuf__ float *xBuf[GATHER_SPARSE_KV_CACHE_BUF_NUM];
     for (uint32_t b = 0; b < GATHER_SPARSE_KV_CACHE_BUF_NUM; b++) {
         if constexpr (std::is_same<Dtype, int8_t>::value) {
-            ub.Align(UB_BANKGROUP_ROW_SIZE);
-            inputBuf[b] = ub.AllocBytesAs<int8_t>(inputBufBytes);
-            halfBuf[b] = ub.AllocBytesAs<half>(tokensPerTask * kvLoraRank * sizeof(half));
-            xBuf[b] = ub.AllocBytesAs<float>(tokensPerTask * kvLoraRank * sizeof(float));
+            off = ROUND_UP(off, UB_BANKGROUP_ROW_SIZE);
+            inputBuf[b] = reinterpret_cast<__ubuf__ int8_t *>(off);
+            off += inputBufBytes;
+            halfBuf[b] = reinterpret_cast<__ubuf__ half *>(off);
+            off += tokensPerTask * kvLoraRank * sizeof(half);
+            xBuf[b] = reinterpret_cast<__ubuf__ float *>(off);
+            off += tokensPerTask * kvLoraRank * sizeof(float);
         }
-        kBufs[b] = ub.AllocBytesAs<OutDtype>(kHeadBytesPad);
+        kBufs[b] = reinterpret_cast<__ubuf__ OutDtype *>((uintptr_t)off);
+        off += kHeadBytesPad;
 #ifndef XLITE_GATHER_SPARSE_KV_CACHE_NOPE
-        peBufs[b] = ub.AllocBytesAs<OutDtype>(peHeadBytesPad);
+        peBufs[b] = reinterpret_cast<__ubuf__ OutDtype *>((uintptr_t)off);
+        off += peHeadBytesPad;
 #endif
-        topks[b] = ub.AllocBytesAs<uint32_t>(topkBytesPad);
+        topks[b] = reinterpret_cast<__ubuf__ uint32_t *>((uintptr_t)off);
+        off += topkBytesPad;
     }
     if constexpr (std::is_same<Dtype, int8_t>::value) {
-        assert(ub.Offset() + 3 * BLOCK_SIZE <= UB_SIZE);
+        assert(off + 3 * BLOCK_SIZE <= UB_SIZE);
     }
-    uint32_t windowBytes = ROUND_DOWN((UB_SIZE - ub.Offset()) / 3u, BLOCK_SIZE);
+    uint32_t windowBytes = ROUND_DOWN((UB_SIZE - off) / 3u, BLOCK_SIZE);
     uint32_t maxBatchSize = windowBytes / sizeof(int32_t);
-    __ubuf__ int32_t *queryStartLocUb = ub.AllocBytesAs<int32_t>(windowBytes);
-    __ubuf__ int32_t *queryLensUb = ub.AllocBytesAs<int32_t>(windowBytes);
-    __ubuf__ int32_t *cachedLensUb = ub.AllocBytesAs<int32_t>(windowBytes);
+    __ubuf__ int32_t *queryStartLocUb = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)off);
+    off += windowBytes;
+    __ubuf__ int32_t *queryLensUb = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)off);
+    off += windowBytes;
+    __ubuf__ int32_t *cachedLensUb = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)off);
+    off += windowBytes;
     if constexpr (!std::is_same<Dtype, int8_t>::value) {
 #ifndef XLITE_GATHER_SPARSE_KV_CACHE_NOPE
-        assert(ub.Offset() + BLOCK_SIZE <= UB_SIZE && perKBytes % BLOCK_SIZE == 0 && topK > 0 &&
+        assert(off + BLOCK_SIZE <= UB_SIZE && perKBytes % BLOCK_SIZE == 0 && topK > 0 &&
                compressRatio > 0 && blockSize % CNT_ONE_LOOP == 0 && kvLoraRank >= ropeHeadDim &&
                perPeBytes % BLOCK_SIZE == 0);
 #else
-        assert(ub.Offset() + BLOCK_SIZE <= UB_SIZE && perKBytes % BLOCK_SIZE == 0 && topK > 0 &&
+        assert(off + BLOCK_SIZE <= UB_SIZE && perKBytes % BLOCK_SIZE == 0 && topK > 0 &&
                compressRatio > 0 && blockSize % CNT_ONE_LOOP == 0);
 #endif
     }

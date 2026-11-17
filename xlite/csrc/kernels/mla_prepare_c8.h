@@ -4,7 +4,6 @@
 #pragma once
 #include "mla_cache_c8.h"
 #include "norm.h"
-#include "ub_alloc.h"
 
 #ifdef __DAV_C220_VEC__
 template <typename Dtype>
@@ -39,26 +38,38 @@ __aicore__ inline void mla_prepare_c8(GM_ADDR attnQkvc, GM_ADDR qNorm, GM_ADDR q
     __ubuf__ Dtype *normalized[PINGPONG_BUF_NUM];
     __ubuf__ int8_t *packed[PINGPONG_BUF_NUM];
     __ubuf__ float *trig[PINGPONG_BUF_NUM];
-    UbAlloc ub;
+    uint64_t off = 0;
     for (uint32_t curr = 0; curr < PINGPONG_BUF_NUM; ++curr) {
-        inputs[curr] = ub.Alloc<Dtype>(latentDim + ropeDim, VECTOR_REPEAT_BYTESIZE);
-        normalized[curr] = ub.Alloc<Dtype>(latentDim, VECTOR_REPEAT_BYTESIZE);
-        packed[curr] = ub.AllocBytesAs<int8_t>(ROUND_UP(cacheBytes, VECTOR_REPEAT_BYTESIZE));
-        trig[curr] = ub.Alloc<float>(ropeDim, VECTOR_REPEAT_BYTESIZE);
+        inputs[curr] = reinterpret_cast<__ubuf__ Dtype *>(off);
+        off += ROUND_UP((latentDim + ropeDim) * sizeof(Dtype), VECTOR_REPEAT_BYTESIZE);
+        normalized[curr] = reinterpret_cast<__ubuf__ Dtype *>(off);
+        off += ROUND_UP(latentDim * sizeof(Dtype), VECTOR_REPEAT_BYTESIZE);
+        packed[curr] = reinterpret_cast<__ubuf__ int8_t *>(off);
+        off += ROUND_UP(cacheBytes, VECTOR_REPEAT_BYTESIZE);
+        trig[curr] = reinterpret_cast<__ubuf__ float *>(off);
+        off += ROUND_UP(ropeDim * sizeof(float), VECTOR_REPEAT_BYTESIZE);
     }
     uint32_t calcBytes = latentDim * sizeof(float);
-    auto x = ub.AllocBytesAs<float>(
-        MAX(calcBytes, ROUND_UP(ropeDim * sizeof(float), VECTOR_REPEAT_BYTESIZE)));
-    auto tmp = ub.Alloc<float>(latentDim);
-    auto weight = ub.Alloc<float>(latentDim);
-    auto bias = ub.Alloc<float>(latentDim);
+    auto x = reinterpret_cast<__ubuf__ float *>(off);
+    off += MAX(calcBytes, ROUND_UP(ropeDim * sizeof(float), VECTOR_REPEAT_BYTESIZE));
+    auto tmp = reinterpret_cast<__ubuf__ float *>(off);
+    off += calcBytes;
+    auto weight = reinterpret_cast<__ubuf__ float *>(off);
+    off += calcBytes;
+    auto bias = reinterpret_cast<__ubuf__ float *>(off);
+    off += calcBytes;
     __ubuf__ float *rope[8];
     for (uint32_t i = 0; i < 8; ++i) {
-        rope[i] = ub.Alloc<float>(ropeDim, VECTOR_REPEAT_BYTESIZE);
+        rope[i] = reinterpret_cast<__ubuf__ float *>(off);
+        off += ROUND_UP(ropeDim * sizeof(float), VECTOR_REPEAT_BYTESIZE);
     }
-    auto amaxBuf = ub.AllocBytesAs<float>(VECTOR_REPEAT_BYTESIZE);
-    auto factorBuf = ub.AllocBytesAs<float>(VECTOR_REPEAT_BYTESIZE);
-    auto halfValues = ub.Alloc<half>(groupSize);
+    auto amaxBuf = reinterpret_cast<__ubuf__ float *>(off);
+    off += VECTOR_REPEAT_BYTESIZE;
+    auto factorBuf = reinterpret_cast<__ubuf__ float *>(off);
+    off += VECTOR_REPEAT_BYTESIZE;
+    auto halfValues = reinterpret_cast<__ubuf__ half *>(off);
+    off += groupSize * sizeof(half);
+    assert(off <= UB_SIZE);
 
     if (kvNorm) {
         CopyGmToUbufAligned(inputs[0], (__gm__ Dtype *)kvNorm, latentDim * sizeof(Dtype));
