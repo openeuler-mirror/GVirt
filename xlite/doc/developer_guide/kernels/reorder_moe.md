@@ -45,15 +45,16 @@ host 侧不做 dtype 限制，dtype 通过 `elemBytes` 传入；测试覆盖 flo
 
 - forward=1：源偏移 = `chunkOffsets[i]`（chunkRun），目标偏移 = `expertOffsets[e]`；
 - forward=0：两者互换（`csrc/kernels/reorder_moe.cpp` 的 `reorder_moe_kernel`，关键字 `srcOff = expertOffsets[e - localStart]`、`dstOff = chunkRun`）；
-- 每个行段总字节 `cnt * tileBytes`，按 `dataBufSize`（UB 减去三个偏移表后剩余的全部空间）分块：GM→UB（`copy_gm_to_ubuf`，按 BLOCK_SIZE=32B 块数搬运）→ UB→GM（`copy_ubuf_to_gm_align_b32`，按字节长度对齐写回），循环直至搬完；
+- 每个行段总字节 `cnt * tileBytes`，按 `chunkBufSize`（UB 剩余空间对半、32B 对齐）分子块：GM→UB 与 UB→GM 交替走 ping-pong 双半区（`CopyGmToUbufAligned`/`CopyUbufToGmAligned`，按字节长度自动选 b32/b16 对齐变体，见 `kernel_macro.h`），循环直至搬完；
 - 搬完一个 pair 后 `expertOffsets[e] += cnt; chunkRun += cnt` 推进两张游标（`csrc/kernels/reorder_moe.cpp` 的 `reorder_moe_kernel`，关键字 `expertOffsets[e - localStart] += cnt`、`chunkRun += cnt`），语义与测试参考实现一致（`tests/kernels/reorder_moe.py` 的 `reorder_forward_ref`，关键字 `expert_offsets[e] += cnt`、`chunk_run += cnt`）。
 
 ### 流水线同步
 
-分块拷贝循环内用 `PIPE_MTE3 → PIPE_MTE2` 的 EVENT_ID0 乒乓：先 `set_flag` 预置，每次 `wait_flag` 确保上一块 UB→GM 已完成后才把新数据读入同一 `dataBuf`，读入完成（`PIPE_MTE2 → PIPE_MTE3`）后再写回（`csrc/kernels/reorder_moe.cpp` 的 `reorder_moe_kernel`，关键字 `set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0)`、`copy_gm_to_ubuf(dataBuf`）。这是单缓冲 + flag 的串行复用（同一 dataBuf 分块），保证 GM→UB→GM 顺序执行不冲突。
+数据搬运采用双缓冲 ping-pong 协议（与 `split.cpp` 同款）：`dataBuf` 对半分为两个暂存半区，子块 k 读入 `dataBuf[k % 2]`，上一个子块延迟一拍从 `dataBuf[(k-1) % 2]` 写回，使 MTE2（GM→UB 读入）与 MTE3（UB→GM 写回）重叠执行，而非单缓冲下的交替串行。延迟写回跨 pair 边界同样成立：input 只读、output 只写（两个不相交的 GM 张量），不同 pair 的读写之间无 hazard，事件 flag 仅用于保护 UB 暂存半区的复用（`csrc/kernels/reorder_moe.cpp` 的 `reorder_moe_kernel`，关键字 `EVENT_ID0 + wbuf`、`EVENT_ID0 + curr`）。循环前用两个 `set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0/1)` 预置种子，收尾时冲刷最后一个待写子块并等待两个半区排空（`csrc/kernels/reorder_moe.cpp` 的 `reorder_moe_kernel`，关键字 `wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0)`）。GM 偏移（`srcByteOff`/`dstByteOff`/`bo`）均为 64 位，避免大张量下的截断。
 
 ### 边界与空段处理
 
+- input 与 output 必须是两个独立张量（不支持 in-place）：流水协议让后一个行段的 GM 读入与前一个行段的写回并发，若两者指向同一 GM 区域会读到未写完的数据；所有现有调用方（`csrc/model.cpp` 的 dispatch/combine 两处）均传入独立分配的张量；
 - `numPairs == 0`（本卡无本地专家）或 `pairStart >= numPairs`（block 多于 pair）时直接返回（`csrc/kernels/reorder_moe.cpp` 的 `reorder_moe_kernel`，关键字 `if (numPairs == 0)`、`if (pairStart >= numPairs)`）；
 - `cnt == 0` 的 pair 跳过搬运但照常推进游标（`csrc/kernels/reorder_moe.cpp` 的 `reorder_moe_kernel`，关键字 `if (cnt == 0)`）；
 - host 侧 `in.numel == 0 || localStart >= localEnd` 时直接返回不 launch（`csrc/op.cpp` 的 `XliteOpReorderMoE`，关键字 `in.numel == 0`、`localStart >= localEnd`）。
