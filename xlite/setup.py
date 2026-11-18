@@ -219,7 +219,7 @@ class CMakeBuild(build_ext):
         # Numbered -j (not bare) so sub-makes get a jobserver instead of unbounded MAKEFLAGS,
         # which they run verbatim and fail with EMFILE on shared hosts.
         max_jobs = os.environ.get("MAX_JOBS") or os.environ.get("CMAKE_BUILD_PARALLEL_LEVEL")
-        build_cmd = ["cmake", "--build", str(build_temp), "-j", max_jobs or str(min(os.cpu_count() or 4, 64))]
+        build_cmd = ["cmake", "--build", str(build_temp), "-j", max_jobs or str(min(os.cpu_count() or 4, 128))]
         install_cmd = ["cmake", "--install", str(build_temp)]
 
         # Wheel (non-editable) builds must never ship debug code. Debug is driven purely by the XLITE_DEBUG_ON env var.
