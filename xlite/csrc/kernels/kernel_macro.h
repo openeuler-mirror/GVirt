@@ -841,10 +841,13 @@ __inline__ __aicore__ void MrgSort(__ubuf__ float *sort0, __ubuf__ float *sort1,
             uint64_t stride = fullRepeat * lenPerRepeat * 2;
             __ubuf__ float *addrs[4] = {srcAddr, srcAddr + stride, srcAddr + 2 * stride,
                                         srcAddr + 3 * stride};
+            // vmrgsort4 reads four consecutive srcs from addrs[0]; keep all four
+            // lens equal (trim to topLen only when fullRepeat==1).
             uint64_t firstLen = fullRepeat > 1 ? lenPerRepeat : topLen;
-            vmrgsort4(dstAddr, addrs, firstLen | (topLen << 16) | (topLen << 32) | (topLen << 48),
+            vmrgsort4(dstAddr, addrs,
+                      firstLen | (firstLen << 16) | (firstLen << 32) | (firstLen << 48),
                       fullRepeat | (0xFull << MGR_SORT_VALID_BITS_OFFSET));
-            lenPerRepeatNext = firstLen + topLen * 3;  // lenPerRepeat for the next iter
+            lenPerRepeatNext = firstLen * 4;  // lenPerRepeat for the next iter
         }
 
         sortLen = fullRepeat * lenPerRepeatNext;  // sortLen for the next iter in dstAddr

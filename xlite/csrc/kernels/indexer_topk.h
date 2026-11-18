@@ -39,7 +39,8 @@ public:
                                 uint32_t topK, uint8_t skipDenseTopk, GM_ADDR kScaleCache = nullptr,
                                 uint32_t kScaleCacheStride = 0, uint32_t compressRatio = 1,
                                 uint32_t weightCols = 0, uint8_t kvSplit = 0,
-                                uint8_t qTileOverride = 0)
+                                uint8_t qTileOverride = 0, uint8_t packTail = 0, uint8_t reluQk = 1,
+                                uint32_t outStride = 0)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->q.SetGlobalBuffer((__gm__ Dtype *)q);
@@ -74,6 +75,15 @@ public:
             qTileOverride > 0 ? MIN(qTileOverride, MAX_INDEXER_Q_TILE_LEN) : MAX_INDEXER_Q_TILE_LEN;
         this->skipDenseTopk = skipDenseTopk > 0;
         this->compressRatio = compressRatio > 0 ? compressRatio : 1;
+        // packTail expands each selected pool index into kpool token indices + causal tail.
+        this->packTail = packTail > 0;
+        this->kpool = this->packTail ? MAX(this->compressRatio, 2u) : 0;
+        this->outWidth = this->packTail ? this->topK * this->kpool + this->kpool - 1 : this->topK;
+        // outStride (host-owned) pads rows to TOPK_RUN_ALIGN slots so every row base
+        // is 512B-aligned and the AIV softmax sees a full number of 128-slot blocks.
+        this->outStride = outStride;
+        // glm5 indexer scores need no per-head ReLU; upstream fusion applies one.
+        this->reluQk = reluQk > 0;
         this->tileSizeOfCachedKV = ROUND_UP(INDEXER_KV_TILE_LEN, SORT_BLOCK_SIZE);
         this->blockIdx = block_idx;
         this->subBlockIdx = get_subblockid();
@@ -185,6 +195,8 @@ public:
         // totalSort use
         uint64_t off = 0;
         this->totalSort = reinterpret_cast<__ubuf__ float *>(off);
+        // MrgSort's dst alternates mrgSortBuf0/1; totalSort only receives
+        // isFirst copies, chunk merges and the final vmuls (4*MAX_TOPK_NUM floats).
         off += ROUND_UP(MAX_TOPK_NUM * 4 * sizeof(float) + UB_BANK_CONFLICT_OFFSET,
                         UB_BANKGROUP_ROW_SIZE) -
                UB_BANK_CONFLICT_OFFSET;
@@ -193,8 +205,11 @@ public:
         off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
         this->sortIndices = reinterpret_cast<__ubuf__ uint32_t *>(off);
         off += ROUND_UP(MAX_INDEXER_KV_TILE_LEN * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
+        // packTail rows are wider than MAX_TOPK_NUM (topK*kpool + kpool-1) and are
+        // copied at the 128-slot-aligned outStride, so the template must cover the
+        // full stride, not just outWidth.
         this->defaultTopkIndices = reinterpret_cast<__ubuf__ uint32_t *>(off);
-        off += ROUND_UP(topK * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
+        off += ROUND_UP(outStride * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
 
         // in
         this->in[0] = reinterpret_cast<__ubuf__ WeightDtype *>(off);
@@ -207,10 +222,12 @@ public:
         off += ROUND_UP(MAX_TOPK_NUM * 2 * sizeof(float), VECTOR_MAX_BYTESIZE);
 
         // out
+        // Non-packTail rows stay MAX_TOPK_NUM-wide (the legacy output buffer contract).
+        uint64_t outElems = MAX((uint64_t)outStride, (uint64_t)MAX_TOPK_NUM);
         this->out[0] = reinterpret_cast<__ubuf__ uint32_t *>(off);
-        off += ROUND_UP(MAX_TOPK_NUM * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
+        off += ROUND_UP(outElems * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
         this->out[1] = reinterpret_cast<__ubuf__ uint32_t *>(off);
-        off += ROUND_UP(MAX_TOPK_NUM * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
+        off += ROUND_UP(outElems * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
 
         // calc
         uint64_t invoff =
@@ -353,10 +370,11 @@ public:
                 if constexpr (std::is_same<Dtype, int8_t>::value) {
                     // LI rounding: FP16(relu(INT32 dot) / 1024).
                     CopyL0CToL1(kql1Buf[curr], qkl0cBuf[curr], mBlockPad, nBlockPad, mBlockPad,
-                                mBlockPad, 1.0f / 1024.0f, true);
+                                mBlockPad, 1.0f / 1024.0f, this->reluQk);
                 } else {
                     CopyL0CToL1(kql1Buf[curr], qkl0cBuf[curr], mBlockPad, nBlockPad, mBlockPad,
-                                mBlockPad * sizeof(Dtype) * kBlockSize / BLOCK_SIZE, /*reluEn=*/1);
+                                mBlockPad * sizeof(Dtype) * kBlockSize / BLOCK_SIZE,
+                                /*reluEn=*/this->reluQk);
                 }
                 SetFlag<HardEvent::FIX_M>(EVENT_ID0 + curr);
 
@@ -394,11 +412,11 @@ public:
                     if constexpr (std::is_same<Dtype, int8_t>::value) {
                         // LI rounding: FP16(relu(INT32 dot) / 1024).
                         CopyL0CToL1(kql1Buf[next], qkl0cBuf[next], mBlockPad, nBlockPad, mBlockPad,
-                                    mBlockPad, 1.0f / 1024.0f, true);
+                                    mBlockPad, 1.0f / 1024.0f, this->reluQk);
                     } else {
                         CopyL0CToL1(kql1Buf[next], qkl0cBuf[next], mBlockPad, nBlockPad, mBlockPad,
                                     mBlockPad * sizeof(Dtype) * kBlockSize / BLOCK_SIZE,
-                                    /*reluEn=*/1);
+                                    /*reluEn=*/this->reluQk);
                     }
                     SetFlag<HardEvent::FIX_M>(EVENT_ID0 + next);
 
@@ -486,7 +504,11 @@ public:
             bool isFinal = kvOffset + validKvLen > p0;
             int repeat = DIV_ROUND_UP(validKvLen, calcPad);
             int fullRepeat = validKvLen / calcPad;
+            // vbitsort drops the index payload at repeat 1; keep repeat >= 2.
             int sortRepeat = DIV_ROUND_UP(validKvLen, SORT_BLOCK_SIZE);
+            if (sortRepeat == 1) {
+                sortRepeat = 2;
+            }
             pipe_barrier(PIPE_V);
 
             // prepare sortIndices for the current query position
@@ -557,6 +579,13 @@ public:
                     totalSortOnHold = false;
                 }
                 MrgSort(mrgSortBuf1, mrgSortBuf0, sortRepeat, &localSort, topK, totalSort);
+                // MrgSort can still return sort0 for a single repeat; downstream
+                // unconditionally reads totalSort, so keep the fallback for that path.
+                if (localSort != totalSort) {
+                    copy_ubuf_to_ubuf(totalSort, localSort, 0, 1,
+                                      DIV_ROUND_UP(topK * 2 * sizeof(float), BLOCK_SIZE), 0, 0);
+                    pipe_barrier(PIPE_V);
+                }
             } else {
                 MrgSort(mrgSortBuf1, mrgSortBuf0, sortRepeat, &localSort, topK);
                 pipe_barrier(PIPE_V);
@@ -613,21 +642,73 @@ public:
                 vreducev2(index0, (__ubuf__ uint32_t *)totalSort, nullptr, topKCalcRepeatX2, 1, 2,
                           8, 0);
                 pipe_barrier(PIPE_V);
-                // mrgSortBuf0: top k indices; totalSort: negative of the index values as scores
-                vmuls(totalSort, (__ubuf__ float *)index0, -1.0f, topKCalcRepeat, 1, 1, 8, 8);
-                pipe_barrier(PIPE_V);
-                vbitsort(mrgSortBuf1, totalSort, index0, topKSortRepeat);
-                pipe_barrier(PIPE_V);
-                __ubuf__ float *indexSorted;
-                MrgSort(mrgSortBuf1, mrgSortBuf0, topKSortRepeat, &indexSorted, topK);
-                pipe_barrier(PIPE_V);
                 wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + curr);  // acquire `out[curr]`
-                vreducev2(out[curr], (__ubuf__ uint32_t *)indexSorted, nullptr, topKCalcRepeatX2, 1,
-                          2, 8, 0);
+                if (topKSortRepeat <= 1) {
+                    // topK <= 32: vbitsort's tag lane is unreliable at repeat 1;
+                    // MrgSort just aliases through, so use insertion sort.
+                    set_flag(PIPE_V, PIPE_S, EVENT_ID0);
+                    wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
+                    for (uint32_t a = 1; a < topK; a++) {
+                        uint32_t v = index0[a];
+                        int32_t b = a - 1;
+                        while (b >= 0 && index0[b] > v) {
+                            index0[b + 1] = index0[b];
+                            b--;
+                        }
+                        index0[b + 1] = v;
+                    }
+                    set_flag(PIPE_S, PIPE_V, EVENT_ID0);
+                    wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
+                    copy_ubuf_to_ubuf(out[curr], index0, 0, 1, topK * sizeof(uint32_t), 0, 0);
+                } else {
+                    // mrgSortBuf0: top k indices; totalSort: negative of the index values as scores
+                    vmuls(totalSort, (__ubuf__ float *)index0, -1.0f, topKCalcRepeat, 1, 1, 8, 8);
+                    // Score MrgSort returns ROUND_UP(topK, 32) entries; sink the
+                    // extras so the index sort keeps the score-selected topK.
+                    uint32_t topKAligned = topKSortRepeat * SORT_BLOCK_SIZE;
+                    if (topK < topKAligned) {
+                        set_flag(PIPE_V, PIPE_S, EVENT_ID0);
+                        wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
+                        for (uint32_t j = topK; j < topKAligned; j++) {
+                            totalSort[j] = min;
+                        }
+                        set_flag(PIPE_S, PIPE_V, EVENT_ID0);
+                        wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
+                    }
+                    pipe_barrier(PIPE_V);
+                    vbitsort(mrgSortBuf1, totalSort, index0, topKSortRepeat);
+                    pipe_barrier(PIPE_V);
+                    __ubuf__ float *indexSorted;
+                    MrgSort(mrgSortBuf1, mrgSortBuf0, topKSortRepeat, &indexSorted, topK);
+                    pipe_barrier(PIPE_V);
+                    vreducev2(out[curr], (__ubuf__ uint32_t *)indexSorted, nullptr,
+                              topKCalcRepeatX2, 1, 2, 8, 0);
+                }
                 pipe_barrier(PIPE_V);
+                if (packTail) {
+                    // Expand block indices to token indices in place, back to front so
+                    // source slot c/kpool is still untouched when slot c is written.
+                    set_flag(PIPE_V, PIPE_S, EVENT_ID0);
+                    wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
+                    for (int32_t c = (int32_t)topK * (int32_t)kpool - 1; c >= 0; c--) {
+                        out[curr][c] = out[curr][c / kpool] * kpool + (uint32_t)(c % kpool);
+                    }
+                    for (int32_t toff = 0; toff < (int32_t)kpool - 1; toff++) {
+                        out[curr][topK * kpool + toff] = 0xFFFFFFFFu;
+                    }
+                    BuildTail(out[curr], queryPosBase + idx);
+                    // Re-fill the 128-slot row padding per row; one-time init is
+                    // overwritten by later aligned vector writes.
+                    for (uint32_t c = outWidth; c < outStride; c++) {
+                        out[curr][c] = 0xFFFFFFFFu;
+                    }
+                    set_flag(PIPE_S, PIPE_V, EVENT_ID0);
+                    wait_flag(PIPE_S, PIPE_V, EVENT_ID0);
+                }
                 set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + curr);
                 wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0 + curr);
-                CopyUbufToGmAligned(topkIndices + idx * topK, out[curr], topK * sizeof(uint32_t));
+                CopyUbufToGmAligned(topkIndices + idx * outStride, out[curr],
+                                    outStride * sizeof(uint32_t));
                 set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + curr);  // release `out[curr]`
             }
             curr = 1 - curr;
@@ -657,6 +738,58 @@ public:
         }
         return (pos + 1) / static_cast<int32_t>(compressRatio) - 1;
     }
+
+#ifdef __DAV_C220_VEC__
+    // packTail row epilogue: patch tail lanes into the template UB so each row
+    // goes out in one MTE3 copy; scalar S-pipe GM stores race the next row copy
+    // even across set/wait fences.
+    __aicore__ inline void BuildTail(__ubuf__ uint32_t *tmpl, int32_t pos)
+    {
+        int32_t tailStart = ((pos + 1) / (int32_t)kpool) * (int32_t)kpool;
+        int32_t tailCol = MIN(tailStart, (int32_t)(topK * kpool));
+        int32_t tailCount = pos + 1 - tailStart;
+        for (int32_t toff = 0; toff < (int32_t)kpool - 1; toff++) {
+            tmpl[tailCol + toff] = toff < tailCount ? (uint32_t)(tailStart + toff) : 0xFFFFFFFFu;
+        }
+        lastTailCol = tailCol;
+    }
+
+    // Restore the template lanes clobbered by the previous BuildTail.
+    __aicore__ inline void RestorePrevTail(__ubuf__ uint32_t *tmpl)
+    {
+        if (lastTailCol < 0) {
+            return;
+        }
+        for (int32_t toff = 0; toff < (int32_t)kpool - 1; toff++) {
+            uint32_t col = (uint32_t)(lastTailCol + toff);
+            tmpl[col] = col < topK * kpool ? col : 0xFFFFFFFFu;
+        }
+        lastTailCol = -1;
+    }
+
+    // Dense default-topk rows from the identity template (in-row fence pairs only).
+    __aicore__ inline void StoreDefaultTopkRows(__gm__ uint32_t *dst, int queryPosBase,
+                                                int queryTaskLen)
+    {
+        __ubuf__ uint32_t *tmpl = this->defaultTopkIndices;
+        for (int i = 0; i < queryTaskLen; i++) {
+            if (MapPosToKv(queryPosBase + i) >= (int32_t)topK) {
+                break;
+            }
+            if (packTail) {
+                RestorePrevTail(tmpl);
+                BuildTail(tmpl, queryPosBase + i);
+                set_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+                wait_flag(PIPE_S, PIPE_MTE3, EVENT_ID0);
+            }
+            CopyUbufToGmAligned(dst + i * outStride, tmpl, outStride * sizeof(uint32_t));
+            if (packTail) {
+                set_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
+                wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0);
+            }
+        }
+    }
+#endif
 
     // Execute one (query tile, KV chunk) work item on this block: AIC computes one
     // chunk's scores and notifies the block's AIVs via the ffts ping-pong; each AIV
@@ -704,15 +837,17 @@ public:
         if (nWorkStart + nWorkCurCore > nWork) {
             nWorkCurCore = nWork - nWorkStart;
         }
-        uint32_t outOffset = (queryTaskOffset + nWorkStart) * topK;
+        // lastTopk rows are 2*topK wide, but packed output rows use outStride
+        // (ROUND_UP(topK*kpool+kpool-1, 128) with packTail); the two strides differ.
+        uint32_t lastTopkRow = queryTaskOffset + nWorkStart;
         wait_flag_dev(a2vSyncFlag[curr]);
         dbg_printf("block%d subblock%u: {batch %d, query start loc %u, query [%u - "
                    "%u), index k [%u - %u)} use %d buf\n",
                    blockIdx, subBlockIdx, batchIdx, queryStart, queryOffset + nWorkStart,
                    queryOffset + nWorkStart + nWorkCurCore, kvOffset, kvOffset + kvLen, curr);
         RunAivTopk((__gm__ ScoreDtype *)scores[curr][nWorkStart * tileSizeOfCachedKV].GetPhyAddr(),
-                   lastTopk + outOffset * 2, nWorkCurCore, kvOffset, kvLen, topK,
-                   topkIndices + outOffset, queryPosBase + nWorkStart, blockTable);
+                   lastTopk + lastTopkRow * 2 * topK, nWorkCurCore, kvOffset, kvLen, topK,
+                   topkIndices + lastTopkRow * outStride, queryPosBase + nWorkStart, blockTable);
         ffts_cross_core_sync(PIPE_MTE2, v2aSyncFlag[curr]);
 #endif
     }
@@ -743,11 +878,23 @@ public:
 
         bool assignedDefaultTopk =
             !skipDenseTopk && blockIdx == block_num - 1 && subBlockIdx == AIV_TO_AIC - 1;
-        uint64_t defaultTopkBytes = topK * sizeof(uint32_t);
+        uint64_t defaultTopkBytes = outStride * sizeof(uint32_t);
         if (assignedDefaultTopk) {
             CopyGmToUbufAligned(this->defaultTopkIndices, this->seqPositions, defaultTopkBytes);
             set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
             wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
+            // The template is patched by PIPE_S scalar writes below and in BuildTail;
+            // wait for the MTE2 load to land before those writes, otherwise the load
+            // can overwrite the first dense row's tail patch.
+            if (packTail) {
+                set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+                wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+                // Cover the causal-tail placeholder and the 128-slot row padding;
+                // BuildTail only patches the kpool-1 tail lanes.
+                for (uint32_t c = topK * kpool; c < outStride; c++) {
+                    this->defaultTopkIndices[c] = 0xFFFFFFFFu;
+                }
+            }
         }
         CopyGmToUbufAligned(this->sortIndices, this->seqPositions + this->sortIndicesStart,
                             this->sortIndicesBytes);
@@ -798,14 +945,8 @@ public:
 #ifdef __DAV_C220_VEC__
                     if (assignedDefaultTopk && kvOffset == 0 &&
                         MapPosToKv(queryPosBase) < (int32_t)topK) {
-                        __gm__ uint32_t *dst = this->topkIndices + queryTaskOffset * topK;
-                        for (int i = 0; i < queryTaskLen; i++) {
-                            if (MapPosToKv(queryPosBase + i) >= (int32_t)topK) {
-                                break;
-                            }
-                            CopyUbufToGmAligned(dst + i * topK, this->defaultTopkIndices,
-                                                defaultTopkBytes);
-                        }
+                        StoreDefaultTopkRows(this->topkIndices + queryTaskOffset * outStride,
+                                             queryPosBase, queryTaskLen);
                     }
 #endif
                     // skip dense tiles entirely or chunks past the tile's causal bound
@@ -842,14 +983,8 @@ public:
                     int queryPosEndKvBound = MapPosToKv(queryPosEnd);
 #ifdef __DAV_C220_VEC__
                     if (assignedDefaultTopk && MapPosToKv(queryPosBase) < (int32_t)topK) {
-                        __gm__ uint32_t *dst = this->topkIndices + queryTaskOffset * topK;
-                        for (int i = 0; i < queryTaskLen; i++) {
-                            if (MapPosToKv(queryPosBase + i) >= (int32_t)topK) {
-                                break;
-                            }
-                            CopyUbufToGmAligned(dst + i * topK, this->defaultTopkIndices,
-                                                defaultTopkBytes);
-                        }
+                        StoreDefaultTopkRows(this->topkIndices + queryTaskOffset * outStride,
+                                             queryPosBase, queryTaskLen);
                     }
 #endif
                     // skip dense tiles entirely (every token's causal boundary < topK)
@@ -922,8 +1057,13 @@ private:
     uint32_t setNextGeneration;
     uint32_t waitPrevGeneration;
     int resetPrevCore;
-    bool kvSplit;       // true: split to (tile, chunk) tasks with cross-core relay
-    int queryTileSize;  // runtime tile override (Init); see Init's qTileOverride
+    bool kvSplit;           // true: split to (tile, chunk) tasks with cross-core relay
+    int queryTileSize;      // runtime tile override (Init); see Init's qTileOverride
+    bool packTail = false;  // expand block indices to tokens + causal tail (see Init)
+    bool reluQk = true;     // per-head ReLU in the AIC score fusion (see Init)
+    uint32_t kpool = 0;
+    uint32_t outWidth = 0;   // topK, or topK*kpool + kpool-1 when packTail
+    uint32_t outStride = 0;  // GM row pitch in words; 128-slot-aligned when packTail
 
 #ifdef __DAV_C220_CUBE__
     LocalTensor<Dtype> ql1Buf;                            // event 4
@@ -945,6 +1085,8 @@ private:
     __ubuf__ float *totalSort;
     __ubuf__ uint32_t *sortIndices;
     __ubuf__ uint32_t *defaultTopkIndices;
+    // template lanes clobbered by BuildTail, restored by RestorePrevTail
+    int32_t lastTailCol = -1;
     uint32_t sortIndicesStart = 0;
     uint32_t sortIndicesBytes = 32;
     uint32_t sortIndicesRepeats = 1;
@@ -958,13 +1100,14 @@ private:
         GM_ADDR seqPositions, GM_ADDR topkIndices, GM_ADDR sync, uint32_t kCacheStride,           \
         uint32_t nHeads, uint32_t headDim, uint32_t blockSize, uint32_t batch,                    \
         uint32_t blockTableStride, uint32_t maxNumBlock, uint32_t topK, uint8_t skipDenseTopk,    \
-        uint32_t compressRatio, uint32_t weightCols, uint8_t kvSplit, uint8_t qTileOverride)      \
+        uint32_t compressRatio, uint32_t weightCols, uint8_t kvSplit, uint8_t qTileOverride,      \
+        uint8_t packTail, uint8_t reluQk, uint32_t outStride)                                     \
     {                                                                                             \
         IndexerTopK<dtype, float, dtype, dtype> op;                                               \
         op.Init(q, kCache, weight, queryStartLoc, queryLens, cachedLens, blockTables, scores,     \
                 lastTopk, seqPositions, topkIndices, sync, kCacheStride, nHeads, headDim,         \
                 blockSize, batch, blockTableStride, maxNumBlock, topK, skipDenseTopk, nullptr, 0, \
-                compressRatio, weightCols, kvSplit, qTileOverride);                               \
+                compressRatio, weightCols, kvSplit, qTileOverride, packTail, reluQk, outStride);  \
         op.Run();                                                                                 \
     }
 
@@ -976,13 +1119,14 @@ private:
         uint32_t heads, uint32_t dim, uint32_t block_size, uint32_t batch,                        \
         uint32_t block_table_stride, uint32_t max_blocks, uint32_t topk, uint8_t skip_dense_topk, \
         GM_ADDR k_scale_cache, uint32_t k_scale_cache_stride, uint32_t compress_ratio,            \
-        uint32_t weight_cols, uint8_t kvSplit, uint8_t q_tile_override)                           \
+        uint32_t weight_cols, uint8_t kvSplit, uint8_t q_tile_override, uint8_t pack_tail,        \
+        uint8_t relu_qk, uint32_t out_stride)                                                     \
     {                                                                                             \
         IndexerTopK<dtype, int32_t, half, float> op;                                              \
         op.Init(q, k_cache, weight, query_start_loc, query_lens, cached_lens, block_tables,       \
                 scores, last_topk, seq_positions, topk_indices, sync, k_cache_stride, heads, dim, \
                 block_size, batch, block_table_stride, max_blocks, topk, skip_dense_topk,         \
                 k_scale_cache, k_scale_cache_stride, compress_ratio, weight_cols, kvSplit,        \
-                q_tile_override);                                                                 \
+                q_tile_override, pack_tail, relu_qk, out_stride);                                 \
         op.Run();                                                                                 \
     }

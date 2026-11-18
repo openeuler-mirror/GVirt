@@ -278,7 +278,8 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                         XTensor &blockTables, XTensor &sync, uint32_t nHeads, uint32_t headDim,
                         uint32_t blockSize, uint32_t batch, uint32_t topK,
                         uint8_t skipDenseTopk = 0, const XTensor &kScaleCache = XTensor(),
-                        uint32_t compressRatio = 1, uint8_t kvSplit = 0, uint8_t qTile = 0);
+                        uint32_t compressRatio = 1, uint8_t kvSplit = 0, uint8_t qTile = 0,
+                        uint8_t packTail = 0, uint32_t outStride = 0, uint8_t reluQk = 1);
 void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output,
                  uint32_t calcOffset = 0, uint32_t calcNum = UINT32_MAX);
 void XliteOpExpertsCountsSum(XRuntime &rt, XTensor &expertsCountsInput, XTensor &tokensPerEpgroup,

@@ -2932,7 +2932,8 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
                  at::Tensor &cachedLens, at::Tensor &blockTables, uint32_t nHeads, uint32_t headDim,
                  uint32_t blockSize, uint32_t batch, uint32_t topK,
                  const std::optional<at::Tensor> &kScaleCache = std::nullopt,
-                 uint32_t compressRatio = 1, uint8_t kvSplit = 0, uint8_t qTile = 0)
+                 uint32_t compressRatio = 1, uint8_t kvSplit = 0, uint8_t qTile = 0,
+                 uint8_t packTail = 0, uint32_t outStride = 0, uint8_t reluQk = 1)
 {
     XTensor _q, _kCache, _weight, _topkIndices, _queryStartLoc, _lens, _cachedLens, _blockTables,
         _ks;
@@ -2982,7 +2983,8 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
 
     XliteOpIndexerTopK(rt, _q, _kCache, _weight, scores, lastTopk, seqPositions, _topkIndices,
                        _queryStartLoc, _lens, _cachedLens, _blockTables, sync, nHeads, headDim,
-                       blockSize, batch, topK, 0, _ks, compressRatio, kvSplit, qTile);
+                       blockSize, batch, topK, 0, _ks, compressRatio, kvSplit, qTile, packTail,
+                       outStride, reluQk);
     rt.Synchronize();
     rt.PutTensor(sync);
     rt.PutTensor(lastTopk);
@@ -4910,14 +4912,27 @@ TORCH_LIBRARY(xlite_sabi, m)
               torch::arg("cached_lens"), torch::arg("block_tables"), torch::arg("n_heads"),
               torch::arg("head_dim"), torch::arg("block_size"), torch::arg("batch")})
         .def("indexer_topk", op<&IndexerTopK>,
-             {torch::arg("rt"), torch::arg("q"), torch::arg("k_cache"), torch::arg("weight"),
-              torch::arg("topk_indices"), torch::arg("query_start_loc"), torch::arg("lens"),
-              torch::arg("cached_lens"), torch::arg("block_tables"), torch::arg("n_heads"),
-              torch::arg("head_dim"), torch::arg("block_size"), torch::arg("batch"),
-              torch::arg("top_k"), torch::arg("k_scale_cache") = torch::arg::none(),
+             {torch::arg("rt"),
+              torch::arg("q"),
+              torch::arg("k_cache"),
+              torch::arg("weight"),
+              torch::arg("topk_indices"),
+              torch::arg("query_start_loc"),
+              torch::arg("lens"),
+              torch::arg("cached_lens"),
+              torch::arg("block_tables"),
+              torch::arg("n_heads"),
+              torch::arg("head_dim"),
+              torch::arg("block_size"),
+              torch::arg("batch"),
+              torch::arg("top_k"),
+              torch::arg("k_scale_cache") = torch::arg::none(),
               torch::arg("compress_ratio") = static_cast<int64_t>(1),
               torch::arg("kv_split") = static_cast<int64_t>(0),
-              torch::arg("q_tile") = static_cast<int64_t>(0)})
+              torch::arg("q_tile") = static_cast<int64_t>(0),
+              torch::arg("pack_tail") = static_cast<int64_t>(0),
+              torch::arg("out_stride") = static_cast<int64_t>(0),
+              torch::arg("relu_qk") = static_cast<int64_t>(1)})
         .def("muls", muls_op,
              {torch::arg("rt"), torch::arg("input"), torch::arg("scale"), torch::arg("output"),
               torch::arg("calc_offset") = static_cast<int64_t>(0),

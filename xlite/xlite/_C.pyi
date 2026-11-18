@@ -3950,6 +3950,9 @@ def indexer_topk(
     compress_ratio: int = 1,
     kv_split: int = 0,
     q_tile: int = 0,
+    pack_tail: int = 0,
+    out_stride: int = 0,
+    relu_qk: int = 1,
 ) -> None:
     """Fused indexer scores + top-k selection over cached keys.
 

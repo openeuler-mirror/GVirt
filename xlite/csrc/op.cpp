@@ -2802,7 +2802,7 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                         XTensor &blockTables, XTensor &sync, uint32_t nHeads, uint32_t headDim,
                         uint32_t blockSize, uint32_t batch, uint32_t topK, uint8_t skipDenseTopk,
                         const XTensor &kScaleCache, uint32_t compressRatio, uint8_t kvSplit,
-                        uint8_t qTile)
+                        uint8_t qTile, uint8_t packTail, uint32_t outStride, uint8_t reluQk)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -2812,13 +2812,43 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                                  std::to_string(MAX_INDEXER_Q_TILE_LEN) + "], got " +
                                  std::to_string(qTile));
     }
+    // packTail expands each compressed block into kpool token slots; kpool=1
+    // has no causal tail and would disagree with the kernel's MAX(ratio, 2).
+    if (packTail && compressRatio < 2) {
+        throw std::invalid_argument(std::string(__func__) +
+                                    ": packTail requires compressRatio >= 2 (kpool)");
+    }
+    // packTail output contract: row width = topK*kpool + kpool-1 (block→token
+    // expansion + causal tail), rows padded to a TOPK_RUN_ALIGN-slot stride so
+    // every GM row base is aligned and the AIV softmax sees full 128-slot mask
+    // blocks. Keep the widened row within the softmax/kernel UB carve (the
+    // pool-space topK check above cannot bound the expanded width).
+    uint32_t outWidth = packTail ? topK * compressRatio + compressRatio - 1 : topK;
+    if (packTail && outWidth > MAX_TOPK_RUN_NUM) {
+        throw std::invalid_argument(std::string(__func__) + ": packTail output width must be <= " +
+                                    std::to_string(MAX_TOPK_RUN_NUM));
+    }
+    uint32_t expectedStride =
+        packTail ? DIV_ROUND_UP(outWidth, TOPK_RUN_ALIGN) * TOPK_RUN_ALIGN : outWidth;
+    if (outStride && outStride != expectedStride) {
+        throw std::invalid_argument(std::string(__func__) + ": outStride must be " +
+                                    std::to_string(expectedStride) +
+                                    " when packTail=" + std::to_string(packTail));
+    }
+    outStride = expectedStride;
+    if (packTail && topkIndices.shape[1] != outStride) {
+        throw std::invalid_argument(std::string(__func__) + ": topkIndices.shape[1] must be " +
+                                    std::to_string(outStride) + " when packTail is enabled");
+    }
     blockTables.AtLeast2D();
     uint32_t blockTableStride = static_cast<uint32_t>(blockTables.stride[0]);
     uint32_t maxNumBlocks = static_cast<uint32_t>(blockTables.shape[1]);
-    if (topK >= maxNumBlocks * blockSize && !skipDenseTopk) {
+    // packTail's per-position causal tail cannot be produced by host D2D copy;
+    // the kernel's dense template + BuildTail produce it.
+    if (topK >= maxNumBlocks * blockSize && !skipDenseTopk && !packTail) {
         // this kernel should not even be fired --- but let's pad the output anyways (inefficiently)
-        // the dense-row template is the first `topK` entries of `seqPositions` (0..topK-1)
-        size_t topkPosBytes = DIV_ROUND_UP(topK * XDtypeBit(topkIndices.dtype), 8);
+        // the dense-row template is the first `outWidth` entries of `seqPositions`
+        size_t topkPosBytes = DIV_ROUND_UP(outWidth * XDtypeBit(topkIndices.dtype), 8);
         for (uint64_t i = 0; i < topkIndices.shape[0]; i++) {
             aclrtMemcpyAsync(static_cast<char *>(topkIndices.ptr) + i * topkPosBytes, topkPosBytes,
                              seqPositions.ptr, topkPosBytes, ACL_MEMCPY_DEVICE_TO_DEVICE,
@@ -2861,7 +2891,8 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                 cachedLens.ptr, blockTables.ptr, scores.ptr, lastTopk.ptr, seqPositions.ptr,
                 topkIndices.ptr, sync.ptr, kCache.stride[0], nHeads, headDim, blockSize, batch,
                 blockTableStride, maxNumBlocks, topK, skipDenseTopk, kScaleCache.ptr,
-                kScaleCacheStride, compressRatio, weightCols, kvSplit, qTile);
+                kScaleCacheStride, compressRatio, weightCols, kvSplit, qTile, packTail, reluQk,
+                outStride);
         }
         return;
     }
@@ -2882,7 +2913,7 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                  cachedLens.ptr, blockTables.ptr, scores.ptr, lastTopk.ptr, seqPositions.ptr,
                  topkIndices.ptr, sync.ptr, kCache.stride[0], nHeads, headDim, blockSize, batch,
                  blockTableStride, maxNumBlocks, topK, skipDenseTopk, compressRatio, weightCols,
-                 kvSplit, qTile);
+                 kvSplit, qTile, packTail, reluQk, outStride);
 }
 
 void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output, uint32_t calcOffset,

@@ -17,6 +17,8 @@ topkIndices[s,:] = TopK(index_score[s, :p0+1], topK)     # AIV,因果限定候�
 
 与 `indexer_scores` + `topk` 两算子组合相比,本算子把两步融合进同一 launch,并通过 `lastTopk`(KV tile 间的逐位置中转)避免中间大矩阵落盘。
 
+**packTail 契约**(`packTail=1`,HYBRID_KDA kpool 压缩路径,复刻 native `glm5_next_lightning_indexer` 行布局,模型入口 `csrc/model.cpp` 的 `ForwardAttnIndexerKpool`):此时 `topK` 参数以**池数**传入(`DIV_ROUND_UP(indexTopK, indexKpool)`),kernel 把每个选中压缩块索引展开为 `kpool` 个连续 token 槽索引,并追加当前池未满部分的 PKI 因果尾部(`kpool-1` 列),行宽 = `topK*kpool + kpool-1`;每行按 `outStride`(行宽向上对齐到 32B 的 uint32 词距)定距写入 `topkIndices`,`topkIndices.shape[1]` 必须等于 `outStride`(host 校验,`csrc/op.cpp` 的 `XliteOpIndexerTopK`)。padding 列由 host 预填 `0xFF`(读作 -1),被下游 attention softmax 的 range mask 过滤。稠密默认行不再是纯模板 `0...topK-1`:每行尾部 `kpool-1` 列需 patch 当前池 tail token 位置(单模板 UB 整行复制 + `RestorePrevTail`/`BuildTail` 恢复被覆写的模板 lane,见 `csrc/kernels/indexer_topk.h` 的 `StoreDefaultTopkRows`/`BuildTail`)。`reluQk=0` 跳过 per-head ReLU——GLM5 indexer scores 是线性 qbar 聚合,无 DSA 的 ReLU 截断。用例 `tests/kernels/indexer_topk_pack_tail.py`。
+
 ## 输入输出参数
 
 Python 侧调用(`tests/kernels/indexer_topk.py`,两种 `kv_split` 全用例覆盖;模型路径由 PrepareAttn 自动决策,standalone 由调用方显式选择):
@@ -38,10 +40,11 @@ indexer_topk(
     batch,
     topK,
     kv_split=0,  # 0 = serial query-tile mode, 1 = (tile, chunk) relay mode
+    pack_tail=0, out_stride=0, relu_qk=1,  # HYBRID_KDA packTail 契约, 见概述
 )
 ```
 
-host 侧 launch 见 `csrc/op.cpp` 的 `XliteOpIndexerTopK`:`topK >= maxNumBlocks*blockSize` 且非 `skipDenseTopk` 时全部行都是稠密,kernel 不必启动,host 侧直接把 `seqPositions` 模板前 `topK` 项 D2D 广播进 `topkIndices` 后返回(`csrc/op.cpp` 的 `XliteOpIndexerTopK`,关键字 `topK >= maxNumBlocks * blockSize` dense-skip D2D 广播段);否则校验 `topK <= MAX_TOPK_NUM=2048`(`csrc/op.cpp` 的 `XliteOpIndexerTopK`,关键字 `if (topK > MAX_TOPK_NUM)` throw)。`maxSeqLen` 不再是 launch 参数:`maxNumBlock`(运行期块数)由 host 取 `blockTables.shape[1]` 传入(V2 表已由 PrepareAttn 收窄到运行期宽度,模型层 `ForwardAttnIndexer` 关键字 `rt._attnBlockTables[0].shape[1]`;standalone/测试入口由 `SliceBlockTableToLens` 从 lens 推导收窄),`blockTableStride = blockTables.stride[0]` 一并传入;`maxSeqLen = MAX(blockSize*maxNumBlock, INIT_MIN_SEQ_POS=102400)` 由 kernel 侧(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Init`,关键字 `maxSeqLen = MAX((uint64_t)blockSize * maxNumBlock, INIT_MIN_SEQ_POS)`)推导。host 不校验 `seqPositions` 长度,覆盖范围由 `XModel::Init` 预生成保证(见下)。kernel 签名(`csrc/kernels/indexer_topk.h` 的 `INDEXER_TOPK_FUNC_DEFINE`):
+host 侧 launch 见 `csrc/op.cpp` 的 `XliteOpIndexerTopK`:`topK >= maxNumBlocks*blockSize` 且非 `skipDenseTopk` 且非 `packTail` 时全部行都是稠密,kernel 不必启动,host 侧直接把 `seqPositions` 模板前 `topK` 项 D2D 广播进 `topkIndices` 后返回(`csrc/op.cpp` 的 `XliteOpIndexerTopK`,关键字 `topK >= maxNumBlocks * blockSize` dense-skip D2D 广播段;`packTail` 行尾部列有 tail patch,不能走该捷径);`packTail=1` 时校验 `topkIndices.shape[1] == outStride`(关键字 `topkIndices.shape[1] == outStride` throw);否则校验 `topK <= MAX_TOPK_NUM=2048`(`csrc/op.cpp` 的 `XliteOpIndexerTopK`,关键字 `if (topK > MAX_TOPK_NUM)` throw)。`maxSeqLen` 不再是 launch 参数:`maxNumBlock`(运行期块数)由 host 取 `blockTables.shape[1]` 传入(V2 表已由 PrepareAttn 收窄到运行期宽度,模型层 `ForwardAttnIndexer` 关键字 `rt._attnBlockTables[0].shape[1]`;standalone/测试入口由 `SliceBlockTableToLens` 从 lens 推导收窄),`blockTableStride = blockTables.stride[0]` 一并传入;`maxSeqLen = MAX(blockSize*maxNumBlock, INIT_MIN_SEQ_POS=102400)` 由 kernel 侧(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Init`,关键字 `maxSeqLen = MAX((uint64_t)blockSize * maxNumBlock, INIT_MIN_SEQ_POS)`)推导。host 不校验 `seqPositions` 长度,覆盖范围由 `XModel::Init` 预生成保证(见下)。kernel 签名(`csrc/kernels/indexer_topk.h` 的 `INDEXER_TOPK_FUNC_DEFINE`):
 
 ```cpp
 indexer_topk_<dtype>(GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR queryStartLoc,
@@ -50,8 +53,11 @@ indexer_topk_<dtype>(GM_ADDR q, GM_ADDR kCache, GM_ADDR weight, GM_ADDR querySta
                      GM_ADDR topkIndices, GM_ADDR sync, uint32_t kCacheStride,
                      uint32_t nHeads, uint32_t headDim, uint32_t blockSize, uint32_t batch,
                      uint32_t blockTableStride, uint32_t maxNumBlock, uint32_t topK, uint8_t skipDenseTopk,
-                     uint32_t compressRatio, uint32_t weightCols, uint8_t kvSplit)
+                     uint32_t compressRatio, uint32_t weightCols, uint8_t kvSplit,
+                     uint8_t packTail = 0, uint8_t reluQk = 1, uint32_t outStride = 0)
 ```
+
+`packTail=1` 时 `compressRatio` 参数兼作 kpool(`kpool = MAX(compressRatio, 2)`,`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Init`,关键字 `this->kpool = this->packTail ? MAX(this->compressRatio, 2u) : 0`)。
 
 C8(`int8_t`)入口 `INDEXER_TOPK_C8_FUNC_DEFINE`(`csrc/kernels/indexer_topk.h` 的 `INDEXER_TOPK_C8_FUNC_DEFINE`)签名不同:同样在 `sync` 后接收 `uint32_t k_cache_stride`,末五参为 `GM_ADDR k_scale_cache`、`uint32_t k_scale_cache_stride`、`uint32_t compress_ratio`、`uint32_t weight_cols` 与 `uint8_t kvSplit`(因果边界语义与浮点路径相同,C8 同样支持压缩块级 KV)。
 
@@ -73,7 +79,10 @@ C8(`int8_t`)入口 `INDEXER_TOPK_C8_FUNC_DEFINE`(`csrc/kernels/indexer_topk.h` �
 | kCacheStride | — | 标量 | uint32 | kCache 的 dim-0 跨度(元素数);连续时等于 blockSize×headDim(C8 为 blockSize×128),非连续时由宿主传入真实跨距 |
 | kScaleCacheStride | — | 标量(C8) | uint32 | kScaleCache 的 dim-0 跨度(fp16 元素数);dense 池传 0,内核以 `MAX(kScaleCacheStride, blockSize)` 守护后退化为 block 内连续寻址。核内 scale 读取为 `kScaleCache + block*kScaleCacheStride`(块内连续),vllm 打包页的 storage_offset 常量偏移由基指针吸收 |
 | nHeads / headDim / blockSize / batch / topK / skipDenseTopk | — | 标量 | uint32 / uint8 | 测试配置:nHeads=64, headDim=128, blockSize=128, topK ∈ {512, 2048};host 校验 `nHeads` 为 16 的倍数且 ≤64、`headDim` 为 16 的倍数且 ≤128(C8 额外 `%32`,见下节)、`blockSize` 为 16 的倍数且 ≤128 并整除 `MAX_INDEXER_KV_TILE_LEN=4096`(`csrc/op.cpp` 的 `XliteOpIndexerTopK`,关键字 `nHeads == 0 || nHeads % 16 != 0 || nHeads > 64` 共通校验段);约束 `topK <= MAX_TOPK_NUM=2048`、`kvLen <= MAX_INDEXER_KV_TILE_LEN=4096`(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAivTopk`,关键字 `assert(kvLen <= MAX_INDEXER_KV_TILE_LEN && topK <= MAX_TOPK_NUM)`)。`skipDenseTopk=1` 时不写稠密模板(旧行为,稠密行内容不定),默认 0 |
-| compressRatio | — | 标量 | uint32 | KV 压缩比:`1`=token 级 KV(因果含自身);`>1`=压缩块级 KV,`MapPosToKv` 把 token 位置映射到已完成压缩块边界(因果排除自身未完成块)。host 由模型层传入(`csrc/op.cpp` 的 `XliteOpIndexerTopK`,浮点路径 `launchKernel(rt.aicNum, ...)` 与 C8 路径 `aclrtlaunch_indexer_topk_int8_t` 末尾均传 `compressRatio` 实参) |
+| compressRatio | — | 标量 | uint32 | KV 压缩比:`1`=token 级 KV(因果含自身);`>1`=压缩块级 KV,`MapPosToKv` 把 token 位置映射到已完成压缩块边界(因果排除自身未完成块)。host 由模型层传入(`csrc/op.cpp` 的 `XliteOpIndexerTopK`,浮点路径 `launchKernel(rt.aicNum, ...)` 与 C8 路径 `aclrtlaunch_indexer_topk_int8_t` 末尾均传 `compressRatio` 实参)。`packTail=1` 时兼作 kpool |
+| packTail | — | 标量 | uint8(0/1) | 1 = 展开选中压缩块为 `kpool` 个 token 槽索引并追加 PKI 因果尾,输出行宽 `topK*kpool+kpool-1`(见概述 packTail 契约);默认 0 = 行宽 `topK` 的旧语义 |
+| outStride | — | 标量 | uint32 | `topkIndices` 的行距(uint32 词数);`packTail=1` 时必须为行宽向上对齐到 8 词(32B)的 pitch,`topkIndices.shape[1] == outStride` 由 host 校验;`packTail=0` 时省缺 0,op 内解析为 `topK`(旧行为) |
+| reluQk | — | 标量 | uint8(0/1) | AIC 得分融合是否施加 per-head ReLU;默认 1(兼容 DSA 语义);GLM5 indexer scores 为线性 qbar 聚合,`reluQk=0` 跳过(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAicIndexerScores`,关键字 `reluEn=`) |
 
 ## 支持的数据类型
 
