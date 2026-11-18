@@ -10,6 +10,7 @@ from __future__ import annotations
 import sys
 
 import torch
+import torch_npu  # noqa: F401  (registers the `torch.npu` namespace)
 
 from xlite._C import Runtime, muls
 

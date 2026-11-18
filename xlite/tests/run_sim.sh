@@ -9,14 +9,16 @@
 #
 # Environment overrides:
 #   XLITE_SIM_SOC        target SoC (default Ascend910B3)
-#   XLITE_SIM_WORK       work dir for shim/venv/out (default ~/.cache/xlite-sim)
+#   XLITE_SIM_WORK       work dir for shim/venv/build/out (default ~/.cache/xlite-sim)
 #   XLITE_SIM_VENV       venv dir (default $XLITE_SIM_WORK/venv)
 #   XLITE_SIM_PYTHON     interpreter for uv (default 3.11)
 #   XLITE_SIM_TORCH      torch version (default 2.9.1; xlite requires <=2.10.0)
 #   XLITE_SIM_TORCH_NPU  torch-npu version (default 2.9.1)
 #   XLITE_SIM_OUT        msprof output dir (default $XLITE_SIM_WORK/out)
+#   XLITE_SIM_BUILD      CMake build dir (default $XLITE_SIM_WORK/build)
+#   XLITE_SIM_JOBS       parallel build jobs (default: nproc)
 #   XLITE_SIM_CLEAN=1    force a clean build (default: clean build anyway)
-#   XLITE_SIM_INCREMENTAL=1  reuse build/ instead of wiping it
+#   XLITE_SIM_INCREMENTAL=1  reuse $XLITE_SIM_BUILD instead of wiping it
 #   CANN_SET_ENV         path to set_env.sh
 #   CC / CXX             host compilers (default clang/clang++)
 #
@@ -34,7 +36,8 @@ PYTHON_BIN=${XLITE_SIM_PYTHON:-3.11}
 TORCH_VERSION=${XLITE_SIM_TORCH:-2.9.1}
 TORCH_NPU_VERSION=${XLITE_SIM_TORCH_NPU:-2.9.1}
 OUT=${XLITE_SIM_OUT:-$WORK/out}
-JOBS=${JOBS:-$(nproc)}
+BUILD_DIR=${XLITE_SIM_BUILD:-$WORK/build}
+JOBS=${XLITE_SIM_JOBS:-$(nproc)}
 CANN_SET_ENV=${CANN_SET_ENV:-/usr/local/Ascend/ascend-toolkit/set_env.sh}
 CC=${CC:-clang}
 CXX=${CXX:-clang++}
@@ -79,7 +82,7 @@ cmd_setup() {
     uv pip install --python "$VENV/bin/python" "torch==$TORCH_VERSION" \
         --index-url https://download.pytorch.org/whl/cpu
     uv pip install --python "$VENV/bin/python" \
-        "setuptools>=64,<82" "setuptools-scm>=8" "cmake>=3.22" "pybind11>=3.0" \
+        "setuptools>=64,<82" "setuptools-scm>=8" "cmake>=3.22" \
         "numpy<2" pyyaml "torch-npu==$TORCH_NPU_VERSION"
 }
 
@@ -87,8 +90,7 @@ cmd_build() {
     source_cann
     [[ -x "$VENV/bin/python" ]] || die "run 'setup' first (missing $VENV)"
     local py="$VENV/bin/python"
-    local prefix torch_cmake torch_lib
-    prefix=$("$py" -m pybind11 --cmakedir)
+    local torch_cmake torch_lib
     torch_cmake=$(TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$py" -c \
         'import torch,pathlib;print(pathlib.Path(torch.__file__).parent/"share"/"cmake"/"Torch")')
     torch_lib=$(TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$py" -c \
@@ -97,24 +99,26 @@ cmd_build() {
     command -v "$CC" >/dev/null || die "host compiler '$CC' not found (clang is needed on x86 for __fp16)"
     command -v "$CXX" >/dev/null || die "host compiler '$CXX' not found"
 
-    # CMake caches imported-package dirs (Torch_DIR, pybind11_DIR) from the
+    # Build out of tree ($XLITE_SIM_BUILD, default $XLITE_SIM_WORK/build) so
+    # the default clean build never wipes a regular NPU build in $REPO_ROOT/build.
+    # CMake caches the imported Torch package dir (Torch_DIR) from the
     # first configure, and the AscendC kernel preprocess step is not reliable
     # on incremental rebuilds (`ld.lld: unknown file type`). Default to a clean
-    # build; set XLITE_SIM_INCREMENTAL=1 to reuse an existing build/.
+    # build; set XLITE_SIM_INCREMENTAL=1 to reuse an existing build dir.
     local sig stamp
     sig="$SOC|$CC|$CXX|$CANN_HOME|$VENV|$REPO_ROOT"
-    stamp="$REPO_ROOT/build/.xlite-sim-config"
-    if [[ -d "$REPO_ROOT/build" ]]; then
+    stamp="$BUILD_DIR/.xlite-sim-config"
+    if [[ -d "$BUILD_DIR" ]]; then
         if [[ "${XLITE_SIM_INCREMENTAL:-0}" != "1" ]] ||
             [[ "${XLITE_SIM_CLEAN:-0}" == "1" ]] ||
             [[ ! -f "$stamp" ]] ||
             [[ "$(cat "$stamp" 2>/dev/null)" != "$sig" ]]; then
-            echo "build: removing build/ for a clean rebuild"
-            rm -rf "$REPO_ROOT/build"
+            echo "build: removing $BUILD_DIR for a clean rebuild"
+            rm -rf "$BUILD_DIR"
         fi
     fi
 
-    TORCH_DEVICE_BACKEND_AUTOLOAD=0 cmake -S "$REPO_ROOT" -B "$REPO_ROOT/build" \
+    TORCH_DEVICE_BACKEND_AUTOLOAD=0 cmake -S "$REPO_ROOT" -B "$BUILD_DIR" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_COMPILER="$CC" \
         -DCMAKE_CXX_COMPILER="$CXX" \
@@ -123,17 +127,16 @@ cmd_build() {
         -DASCEND_CANN_PACKAGE_PATH="$CANN_HOME" \
         -DCMAKE_INSTALL_PREFIX="$REPO_ROOT/out" \
         -DXLITE_VERSION="${XLITE_VERSION:-0.0.0}" \
-        -DCMAKE_PREFIX_PATH="$prefix;$torch_cmake" \
-        -Dpybind11_DIR="$prefix" \
+        -DCMAKE_PREFIX_PATH="$torch_cmake" \
         -DTorch_DIR="$torch_cmake" \
         -DPython3_EXECUTABLE="$py"
-    TORCH_DEVICE_BACKEND_AUTOLOAD=0 cmake --build "$REPO_ROOT/build" -j "$JOBS"
+    TORCH_DEVICE_BACKEND_AUTOLOAD=0 cmake --build "$BUILD_DIR" -j "$JOBS"
     printf '%s\n' "$sig" > "$stamp"
 
     mkdir -p "$REPO_ROOT/xlite/lib"
-    cp -f "$REPO_ROOT/build/libxlite.so" "$REPO_ROOT/xlite/lib/"
-    cp -f "$REPO_ROOT"/build/lib/libxlite_kernels_*_npu.so "$REPO_ROOT/xlite/lib/"
-    cp -f "$REPO_ROOT"/build/xlite_sabi*.so "$REPO_ROOT/xlite/"
+    cp -f "$BUILD_DIR/libxlite.so" "$REPO_ROOT/xlite/lib/"
+    cp -f "$BUILD_DIR"/lib/libxlite_kernels_*_npu.so "$REPO_ROOT/xlite/lib/"
+    cp -f "$BUILD_DIR"/xlite_sabi*.so "$REPO_ROOT/xlite/"
     echo "build: artifacts staged in $REPO_ROOT/xlite"
     echo "       torch lib: $torch_lib"
 }
@@ -142,6 +145,13 @@ cmd_run() {
     source_cann
     local test=${1:-tests/sim_smoke.py}
     shift || true
+    # The wrapper cd's to the repo root, so relative paths resolve there.
+    if [[ "$test" == /* ]]; then
+        [[ -f "$test" ]] || die "test script not found: $test"
+    else
+        [[ -f "$REPO_ROOT/$test" ]] || die "test script not found: $test (under $REPO_ROOT)"$'\n'"\
+subcommands are setup|build|run|all; to prepare the environment run '$0 setup'"
+    fi
     [[ -x "$VENV/bin/python" ]] || die "run 'setup' first (missing $VENV)"
     local shim; shim=$(shim_dir)
     [[ -L "$shim/libruntime.so" ]] || die "run 'setup' first (missing $shim)"
@@ -156,17 +166,27 @@ cmd_run() {
     # segfaults on the stub driver after the test has finished ("Child process
     # killed by signal 11"), which makes msprof report a failed run even though
     # every kernel ran and the profile was written. See tests/sim_launch.py.
+    #
+    # msprof does not forward the child's exit status: a failing test only
+    # prints "[WARN] Child process exited with status 256" and msprof itself
+    # exits 0. The wrapper records the status in $rc_file so `run` can return
+    # it and CI sees test failures.
+    local rc_file="$WORK/run_wrapper.rc"
+    rm -f "$rc_file"
     wrapper="$WORK/run_wrapper.sh"
     {
         echo '#!/usr/bin/env bash'
-        echo 'set -euo pipefail'
+        echo 'set -uo pipefail'
         printf 'export LD_LIBRARY_PATH=%q:${LD_LIBRARY_PATH:-}\n' "$torch_lib"
         printf 'export PYTHONPATH=%q:${PYTHONPATH:-}\n' "$REPO_ROOT"
         printf 'cd %q\n' "$REPO_ROOT"
-        printf 'exec %q -u %q %q' "$VENV/bin/python" "$launcher" "$test"
+        printf '%q -u %q %q' "$VENV/bin/python" "$launcher" "$test"
         local a
         for a in "$@"; do printf ' %q' "$a"; done
         printf '\n'
+        echo 'rc=$?'
+        printf 'printf "%%s\\n" "$rc" > %q 2>/dev/null || true\n' "$rc_file"
+        echo 'exit "$rc"'
     } > "$wrapper"
     chmod +x "$wrapper"
 
@@ -174,17 +194,28 @@ cmd_run() {
     echo "soc:   $SOC"
     echo "out:   $OUT"
     # `source_cann` already set LD_LIBRARY_PATH; put the shim in front of CANN lib64.
-    export LD_LIBRARY_PATH="$shim:$LD_LIBRARY_PATH"
+    export LD_LIBRARY_PATH="$shim:${LD_LIBRARY_PATH:-}"
     set +e
     msprof op simulator --soc-version="$SOC" --output="$OUT" "$wrapper"
     local rc=$?
     set -e
-    local latest
+    local latest child_rc=""
     latest=$(ls -dt "$OUT"/OPPROF_* 2>/dev/null | head -n1 || true)
+    if [[ -f "$rc_file" ]]; then
+        child_rc=$(<"$rc_file")
+    fi
     if [[ -n "$latest" ]]; then
         echo "profiling output: $latest"
     else
         echo "warning: no OPPROF_* produced (msprof rc=$rc)" >&2
+    fi
+    # The test's own status wins: msprof reports a failed child as a warning.
+    if [[ -n "$child_rc" && "$child_rc" != "0" ]]; then
+        echo "error: test exited with status $child_rc (msprof rc=$rc)" >&2
+        return "$child_rc"
+    fi
+    if [[ -z "$child_rc" ]]; then
+        echo "warning: test did not report an exit status (msprof rc=$rc); check the output above" >&2
     fi
     return "$rc"
 }
