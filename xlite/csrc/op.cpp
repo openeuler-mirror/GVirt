@@ -761,9 +761,9 @@ void XliteOpLayerNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &normBia
         return;
     }
     KERNEL_PTR_TYPE(norm) * launchKernel;
-    if (EachXDtype(FP16, in, out)) {
+    if (in.dtype == FP16 && (out.dtype == FP16 || out.dtype == FP32)) {
         launchKernel = aclrtlaunch_norm_float16_t;
-    } else if (EachXDtype(BF16, in, out)) {
+    } else if (in.dtype == BF16 && (out.dtype == BF16 || out.dtype == FP32)) {
         launchKernel = aclrtlaunch_norm_bfloat16_t;
     } else {
         std::string err_str =
@@ -774,7 +774,7 @@ void XliteOpLayerNorm(XRuntime &rt, XTensor &in, XTensor &norm, XTensor &normBia
     uint32_t blockNum = PickMinBlockNum(rt.aivNum, in.shape[0]);
     launchKernel(blockNum, rt.stream, in.ptr, nullptr, norm.ptr, normBias.ptr, out.ptr, in.shape[0],
                  normDim, normEps, kind, cntPerToken, in.shape[1], out.shape[1], inStartOffset,
-                 outStartOffset, true, nullptr, rt.tpSize(), false);
+                 outStartOffset, true, nullptr, rt.tpSize(), out.dtype == FP32);
 }
 
 void XliteOpL2Norm(XRuntime &rt, XTensor &in, XTensor &out, float normEps, uint32_t normDim,
@@ -4023,6 +4023,7 @@ void XliteOpRecurrentGatedDeltaRulePrefillPaged(XRuntime &rt, XTensor &query, XT
     RecurrentPrefillImpl(rt, query, key, value, beta, g, state, out, &indices, starts.numel - 1,
                          kHeads, vHeads, kDim, vDim, &starts, &initial);
 }
+
 // KDA safe-gate prefill: same in-kernel contracts as the decode variant.
 void XliteOpRecurrentGatedDeltaRuleKdaPrefillPaged(XRuntime &rt, XTensor &query, XTensor &key,
                                                    XTensor &value, XTensor &beta, XTensor &gate,

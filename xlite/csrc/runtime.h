@@ -38,9 +38,24 @@ enum XModelAttnType {
     XMODEL_ATTN_MAX_TYPE,
 };
 
+inline bool IsHybridGdn(XModelAttnType type)
+{
+    return type == XMODEL_ATTN_HYBRID_GDN;
+}
+
+inline bool IsHybridKda(XModelAttnType type)
+{
+    return type == XMODEL_ATTN_HYBRID_KDA;
+}
+
+// Family-level predicate: true for every hybrid-attention model. ONLY use it for
+// logic genuinely shared by all hybrid families (e.g. the blockTables family-slot
+// layout). Anything GDN-specific or KDA-specific must use IsHybridGdn/IsHybridKda;
+// otherwise a new hybrid family silently falls into the first branch of an
+// if/else-if chain and the dedicated branch below becomes dead code.
 inline bool IsHybridAttn(XModelAttnType type)
 {
-    return type == XMODEL_ATTN_HYBRID_GDN || type == XMODEL_ATTN_HYBRID_KDA;
+    return IsHybridGdn(type) || IsHybridKda(type);
 }
 
 enum XModelLayerAttnType {
@@ -74,7 +89,7 @@ struct XModelAttnMeta {
 
     /* only for version 2 */
     std::vector<XTensor> blockTables;  // family slots: [0]=main KV, [1]=mamba state indices
-                                       // (hybrid), [2]=tail ring (GLM only)
+                                       // (hybrid), [2]=tail ring (GLM only, when hasTailRing)
     std::vector<XTensor> slotMapping;  // single main-KV token slot table
     XTensor queryStartLoc;
     XTensor lens;
@@ -124,13 +139,15 @@ public:
     void Init(size_t sizeMB);
     void InitAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
                   uint64_t maxSeqLen, const std::vector<uint32_t> &blockSizes, uint32_t indexTopK,
-                  const std::vector<uint32_t> &compressRatios = {});
+                  const std::vector<uint32_t> &compressRatios = {}, uint32_t indexKpool = 1,
+                  bool indexKpoolCompress = false);
     void PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
                      uint64_t maxSeqLen, uint32_t nHeads, uint32_t nKVheads,
                      std::vector<uint32_t> blockSizes, uint32_t hiddenSize, uint32_t nRoutedExperts,
                      uint32_t defDpSize, int inputDtype, int weightsDtype, uint32_t indexTopK,
                      const std::vector<uint32_t> &layerTypes,
-                     const std::vector<uint32_t> &compressRatios = {});
+                     const std::vector<uint32_t> &compressRatios = {}, uint32_t indexKpool = 1,
+                     bool indexKpoolCompress = false);
     void Synchronize(void);
     void EventWaitCurrStream(aclrtStream currStream);
     void EventRecordCurrStream(aclrtStream currStream);
@@ -270,6 +287,8 @@ public:
     // cross-layer buffer
     XTensor _indexerHadamard;
     XTensor _dsaTopkBuffer;  // int32, buffer for storing topk results, allocated via aclrtMalloc
+    uint32_t _dsaTopkWidth = 0;          // logical topk width (outWidth / top_k)
+    uint32_t _dsaTopkStride = 0;         // physical row stride (outStride / topk_stride)
     XTensor *dsaPerLayerTopk = nullptr;  // ptr to the **current** layer's topk result, either a
                                          // nullptr (no topk needed) or a ptr to _dsaTopkBuffer
     XTensor _attnZeroBuffer;
@@ -364,6 +383,11 @@ protected:
     uint32_t _dpSize;
     uint32_t _moeTpSize;
     uint32_t _moeEpSize;
+    // From InitAttn's indexKpool/indexKpoolCompress. HYBRID_KDA only carries a
+    // tail-ring block table when kpool compression is on
+    // (indexKpoolCompress && indexKpool > 1); see PrepareHybridMetadata.
+    uint32_t _indexKpool = 1;
+    bool _indexKpoolCompress = false;
     uint32_t _rankSize;
     uint32_t _nDevPerNode = 0;
     uint32_t _port = XLITE_DEFAULT_PORT;

@@ -67,7 +67,7 @@
 | indexer_prepare_c8 | [indexer_prepare_c8.md](indexer_prepare_c8.md) | Lightning Indexer C8 K/Q 前处理(LN/RoPE/Hadamard/动态量化→INT8,GLM-5.1) |
 | indexer_k_cache_c8 | [indexer_prepare_c8.md](indexer_prepare_c8.md) | Indexer C8 独立 K-cache 测试入口(indexer_prepare_c8 的 Q 禁用路径) |
 | indexer_scores | [indexer_scores.md](indexer_scores.md) | Indexer 分数计算 |
-| indexer_topk | [indexer_topk.md](indexer_topk.md) | Indexer TopK 选路 |
+| indexer_topk | [indexer_topk.md](indexer_topk.md) | Indexer TopK 选路(HYBRID_KDA kpool prefill 经 packTail 契约复用本算子) |
 | cxa | [cxa.md](cxa.md) | C4A/C128A 滑窗+压缩稀疏注意力(DeepSeek-V4) |
 | flash_cxa | [flash_cxa.md](flash_cxa.md) | CXA 的 flash 在线 softmax 变体(KV-len 分 tile 合并,长 prefill/topk 行) |
 | compressor | [compressor.md](compressor.md) | DeepSeek-V4 KV 压缩(overlap_transform + softmax 加权求和 + RMSNorm + RoPE + cache 写) |
@@ -77,7 +77,9 @@
 | dsa_cp_gather_mla | [dsa_cp.md](dsa_cp.md) | 每 query Top-K KV 收集 + dense-per-query MLA 注意力 |
 | einsum_mht_hdt_mhd | [einsum_mht_hdt_mhd.md](einsum_mht_hdt_mhd.md) | 线性注意力 einsum |
 | einsum_mht_htd_mhd | [einsum_mht_htd_mhd.md](einsum_mht_htd_mhd.md) | 线性注意力 einsum |
-| recurrent_gated_delta_rule_paged | [recurrent_gated_delta_rule_paged.md](recurrent_gated_delta_rule_paged.md) | 原生 VK 分页 GDN decode/prefill |
+| recurrent_gated_delta_rule_paged | [recurrent_gated_delta_rule_paged.md](recurrent_gated_delta_rule_paged.md) | 原生 VK 分页 GDN decode/prefill(GLM5 safe-gate 变体同文档) |
+| hc_mean_collapse | [hc_mean_collapse.md](hc_mean_collapse.md) | GLM-5.3 MHC 多流均值坍缩(fp32 累加,BF16/FP16) |
+| kpool_tail_compress_and_spill | [kpool_tail_compress.md](kpool_tail_compress.md) | GLM5 kpool 压缩:tail ring 池槽折叠写 indexer cache + 新 token 尾部追加(compress+spill 双 kernel) |
 | linear_att_proj | [linear_att_proj.md](linear_att_proj.md) | 线性注意力 QKV 投影(concat→matmul→split host 融合) |
 | linear_att_conv_and_silu_paged | [conv1d_and_silu_paged.md](conv1d_and_silu_paged.md) | 线性注意力分页 Conv1d+SiLU decode 入口(conv1d_and_silu_paged 单 token 路径) |
 

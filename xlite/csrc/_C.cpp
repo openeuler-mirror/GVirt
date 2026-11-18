@@ -42,6 +42,7 @@
 #include <string>
 #include <cstdint>
 #include <initializer_list>
+#include <algorithm>
 #include <limits>
 #include <stdexcept>
 #include <type_traits>
@@ -261,6 +262,24 @@ public:
     at::Tensor hcHeadBase;
     at::Tensor hcHeadScale;
 
+    // GLM-5.3-Flash (GLM5). KDA layers: eight projections + per-stream conv1d + A_log/dt_bias/
+    // o_norm + wo. Sparse-MLA layers reuse the mlaQKVA/mlaQB/mlaWUV/mlaWUKT/mlaQNorm/mlaKVNorm
+    // slots plus the indexer group (fp32 wk / weights_proj, LayerNorm k_norm, kpool gate+ape).
+    std::vector<at::Tensor> linearInProjQ;
+    std::vector<at::Tensor> linearInProjK;
+    std::vector<at::Tensor> linearInProjV;
+    std::vector<at::Tensor> linearInProjFA;
+    std::vector<at::Tensor> linearFBProj;
+    std::vector<at::Tensor> linearInProjGA;
+    std::vector<at::Tensor> linearGBProj;
+    std::vector<at::Tensor> linearQConv1d;
+    std::vector<at::Tensor> linearKConv1d;
+    std::vector<at::Tensor> linearVConv1d;
+    std::vector<at::Tensor> indexWK;
+    std::vector<at::Tensor> indexWeightsProj;
+    std::vector<at::Tensor> indexKpoolGate;
+    std::vector<at::Tensor> indexKpoolApe;
+
 private:
     XModel *_model = nullptr;
     // Original weights own contiguous views. Retain only materialized local
@@ -303,19 +322,7 @@ static void InitOptionalXTensor(XTensor &out, at::Tensor &in, DebugSrcLoc loc,
 
 static std::vector<uint32_t> ResolveLayerTypes(const XModelConfig &c)
 {
-    std::vector<uint32_t> layerTypes;
-    if (!IsHybridAttn(c.attnType)) {
-        return layerTypes;
-    }
-    if (c.fullAttentionInterval == 0) {
-        throw std::invalid_argument("fullAttentionInterval must be > 0 for hybrid attention");
-    }
-    layerTypes.resize(c.nLayers);
-    for (uint32_t i = 0; i < c.nLayers; i++) {
-        layerTypes[i] = ((i + 1) % c.fullAttentionInterval == 0) ? XMODEL_LAYER_ATTN_FULL
-                                                                 : XMODEL_LAYER_ATTN_LINEAR;
-    }
-    return layerTypes;
+    return DeriveLayerTypes(c);
 }
 
 static bool IsConfigLayerFullAttention(XModelConfig &c, uint32_t layer,
@@ -392,13 +399,17 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
             "num of layers must be greater than or equal to num of dense layers");
     }
 
-    if (IsHybridAttn(c.attnType)) {
+    if (IsHybridGdn(c.attnType)) {
         if (c.linearNumKHeads == 0 || c.linearNumVHeads == 0 || c.linearKeyHeadDim == 0 ||
             c.linearValueHeadDim == 0 || c.linearConvKernelDim == 0) {
             throw std::invalid_argument("Linear attention config is incomplete");
         }
         if (c.fullAttentionInterval == 0) {
             throw std::invalid_argument("fullAttentionInterval must be > 0 for hybrid attention");
+        }
+    } else if (IsHybridKda(c.attnType)) {
+        if (c.linearNumKHeads == 0 || c.linearKeyHeadDim == 0 || c.linearConvKernelDim == 0) {
+            throw std::invalid_argument("Linear attention config is incomplete");
         }
     } else if (c.attnType >= XMODEL_ATTN_MAX_TYPE) {
         XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));
@@ -414,7 +425,8 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
     bool isAttnMLA = c.attnType == XMODEL_ATTN_MLA;
     bool isAttnMHA = c.attnType == XMODEL_ATTN_MHA;
     bool isAttnDSA = c.attnType == XMODEL_ATTN_DSA;
-    bool isAttnHybrid = IsHybridAttn(c.attnType);
+    bool isAttnHybridGdn = IsHybridGdn(c.attnType);
+    bool isAttnHybridKda = IsHybridKda(c.attnType);
     bool isAttnCxA = c.attnType == XMODEL_ATTN_CXA;
     const std::vector<LayersCheckEntry> layersTable = {
         // Tensors, Message, allowEmpty, Predicate
@@ -464,10 +476,11 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         {std::ref(mlaWUKT), "DSA WUK_T", false, isAttnDSA},
         {std::ref(mlaQNormBias), "DSA attention Q norm bias", true, isAttnDSA},
         {std::ref(mlaKVNormBias), "DSA attention KV norm bias", true, isAttnDSA},
-        {std::ref(indexQB), "DSA attention index QB", false, isAttnDSA},
+        {std::ref(indexQB), "DSA attention index QB", false, isAttnDSA || isAttnHybridKda},
         {std::ref(indexKWeightsProj), "DSA attention index KWeightsProj", false, isAttnDSA},
-        {std::ref(indexKNorm), "DSA attention index KNorm", false, isAttnDSA},
-        {std::ref(indexKNormBias), "DSA attention index KNorm bias", false, isAttnDSA},
+        {std::ref(indexKNorm), "DSA attention index KNorm", false, isAttnDSA || isAttnHybridKda},
+        {std::ref(indexKNormBias), "DSA attention index KNorm bias", false,
+         isAttnDSA || isAttnHybridKda},
         {std::ref(indexQBInputScale), "DSA index QB input scale", true, isAttnDSA},
         {std::ref(indexQBInputOffset), "DSA index QB input offset", true, isAttnDSA},
         {std::ref(indexQBQuantBias), "DSA index QB quant bias", true, isAttnDSA},
@@ -480,19 +493,35 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         {std::ref(mlaQBInputOffset), "DSA QB input offset", true, isAttnDSA},
         {std::ref(mlaQBQuantBias), "DSA QB quant bias", true, isAttnDSA},
         {std::ref(mlaQBDeqScale), "DSA QB dequant scale", true, isAttnDSA},
-        // Hybrid
-        {std::ref(mhaQKV), "Hybrid QKV", false, isAttnHybrid},
-        {std::ref(linearInProjQKV), "Linear QKV proj", false, isAttnHybrid},
-        {std::ref(linearInProjZ), "Linear Z proj", false, isAttnHybrid},
-        {std::ref(linearInProjB), "Linear B proj", false, isAttnHybrid},
-        {std::ref(linearInProjA), "Linear A proj", false, isAttnHybrid},
-        {std::ref(linearOutProj), "Linear out proj", false, isAttnHybrid},
-        {std::ref(linearConv1d), "Linear conv1d", false, isAttnHybrid},
-        {std::ref(linearALog), "Linear A log", false, isAttnHybrid},
-        {std::ref(linearDtBias), "Linear Dt bias", false, isAttnHybrid},
-        {std::ref(linearNorm), "Linear norm", false, isAttnHybrid},
-        {std::ref(mhaQNorm), "Hybrid Q norm", false, isAttnHybrid && c.qkNorm},
-        {std::ref(mhaKNorm), "Hybrid K norm", false, isAttnHybrid && c.qkNorm},
+        // Hybrid GDN (Qwen3.5); the linear_* member names are shared with the KDA adapter
+        {std::ref(mhaQKV), "Hybrid QKV", false, isAttnHybridGdn},
+        {std::ref(linearInProjQKV), "Linear QKV proj", false, isAttnHybridGdn},
+        {std::ref(linearInProjZ), "Linear Z proj", false, isAttnHybridGdn},
+        {std::ref(linearInProjB), "Linear B proj", false, isAttnHybridGdn || isAttnHybridKda},
+        {std::ref(linearInProjA), "Linear A proj", false, isAttnHybridGdn},
+        {std::ref(linearOutProj), "Linear out proj", false, isAttnHybridGdn || isAttnHybridKda},
+        {std::ref(linearConv1d), "Linear conv1d", false, isAttnHybridGdn},
+        {std::ref(linearALog), "Linear A log", false, isAttnHybridGdn || isAttnHybridKda},
+        {std::ref(linearDtBias), "Linear Dt bias", false, isAttnHybridGdn || isAttnHybridKda},
+        {std::ref(linearNorm), "Linear norm", false, isAttnHybridGdn || isAttnHybridKda},
+        {std::ref(mhaQNorm), "Hybrid Q norm", false, isAttnHybridGdn && c.qkNorm},
+        {std::ref(mhaKNorm), "Hybrid K norm", false, isAttnHybridGdn && c.qkNorm},
+        // Hybrid KDA (GLM5: linear attention + sparse-MLA indexer); b/a_log/dt_bias/norm/wo
+        // bind into the GDN-named members above, index_q_b/k_norm/k_norm_bias into the DSA ones
+        {std::ref(linearInProjQ), "Linear in proj q", false, isAttnHybridKda},
+        {std::ref(linearInProjK), "Linear in proj k", false, isAttnHybridKda},
+        {std::ref(linearInProjV), "Linear in proj v", false, isAttnHybridKda},
+        {std::ref(linearInProjFA), "Linear in proj f_a", false, isAttnHybridKda},
+        {std::ref(linearFBProj), "Linear f_b proj", false, isAttnHybridKda},
+        {std::ref(linearInProjGA), "Linear in proj g_a", false, isAttnHybridKda},
+        {std::ref(linearGBProj), "Linear g_b proj", false, isAttnHybridKda},
+        {std::ref(linearQConv1d), "Linear q conv1d", false, isAttnHybridKda},
+        {std::ref(linearKConv1d), "Linear k conv1d", false, isAttnHybridKda},
+        {std::ref(linearVConv1d), "Linear v conv1d", false, isAttnHybridKda},
+        {std::ref(indexWK), "Index wk", false, isAttnHybridKda},
+        {std::ref(indexWeightsProj), "Index weights proj", false, isAttnHybridKda},
+        {std::ref(indexKpoolGate), "Index kpool gate", false, isAttnHybridKda},
+        {std::ref(indexKpoolApe), "Index kpool ape", false, isAttnHybridKda},
         // CxA (DeepSeek-V4)
         {std::ref(attnSink), "v4 attn sink", false, isAttnCxA},
         {std::ref(attnWqA), "v4 attn wq_a", false, isAttnCxA},
@@ -598,7 +627,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         InitXTensor(_model->mlpNorm[i], mlpNorm[i], DBG_LOC);
 
         bool isFullLayer = IsConfigLayerFullAttention(c, i, layerTypes);
-        if (IsHybridAttn(c.attnType)) {
+        if (IsHybridGdn(c.attnType)) {
             if (isFullLayer) {
                 InitMatmulWeight("attnOut", attnOut, attnOutInputScale, attnOutInputOffset,
                                  attnOutQuantBias, attnOutDeqScale, _model->attnOut, i, true,
@@ -755,6 +784,81 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                 InitXTensor(_model->hcFfnBase[i], hcFfnBase[i], DBG_LOC);
                 InitXTensor(_model->hcAttnScale[i], hcAttnScale[i], DBG_LOC);
                 InitXTensor(_model->hcFfnScale[i], hcFfnScale[i], DBG_LOC);
+            } else if (c.attnType == XMODEL_ATTN_HYBRID_KDA) {
+                // GLM5 weights are BF16/FP32 (unquantized): InitMatmulWeight skips empty
+                // quant vectors, so all quant args share this local empty vector.
+                std::vector<at::Tensor> noQuant;
+                bool isKda =
+                    std::find(c.kdaLayers.begin(), c.kdaLayers.end(), i) != c.kdaLayers.end();
+                if (isKda) {
+                    // KDA layer: q/k/v/b column-parallel; f_a/g_a replicated (full head_dim,
+                    // see the python row slices); f_b/g_b consume the full f_a/g_a (head-shard
+                    // output); wo reduces to full hidden.
+                    InitMatmulWeight("linearInProjQ", linearInProjQ, noQuant, noQuant, noQuant,
+                                     noQuant, _model->linearInProjQ, i, false, tpRank);
+                    InitMatmulWeight("linearInProjK", linearInProjK, noQuant, noQuant, noQuant,
+                                     noQuant, _model->linearInProjK, i, false, tpRank);
+                    InitMatmulWeight("linearInProjV", linearInProjV, noQuant, noQuant, noQuant,
+                                     noQuant, _model->linearInProjV, i, false, tpRank);
+                    InitMatmulWeight("linearInProjB", linearInProjB, noQuant, noQuant, noQuant,
+                                     noQuant, _model->linearInProjB, i, false, tpRank);
+                    InitMatmulWeight("linearInProjFA", linearInProjFA, noQuant, noQuant, noQuant,
+                                     noQuant, _model->linearInProjFA, i, false, tpRank);
+                    InitMatmulWeight("linearFBProj", linearFBProj, noQuant, noQuant, noQuant,
+                                     noQuant, _model->linearFBProj, i, false, tpRank);
+                    InitMatmulWeight("linearInProjGA", linearInProjGA, noQuant, noQuant, noQuant,
+                                     noQuant, _model->linearInProjGA, i, false, tpRank);
+                    InitMatmulWeight("linearGBProj", linearGBProj, noQuant, noQuant, noQuant,
+                                     noQuant, _model->linearGBProj, i, false, tpRank);
+                    // Per-stream causal conv1d + recurrence scalars + gated RMSNorm.
+                    InitXTensor(_model->linearQConv1d[i], linearQConv1d[i], DBG_LOC);
+                    InitXTensor(_model->linearKConv1d[i], linearKConv1d[i], DBG_LOC);
+                    InitXTensor(_model->linearVConv1d[i], linearVConv1d[i], DBG_LOC);
+                    InitXTensor(_model->linearALog[i], linearALog[i], DBG_LOC);
+                    InitXTensor(_model->linearDtBias[i], linearDtBias[i], DBG_LOC);
+                    InitXTensor(_model->linearNorm[i], linearNorm[i], DBG_LOC);
+                    InitMatmulWeight("linearOutProj", linearOutProj, noQuant, noQuant, noQuant,
+                                     noQuant, _model->linearOutProj, i, true, tpRank);
+                } else {
+                    // Sparse-MLA layer: reuse the MLA weight slots (same bindings as the MLA
+                    // branch) + the GLM5 indexer group.
+                    InitMatmulWeight("attnOut", attnOut, attnOutInputScale, attnOutInputOffset,
+                                     attnOutQuantBias, attnOutDeqScale, _model->attnOut, i, true,
+                                     tpRank);
+                    InitMatmulWeight("mlaQKVA", mlaQKVA, mlaQKVAInputScale, mlaQKVAInputOffset,
+                                     mlaQKVAQuantBias, mlaQKVADeqScale, _model->mlaQKVA, i, false,
+                                     tpRank);
+                    InitMatmulWeight("mlaQB", mlaQB, mlaQBInputScale, mlaQBInputOffset,
+                                     mlaQBQuantBias, mlaQBDeqScale, _model->mlaQB, i, false,
+                                     tpRank);
+                    InitXTensor(_model->mlaQNorm[i], mlaQNorm[i], DBG_LOC);
+                    if (!mlaQNormBias.empty()) {
+                        InitXTensor(_model->mlaQNormBias[i], mlaQNormBias[i], DBG_LOC);
+                    }
+                    InitXTensor(_model->mlaWUV[i], mlaWUV[i], DBG_LOC);
+                    InitXTensor(_model->mlaWUKT[i], mlaWUKT[i], DBG_LOC);
+                    InitXTensor(_model->mlaKVNorm[i], mlaKVNorm[i], DBG_LOC);
+                    if (!mlaKVNormBias.empty()) {
+                        InitXTensor(_model->mlaKVNormBias[i], mlaKVNormBias[i], DBG_LOC);
+                    }
+                    // Indexer: wq_b matmul; wk / weights_proj are FP32 (replicated); LayerNorm
+                    // k_norm; kpool gate+ape.
+                    InitMatmulWeight("indexQB", indexQB, noQuant, noQuant, noQuant, noQuant,
+                                     _model->indexQB, i, false, tpRank);
+                    InitXTensor(_model->indexWK[i], indexWK[i], DBG_LOC);
+                    InitXTensor(_model->indexWeightsProj[i], indexWeightsProj[i], DBG_LOC);
+                    InitXTensor(_model->indexKNorm[i], indexKNorm[i], DBG_LOC);
+                    InitXTensor(_model->indexKNormBias[i], indexKNormBias[i], DBG_LOC);
+                    InitXTensor(_model->indexKpoolGate[i], indexKpoolGate[i], DBG_LOC);
+                    InitXTensor(_model->indexKpoolApe[i], indexKpoolApe[i], DBG_LOC);
+                }
+                // MHC (per-layer; GLM5 uses the shared MHC pre/post pipeline).
+                InitXTensor(_model->hcAttnFn[i], hcAttnFn[i], DBG_LOC);
+                InitXTensor(_model->hcFfnFn[i], hcFfnFn[i], DBG_LOC);
+                InitXTensor(_model->hcAttnBase[i], hcAttnBase[i], DBG_LOC);
+                InitXTensor(_model->hcFfnBase[i], hcFfnBase[i], DBG_LOC);
+                InitXTensor(_model->hcAttnScale[i], hcAttnScale[i], DBG_LOC);
+                InitXTensor(_model->hcFfnScale[i], hcFfnScale[i], DBG_LOC);
             }
         }
     }
@@ -844,7 +948,13 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
 
     _kv.resize(c.nLayers);
     for (uint32_t i = 0; i < c.nLayers; i++) {
-        if (c.attnType == XMODEL_ATTN_DSA) {
+        if (c.attnType == XMODEL_ATTN_HYBRID_KDA) {
+            // GLM-5.3-Flash hybrid: KDA layers carry (conv, ssm) state, sparse MLA
+            // layers carry (k, pe, indexK, tail) caches.
+            const bool isKda =
+                std::find(c.kdaLayers.begin(), c.kdaLayers.end(), i) != c.kdaLayers.end();
+            _kv[i].resize(isKda ? 2 : 4);
+        } else if (c.attnType == XMODEL_ATTN_DSA) {
             _kv[i].resize(i < c.indexC8Mask.size() && c.indexC8Mask[i] ? 4 : 3);
         } else if (c.attnType == XMODEL_ATTN_CXA) {
             // LI-C8 layers carry vllm's fp16 indexer-k scale pool as a 6th slot.
@@ -4386,7 +4496,13 @@ TORCH_LIBRARY(xlite_sabi, m)
         .def_rw("swiglu_limit", &XModelConfig::swigluLimit)
         .def_rw("n_hash_layers", &XModelConfig::nHashLayers)
         .def_rw("compress_ratios", &XModelConfig::compressRatios)
-        .def_rw("aux_layer_ids", &XModelConfig::auxLayerIds);
+        .def_rw("aux_layer_ids", &XModelConfig::auxLayerIds)
+        .def_rw("gate_lower_bound", &XModelConfig::gateLowerBound)
+        .def_rw("index_kpool", &XModelConfig::indexKpool)
+        .def_rw("index_kpool_compress", &XModelConfig::indexKpoolCompress)
+        .def_rw("index_kpool_always_select_tail", &XModelConfig::indexKpoolAlwaysSelectTail)
+        .def_rw("kda_layers", &XModelConfig::kdaLayers)
+        .def_rw("full_attn_layers", &XModelConfig::fullAttnLayers);
 
     opreg::Props(m.class_<CModelAttnMeta>("AttnMeta").def(torch::init<>()))
         .def_rw("lens", &CModelAttnMeta::lens)
@@ -4532,6 +4648,20 @@ TORCH_LIBRARY(xlite_sabi, m)
         .def_readwrite("hc_head_fn", &_CModel::hcHeadFn)
         .def_readwrite("hc_head_base", &_CModel::hcHeadBase)
         .def_readwrite("hc_head_scale", &_CModel::hcHeadScale)
+        .def_readwrite("linear_in_proj_q", &_CModel::linearInProjQ)
+        .def_readwrite("linear_in_proj_k", &_CModel::linearInProjK)
+        .def_readwrite("linear_in_proj_v", &_CModel::linearInProjV)
+        .def_readwrite("linear_in_proj_f_a", &_CModel::linearInProjFA)
+        .def_readwrite("linear_f_b_proj", &_CModel::linearFBProj)
+        .def_readwrite("linear_in_proj_g_a", &_CModel::linearInProjGA)
+        .def_readwrite("linear_g_b_proj", &_CModel::linearGBProj)
+        .def_readwrite("linear_q_conv1d", &_CModel::linearQConv1d)
+        .def_readwrite("linear_k_conv1d", &_CModel::linearKConv1d)
+        .def_readwrite("linear_v_conv1d", &_CModel::linearVConv1d)
+        .def_readwrite("index_wk", &_CModel::indexWK)
+        .def_readwrite("index_weights_proj", &_CModel::indexWeightsProj)
+        .def_readwrite("index_kpool_gate", &_CModel::indexKpoolGate)
+        .def_readwrite("index_kpool_ape", &_CModel::indexKpoolApe)
         // Methods. torch::class_ has no overloading, so each forward variant
         // gets a distinct name; the V1 adapter keeps the plain `forward` name.
         //
