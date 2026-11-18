@@ -162,9 +162,14 @@ inline __aicore__ void RunAivSoftmaxPingPong(
     __ubuf__ float *cmpFp321 = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
     off += topK != 0 ? VECTOR_MAX_BYTESIZE : 0;
     __ubuf__ uint8_t *topkMask0 = reinterpret_cast<__ubuf__ uint8_t *>((uintptr_t)off);
-    off += topK != 0 ? ROUND_UP(topK / 8, VECTOR_MAX_BYTESIZE) : 0;
+    // Mask sizing: vcmpvs writes DIV_ROUND_UP(topK,64) x 8 B, the hit-block loop
+    // reads up to DIV_ROUND_UP(topK,128) x 16 B, and vand works in
+    // SOFTMAX_MASK_CHUNK-slot (256 B) repeats. Round topK up to the vand
+    // granularity so a kpool-widened topK (e.g. 2051) cannot overflow the
+    // 256 B a plain topK/8 would give.
+    off += topK != 0 ? ROUND_UP(topK, SOFTMAX_MASK_CHUNK) / 8 : 0;
     __ubuf__ uint8_t *topkMask1 = reinterpret_cast<__ubuf__ uint8_t *>((uintptr_t)off);
-    off += topK != 0 ? ROUND_UP(topK / 8, VECTOR_MAX_BYTESIZE) : 0;
+    off += topK != 0 ? ROUND_UP(topK, SOFTMAX_MASK_CHUNK) / 8 : 0;
     __ubuf__ int32_t *currIndices = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)off);
     off += topK != 0 ? ROUND_UP(topK * sizeof(int32_t), VECTOR_MAX_BYTESIZE) : 0;
     __ubuf__ float *sink = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
@@ -175,7 +180,7 @@ inline __aicore__ void RunAivSoftmaxPingPong(
     constexpr int indicesPad = VECTOR_MAX_BYTESIZE / sizeof(int32_t);
     int indicesRepeat = DIV_ROUND_UP(topK, indicesPad);
     int topKCalRepeat = DIV_ROUND_UP(topK, calPad);
-    int topKVandRepeat = DIV_ROUND_UP(topK, 2048);
+    int topKVandRepeat = DIV_ROUND_UP(topK, SOFTMAX_MASK_CHUNK);
     int topKLoopCnt = DIV_ROUND_UP(topK, 128);
     int firstHitBlock = -1;
     int lastHitBlock = -1;

@@ -33,6 +33,20 @@ inline uint64_t HcMeanUbNeed(uint32_t hcMult, uint32_t hidden, uint32_t dtypeSiz
            ROUND_UP((uint64_t)hidden * 4, UB_BUF_ALIGN_SIZE);
 }
 
+inline uint64_t SoftmaxPingPongUbNeed(uint32_t len, uint32_t topK)
+{
+    const uint32_t v = VECTOR_MAX_BYTESIZE;
+    len = len > topK ? len : topK;
+    uint64_t need = ROUND_UP((uint64_t)len * 2, v) * 4 + ROUND_UP((uint64_t)len * 4, v) +
+                    (((uint64_t)len * 4 + v - 1) / v / 2) * v + (uint64_t)v * 5;
+    if (topK != 0) {
+        need += ROUND_UP((uint64_t)topK * 4, v) * 4 +  // indices0/1 + fp32 + currIndices
+                ROUND_UP((uint64_t)topK * 2, v) + (uint64_t)v * 5 +
+                ((topK + SOFTMAX_MASK_CHUNK - 1) / SOFTMAX_MASK_CHUNK) * SOFTMAX_MASK_CHUNK / 8 * 2;
+    }
+    return need;
+}
+
 // Kernels read these as dense ND raw pointers; reject stride mismatch on size>1 dims.
 inline void RequireContiguous(const XTensor &t, const char *name)
 {
@@ -1234,6 +1248,16 @@ void XliteOpCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &compressK
         throw std::runtime_error(std::string(__func__) +
                                  ": dense=True requires indexTopK > 0 (dense cache length)");
     }
+    if (indexTopK > MAX_TOPK_NUM) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": indexTopK should be less than or "
+                                 "equal to " +
+                                 std::to_string(MAX_TOPK_NUM));
+    }
+    if (!dense && indexTopK != 0 && indexTopK % TOPK_RUN_ALIGN != 0) {
+        throw std::runtime_error(std::string(__func__) + ": indexTopK must be a multiple of " +
+                                 std::to_string(TOPK_RUN_ALIGN) + " in the sparse top-k path");
+    }
     if (windowSize != 0) {
         // The topK>0 path runs RunAivSoftmaxPingPong with an inTopK buffer of
         // topK + swaSegWidth elements; keep the SWA segment inside the
@@ -1295,11 +1319,21 @@ void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, 
                 std::string(__func__) + ": topK > 0 is not supported when maxSeqLen (" +
                 std::to_string(maxSeqLen) + ") > " + std::to_string(MAX_SOFTMAX_PINGPONG_LEN));
         }
-        if (topK > MAX_TOPK_NUM) {
+        // topK is the topk-buffer row width; the GLM5 kpool path widens it past
+        // MAX_TOPK_NUM (PKI causal tail packed into the trailing kpool-1 columns).
+        if (topK > MAX_TOPK_RUN_NUM) {
             throw std::runtime_error(std::string(__func__) +
                                      ": topK should be less than or equal to " +
-                                     std::to_string(MAX_TOPK_NUM));
+                                     std::to_string(MAX_TOPK_RUN_NUM));
         }
+        if (topK % TOPK_RUN_ALIGN != 0) {
+            throw std::runtime_error(std::string(__func__) + ": topK must be a multiple of " +
+                                     std::to_string(TOPK_RUN_ALIGN));
+        }
+    }
+    // topK-gated: topK == 0 runs RunAivSoftmax without the pingpong carve.
+    if (topK != 0 && SoftmaxPingPongUbNeed(std::max(maxSeqLen, topK), topK) > UB_SIZE) {
+        throw std::runtime_error(std::string(__func__) + ": softmax pingpong UB budget exceeded");
     }
     // The cube tiles the query dimension as mSize = queryTaskLen * nHeads rows into an
     // XLITE_MAX_M0-row L1 A buffer / qk workspace (see XliteFitM0ToHeads), so a single
@@ -1342,9 +1376,17 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
                                  std::to_string(tileSizeOfCachedKV) + " > " +
                                  std::to_string(MAX_SOFTMAX_PINGPONG_LEN));
     }
-    if (topK > MAX_TOPK_NUM) {
+    if (topK > MAX_TOPK_RUN_NUM) {
         throw std::runtime_error(std::string(__func__) + ": topK should be less than or equal to " +
-                                 std::to_string(MAX_TOPK_NUM));
+                                 std::to_string(MAX_TOPK_RUN_NUM));
+    }
+    if (topK != 0 && topK % TOPK_RUN_ALIGN != 0) {
+        throw std::runtime_error(std::string(__func__) + ": topK must be a multiple of " +
+                                 std::to_string(TOPK_RUN_ALIGN));
+    }
+    // RunAivSoftmaxPingPong carve mirror fail-closed.
+    if (SoftmaxPingPongUbNeed(std::max(tileSizeOfCachedKV, topK), topK) > UB_SIZE) {
+        throw std::runtime_error(std::string(__func__) + ": softmax pingpong UB budget exceeded");
     }
     // See XliteOpMLAV2: one query token's heads must fit a single XLITE_MAX_M0-row tile.
     if (nHeads > XLITE_MAX_M0) {
@@ -1421,6 +1463,10 @@ void XliteOpFlashCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &comp
                                  ": indexTopK should be less than or "
                                  "equal to " +
                                  std::to_string(MAX_TOPK_NUM));
+    }
+    if (indexTopK != 0 && indexTopK % TOPK_RUN_ALIGN != 0) {
+        throw std::runtime_error(std::string(__func__) + ": indexTopK must be a multiple of " +
+                                 std::to_string(TOPK_RUN_ALIGN));
     }
     if (compressRatio == 0) {
         throw std::runtime_error(std::string(__func__) +
