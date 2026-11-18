@@ -20,8 +20,12 @@ __aicore__ void cast_kernel(GM_ADDR x, GM_ADDR y, uint32_t length)
     __ubuf__ uint8_t *t2 = (__ubuf__ uint8_t *)get_imm(
         max_num * ((std::is_same<SrcType, bfloat16_t>::value) ? sizeof(__bf16) : sizeof(float)));
 
+    // tile_size must align to 32B in output granularity; unaligned interior splits make the
+    // block-rounded GM write spill stale UB tail lanes into the next core's region (16B corruption)
+    uint32_t elem_per_blk = BLOCK_SIZE / sizeof(TarType);
     uint32_t tile_size =
         length <= max_num * get_block_num() ? DIV_ROUND_UP(length, get_block_num()) : max_num;
+    tile_size = DIV_ROUND_UP(tile_size, elem_per_blk) * elem_per_blk;
     uint32_t process_num = DIV_ROUND_UP(length, tile_size);
 
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);

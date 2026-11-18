@@ -40,6 +40,7 @@ GM --MTE2--> UB(t1, 源 dtype) --V: vconv--> UB(t2, 目标 dtype) --MTE3--> GM
 
 - 若 `length <= max_num * block_num`：`tile_size = DIV_ROUND_UP(length, block_num)`，让所有 block 均分（小块均衡负载）；
 - 否则 `tile_size = max_num`，每个 block 分到多个整 tile；
+- tile_size 最后按输出粒度向上对齐到 32B（`tile_size = DIV_ROUND_UP(tile_size, elem_per_blk) * elem_per_blk`，`elem_per_blk = BLOCK_SIZE / sizeof(目标dtype)`，关键字 `elem_per_blk`）：未对齐的 interior 分片会让按块取整的 GM 写把 UB 陈旧尾槽写进下一分片区域（核间竞争，16B 坏段），用例 `tests/kernels/cast.py` S2；
 - `process_num = DIV_ROUND_UP(length, tile_size)`。
 
 每个 tile 的实际长度 `actual_len = min(tile_size, length - process * tile_size)`（`csrc/kernels/cast.h` 的 `cast_kernel` 模板函数，关键字 `actual_len =` 计算）。
