@@ -3075,6 +3075,66 @@ void XliteOpRecurrentGatedDeltaRulePaged(XRuntime &rt, XTensor &query, XTensor &
                  stateBlockSize, aligned ? 1u : 0u, g.dtype == FP32 ? 1u : 0u);
 }
 
+// KDA safe-gate decode: raw beta/gate sigmoid'd in-kernel, per-k decay,
+// q/k L2-normed in-kernel. Raw inputs: beta [T, Hv], gate [T, Hk*K];
+// aLog [Hk] / dtBias [Hk*K] are fp32 parameters.
+void XliteOpRecurrentGatedDeltaRuleKdaPaged(
+    XRuntime &rt, XTensor &query, XTensor &key, XTensor &value, XTensor &beta, XTensor &gate,
+    XTensor &aLog, XTensor &dtBias, XTensor &state, XTensor &out, XTensor *stateIndices,
+    uint32_t batch, uint32_t kHeads, uint32_t vHeads, uint32_t kDim, uint32_t vDim, float scale,
+    float lowerBound, float normEps, XTensor *cachedLens, uint32_t stateBlockSize, bool aligned)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (batch == 0 || kHeads == 0 || vHeads == 0 || vHeads % kHeads != 0 || kDim == 0 ||
+        kDim > 128 || kDim % 16 != 0 || vDim == 0 || vDim > 128 || vDim % 64 != 0) {
+        throw std::runtime_error("KDA paged recurrent: unsupported dimensions/head grouping");
+    }
+    auto matrixMatches = [batch](const XTensor &t, uint32_t features) {
+        return t.shape.size() == 2 && t.shape[0] == batch && t.shape[1] == features &&
+               t.stride == std::vector<size_t>{features, 1};
+    };
+    if (!matrixMatches(query, kHeads * kDim) || !matrixMatches(key, kHeads * kDim) ||
+        !matrixMatches(value, vHeads * vDim) || !matrixMatches(out, vHeads * vDim) ||
+        !matrixMatches(beta, vHeads) || !matrixMatches(gate, kHeads * kDim)) {
+        throw std::runtime_error("KDA paged recurrent: activation shape/stride mismatch");
+    }
+    if (aLog.dtype != FP32 || aLog.shape.size() != 1 || aLog.numel != kHeads ||
+        dtBias.dtype != FP32 || dtBias.shape.size() != 1 || dtBias.numel != kHeads * kDim) {
+        throw std::runtime_error("KDA paged recurrent: A_log/dt_bias must be fp32 [Hk]/[Hk*K]");
+    }
+    if (state.shape.size() != 4 || state.shape[0] < 2 || state.shape[0] > UINT32_MAX ||
+        state.shape[1] != vHeads || state.shape[2] != vDim || state.shape[3] != kDim ||
+        state.stride.size() != 4 || state.stride[3] != 1 || state.stride[2] != kDim ||
+        state.stride[1] != vDim * kDim ||
+        state.stride[0] < static_cast<uint64_t>(vHeads) * vDim * kDim || stateIndices == nullptr) {
+        throw std::runtime_error("KDA paged recurrent: unsupported native page descriptor");
+    }
+    CheckGdnPageMetadata(*stateIndices, cachedLens, batch, stateBlockSize);
+    if (state.dtype != query.dtype && state.dtype != FP32) {
+        throw std::runtime_error("KDA paged recurrent: unsupported state dtype");
+    }
+    KERNEL_PTR_TYPE(recurrent_gated_delta_rule_kda_paged) * launchKernel;
+    if (EachXDtype(FP32, query, key, value, beta, out)) {
+        launchKernel = aclrtlaunch_recurrent_gated_delta_rule_kda_paged_float;
+    } else if (EachXDtype(FP16, query, key, value, beta, out)) {
+        launchKernel = aclrtlaunch_recurrent_gated_delta_rule_kda_paged_float16_t;
+    } else if (EachXDtype(BF16, query, key, value, beta, out)) {
+        launchKernel = aclrtlaunch_recurrent_gated_delta_rule_kda_paged_bfloat16_t;
+    } else {
+        throw std::runtime_error("KDA paged recurrent: unsupported activation dtype");
+    }
+    launchKernel(std::min(rt.aivNum, batch * vHeads), rt.stream, query.ptr, key.ptr, value.ptr,
+                 beta.ptr, gate.ptr, aLog.ptr, dtBias.ptr, state.ptr, out.ptr, stateIndices->ptr,
+                 batch, kHeads, vHeads, kDim, vDim, state.stride[0],
+                 static_cast<uint32_t>(state.shape[0]), state.dtype == FP32 ? 1u : 0u, scale,
+                 lowerBound, normEps, cachedLens == nullptr ? nullptr : cachedLens->ptr,
+                 cachedLens == nullptr ? 0 : stateIndices->stride[0],
+                 cachedLens == nullptr ? 0 : static_cast<uint32_t>(stateIndices->shape[1]),
+                 stateBlockSize, aligned ? 1u : 0u);
+}
+
 void XliteOpEinsumMhtHdtMhd(XRuntime &rt, XTensor &mht, XTensor &hdt, XTensor &mhd, uint32_t m,
                             uint32_t h, uint32_t t, uint32_t d, bool weightNZ, int T, int D)
 {
@@ -3779,4 +3839,71 @@ void XliteOpRecurrentGatedDeltaRulePrefillPaged(XRuntime &rt, XTensor &query, XT
     }
     RecurrentPrefillImpl(rt, query, key, value, beta, g, state, out, &indices, starts.numel - 1,
                          kHeads, vHeads, kDim, vDim, &starts, &initial);
+}
+// KDA safe-gate prefill: same in-kernel contracts as the decode variant.
+void XliteOpRecurrentGatedDeltaRuleKdaPrefillPaged(XRuntime &rt, XTensor &query, XTensor &key,
+                                                   XTensor &value, XTensor &beta, XTensor &gate,
+                                                   XTensor &aLog, XTensor &dtBias, XTensor &state,
+                                                   XTensor &out, XTensor &indices, XTensor &starts,
+                                                   XTensor &initial, uint32_t kHeads,
+                                                   uint32_t vHeads, uint32_t kDim, uint32_t vDim,
+                                                   float scale, float lowerBound, float normEps)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (starts.shape.size() != 1 || starts.numel < 2 || starts.numel > UINT32_MAX) {
+        throw std::runtime_error("KDA GDN prefill requires starts[B+1] with a nonempty batch");
+    }
+    uint32_t batch = starts.numel - 1;
+    if (batch == 0 || kHeads == 0 || vHeads == 0 || vHeads % kHeads != 0 || kDim == 0 ||
+        kDim > 128 || kDim % 16 != 0 || vDim == 0 || vDim > 128 || vDim % 64 != 0) {
+        throw std::runtime_error("KDA paged recurrent: unsupported dimensions/head grouping");
+    }
+    if (starts.dtype != INT32 || starts.stride != std::vector<size_t>{1} ||
+        initial.dtype != INT32 || initial.numel != batch ||
+        initial.stride != std::vector<size_t>{1}) {
+        throw std::runtime_error("KDA GDN prefill: invalid sequence metadata");
+    }
+    uint32_t tokens = query.shape.at(0);
+    auto matrixMatches = [tokens](const XTensor &t, uint32_t features) {
+        return t.shape.size() == 2 && t.shape[0] == tokens && t.shape[1] == features &&
+               t.stride == std::vector<size_t>{features, 1};
+    };
+    if (!matrixMatches(query, kHeads * kDim) || !matrixMatches(key, kHeads * kDim) ||
+        !matrixMatches(value, vHeads * vDim) || !matrixMatches(out, vHeads * vDim) ||
+        !matrixMatches(beta, vHeads) || !matrixMatches(gate, kHeads * kDim)) {
+        throw std::runtime_error("KDA paged recurrent: activation shape/stride mismatch");
+    }
+    if (aLog.dtype != FP32 || aLog.shape.size() != 1 || aLog.numel != kHeads ||
+        dtBias.dtype != FP32 || dtBias.shape.size() != 1 || dtBias.numel != kHeads * kDim) {
+        throw std::runtime_error("KDA paged recurrent: A_log/dt_bias must be fp32 [Hk]/[Hk*K]");
+    }
+    if (state.shape.size() != 4 || state.shape[0] < 2 || state.shape[0] > UINT32_MAX ||
+        state.shape[1] != vHeads || state.shape[2] != vDim || state.shape[3] != kDim ||
+        state.stride.size() != 4 || state.stride[3] != 1 || state.stride[2] != kDim ||
+        state.stride[1] != vDim * kDim ||
+        state.stride[0] < static_cast<uint64_t>(vHeads) * vDim * kDim || indices.dtype != INT32 ||
+        indices.shape.size() != 1 || indices.numel < batch ||
+        indices.stride != std::vector<size_t>{1}) {
+        throw std::runtime_error("KDA paged recurrent: unsupported native page descriptor");
+    }
+    if (state.dtype != query.dtype && state.dtype != FP32) {
+        throw std::runtime_error("KDA paged recurrent: unsupported state dtype");
+    }
+    KERNEL_PTR_TYPE(recurrent_gated_delta_rule_kda_prefill_paged) * kernel;
+    if (EachXDtype(FP32, query, key, value, beta, out)) {
+        kernel = aclrtlaunch_recurrent_gated_delta_rule_kda_prefill_paged_float;
+    } else if (EachXDtype(FP16, query, key, value, beta, out)) {
+        kernel = aclrtlaunch_recurrent_gated_delta_rule_kda_prefill_paged_float16_t;
+    } else if (EachXDtype(BF16, query, key, value, beta, out)) {
+        kernel = aclrtlaunch_recurrent_gated_delta_rule_kda_prefill_paged_bfloat16_t;
+    } else {
+        throw std::runtime_error("KDA GDN prefill: unsupported activation dtype");
+    }
+    kernel(std::min(rt.aivNum, batch * vHeads * (vDim / 64)), rt.stream, query.ptr, key.ptr,
+           value.ptr, beta.ptr, gate.ptr, aLog.ptr, dtBias.ptr, state.ptr, out.ptr, indices.ptr,
+           batch, kHeads, vHeads, kDim, vDim, state.stride[0], state.shape[0],
+           state.dtype == FP32 ? 1u : 0u, scale, lowerBound, normEps, starts.ptr, initial.ptr,
+           tokens);
 }

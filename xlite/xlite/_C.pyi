@@ -4739,3 +4739,74 @@ def conv1d_and_silu_prefill_paged(
     Conv rounds to activation dtype before SiLU in this Prefill path.
     """
     ...
+
+def recurrent_gated_delta_rule_kda_paged(
+    rt: Runtime,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    beta: torch.Tensor,
+    gate: torch.Tensor,
+    a_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    state: torch.Tensor,
+    out: torch.Tensor,
+    state_indices: torch.Tensor,
+    num_key_heads: int,
+    num_value_heads: int,
+    k_dim: int,
+    v_dim: int,
+    scale: float,
+    lower_bound: float,
+    norm_eps: float,
+    *,
+    cached_lens: Optional[torch.Tensor] = None,
+    state_block_size: int = 0,
+    aligned: bool = False,
+) -> None:
+    """Single-token KDA safe-gate recurrent on native [P, Hv, V, K] pages, updated in place.
+
+    KDA safe-gate variant of :func:`recurrent_gated_delta_rule_paged`: the gate is per-K-head
+    (``gate`` is [B, Hk*K], not [B, Hv]) and beta/decay are computed inside the kernel
+    from the safe-gate parameters ``a_log`` [Hk] / ``dt_bias`` [Hk*K] (both FP32) with
+    ``lower_bound`` clamping and ``norm_eps`` RMS normalization; ``beta`` is the [B, Hv]
+    beta input. Q/K are [B, Hk*K], value/out [B, Hv*V]. Activations are contiguous
+    FP32/FP16/BF16; state has the same dtype or FP32. Hk must divide Hv, K is a multiple
+    of 16 up to 128, V is a multiple of 64 up to 128. Page metadata follows the same
+    contract as :func:`recurrent_gated_delta_rule_paged` (raw tables / resolved indices,
+    INT32 page IDs <= 0 never access state). The binding synchronizes.
+    """
+    ...
+
+def recurrent_gated_delta_rule_kda_prefill_paged(
+    rt: Runtime,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    beta: torch.Tensor,
+    gate: torch.Tensor,
+    a_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    state: torch.Tensor,
+    out: torch.Tensor,
+    indices: torch.Tensor,
+    starts: torch.Tensor,
+    initial: torch.Tensor,
+    num_key_heads: int,
+    num_value_heads: int,
+    k_dim: int,
+    v_dim: int,
+    scale: float,
+    lower_bound: float,
+    norm_eps: float,
+) -> None:
+    """KDA safe-gate prefill over native [P, Hv, V, K] pages (safe-gate variant).
+
+    Same packing contract as :func:`recurrent_gated_delta_rule_prefill_paged` (Q/K [T, Hk*K],
+    value/out [T, Hv*V], beta [T, Hv], starts INT32[B+1], initial INT32[B], only the final
+    state is committed to the page) with the KDA per-K-head raw gate: ``gate`` [T, Hk*K] and
+    beta/decay derived in-kernel from FP32 ``a_log`` [Hk] / ``dt_bias`` [Hk*K] with
+    ``lower_bound`` clamping and ``norm_eps`` RMS normalization. Token recurrence is
+    sequential within each state tile (not FLA chunked WY). The binding synchronizes.
+    """
+    ...

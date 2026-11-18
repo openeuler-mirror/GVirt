@@ -3258,6 +3258,41 @@ void RecurrentGatedDeltaRulePaged(XRuntime &rt, at::Tensor &query, at::Tensor &k
     rt.Synchronize();
 }
 
+// KDA safe-gate decode: raw beta/gate sigmoid'd in-kernel, per-k decay,
+// q/k L2-normed in-kernel. aLog/dtBias are fp32 parameters.
+void RecurrentGatedDeltaRuleKdaPaged(
+    XRuntime &rt, at::Tensor &query, at::Tensor &key, at::Tensor &value, at::Tensor &beta,
+    at::Tensor &gate, at::Tensor &aLog, at::Tensor &dtBias, at::Tensor &state, at::Tensor &out,
+    at::Tensor &state_indices, uint32_t num_key_heads, uint32_t num_value_heads, uint32_t k_dim,
+    uint32_t v_dim, double scale, double lowerBound, double normEps,
+    const std::optional<at::Tensor> &cachedLens, uint32_t stateBlockSize, bool aligned)
+{
+    CheckGdnDevices(rt, {&query, &key, &value, &beta, &gate, &aLog, &dtBias, &state, &out,
+                         &state_indices, cachedLens.has_value() ? &cachedLens.value() : nullptr});
+    XTensor q, k, v, b, g, al, db, s, o, indices;
+    InitXTensor(q, query);
+    InitXTensor(k, key);
+    InitXTensor(v, value);
+    InitXTensor(b, beta);
+    InitXTensor(g, gate);
+    InitXTensor(al, aLog);
+    InitXTensor(db, dtBias);
+    InitXTensor(s, state, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(o, out);
+    InitXTensor(indices, state_indices, DBG_LOC, /*allowPitched=*/true);
+    XTensor cached;
+    if (cachedLens.has_value()) {
+        InitXTensor(cached, cachedLens.value());
+    }
+    uint32_t batch = query.dim() == 2 ? static_cast<uint32_t>(query.size(0)) : 0;
+    XliteOpRecurrentGatedDeltaRuleKdaPaged(
+        rt, q, k, v, b, g, al, db, s, o, &indices, batch, num_key_heads, num_value_heads, k_dim,
+        v_dim, static_cast<float>(scale), static_cast<float>(lowerBound),
+        static_cast<float>(normEps), cachedLens.has_value() ? &cached : nullptr, stateBlockSize,
+        aligned);
+    rt.Synchronize();
+}
+
 void EinsumMhtHdtMhd(XRuntime &rt, at::Tensor &mht, at::Tensor &hdt, at::Tensor &mhd, uint32_t m,
                      uint32_t h, uint32_t t, uint32_t d, bool weightNZ)
 {
@@ -3388,6 +3423,36 @@ void RecurrentGatedDeltaRulePrefillPaged(XRuntime &rt, at::Tensor &query, at::Te
     InitXTensor(init, initial);
     XliteOpRecurrentGatedDeltaRulePrefillPaged(rt, q, k, v, b, decay, st, o, ids, bounds, init, kh,
                                                vh, kd, vd);
+    rt.Synchronize();
+}
+
+// KDA safe-gate prefill: same in-kernel contracts as the decode variant.
+void RecurrentGatedDeltaRuleKdaPrefillPaged(XRuntime &rt, at::Tensor &query, at::Tensor &key,
+                                            at::Tensor &value, at::Tensor &beta, at::Tensor &gate,
+                                            at::Tensor &aLog, at::Tensor &dtBias, at::Tensor &state,
+                                            at::Tensor &out, at::Tensor &indices,
+                                            at::Tensor &starts, at::Tensor &initial, uint32_t kh,
+                                            uint32_t vh, uint32_t kd, uint32_t vd, double scale,
+                                            double lowerBound, double normEps)
+{
+    CheckGdnDevices(rt, {&query, &key, &value, &beta, &gate, &aLog, &dtBias, &state, &out, &indices,
+                         &starts, &initial});
+    XTensor q, k, v, b, g, al, db, st, o, ids, bounds, init;
+    InitXTensor(q, query);
+    InitXTensor(k, key);
+    InitXTensor(v, value);
+    InitXTensor(b, beta);
+    InitXTensor(g, gate);
+    InitXTensor(al, aLog);
+    InitXTensor(db, dtBias);
+    InitXTensor(st, state, DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(o, out);
+    InitXTensor(ids, indices);
+    InitXTensor(bounds, starts);
+    InitXTensor(init, initial);
+    XliteOpRecurrentGatedDeltaRuleKdaPrefillPaged(
+        rt, q, k, v, b, g, al, db, st, o, ids, bounds, init, kh, vh, kd, vd,
+        static_cast<float>(scale), static_cast<float>(lowerBound), static_cast<float>(normEps));
     rt.Synchronize();
 }
 
@@ -4873,4 +4938,35 @@ TORCH_LIBRARY(xlite_sabi, m)
               torch::arg("cached_lens") = torch::arg::none(),
               torch::arg("state_block_size") = static_cast<int64_t>(0),
               torch::arg("aligned") = false});
+    ops.def("recurrent_gated_delta_rule_kda_paged", op<&RecurrentGatedDeltaRuleKdaPaged>,
+            {torch::arg("rt"),
+             torch::arg("query"),
+             torch::arg("key"),
+             torch::arg("value"),
+             torch::arg("beta"),
+             torch::arg("gate"),
+             torch::arg("a_log"),
+             torch::arg("dt_bias"),
+             torch::arg("state"),
+             torch::arg("out"),
+             torch::arg("state_indices"),
+             torch::arg("num_key_heads"),
+             torch::arg("num_value_heads"),
+             torch::arg("k_dim"),
+             torch::arg("v_dim"),
+             torch::arg("scale"),
+             torch::arg("lower_bound"),
+             torch::arg("norm_eps"),
+             torch::arg("cached_lens") = torch::arg::none(),
+             torch::arg("state_block_size") = static_cast<int64_t>(0),
+             torch::arg("aligned") = false});
+    ops.def("recurrent_gated_delta_rule_kda_prefill_paged",
+            op<&RecurrentGatedDeltaRuleKdaPrefillPaged>,
+            {torch::arg("rt"),          torch::arg("query"),         torch::arg("key"),
+             torch::arg("value"),       torch::arg("beta"),          torch::arg("gate"),
+             torch::arg("a_log"),       torch::arg("dt_bias"),       torch::arg("state"),
+             torch::arg("out"),         torch::arg("indices"),       torch::arg("starts"),
+             torch::arg("initial"),     torch::arg("num_key_heads"), torch::arg("num_value_heads"),
+             torch::arg("k_dim"),       torch::arg("v_dim"),         torch::arg("scale"),
+             torch::arg("lower_bound"), torch::arg("norm_eps")});
 }

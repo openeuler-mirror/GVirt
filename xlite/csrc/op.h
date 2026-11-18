@@ -299,6 +299,17 @@ void XliteOpRecurrentGatedDeltaRulePaged(XRuntime &rt, XTensor &query, XTensor &
                                          uint32_t vHeads, uint32_t kDim, uint32_t vDim,
                                          XTensor *cachedLens = nullptr, uint32_t stateBlockSize = 0,
                                          bool aligned = false);
+// GLM-5.3-Flash KDA single-token decode: raw beta/gate sigmoid'd in-kernel,
+// per-k decay, q/k L2-normed in-kernel. Raw inputs: beta [T, Hv], gate [T, Hk*K];
+// aLog [Hk] / dtBias [Hk*K] are fp32 parameters.
+void XliteOpRecurrentGatedDeltaRuleKdaPaged(XRuntime &rt, XTensor &query, XTensor &key,
+                                            XTensor &value, XTensor &beta, XTensor &gate,
+                                            XTensor &aLog, XTensor &dtBias, XTensor &state,
+                                            XTensor &out, XTensor *stateIndices, uint32_t batch,
+                                            uint32_t kHeads, uint32_t vHeads, uint32_t kDim,
+                                            uint32_t vDim, float scale, float lowerBound,
+                                            float normEps, XTensor *cachedLens = nullptr,
+                                            uint32_t stateBlockSize = 0, bool aligned = false);
 void XliteOpEinsumMhtHdtMhd(XRuntime &rt, XTensor &mht, XTensor &hdt, XTensor &mhd, uint32_t m,
                             uint32_t h, uint32_t t, uint32_t d, bool weightNZ, int T = -1,
                             int D = -1);
@@ -341,4 +352,12 @@ void XliteOpRecurrentGatedDeltaRulePrefillPaged(XRuntime &rt, XTensor &query, XT
                                                 XTensor &state, XTensor &out, XTensor &indices,
                                                 XTensor &starts, XTensor &initial, uint32_t kHeads,
                                                 uint32_t vHeads, uint32_t kDim, uint32_t vDim);
+// KDA safe-gate prefill: same in-kernel contracts as the decode variant.
+void XliteOpRecurrentGatedDeltaRuleKdaPrefillPaged(XRuntime &rt, XTensor &query, XTensor &key,
+                                                   XTensor &value, XTensor &beta, XTensor &gate,
+                                                   XTensor &aLog, XTensor &dtBias, XTensor &state,
+                                                   XTensor &out, XTensor &indices, XTensor &starts,
+                                                   XTensor &initial, uint32_t kHeads,
+                                                   uint32_t vHeads, uint32_t kDim, uint32_t vDim,
+                                                   float scale, float lowerBound, float normEps);
 #endif

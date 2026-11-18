@@ -114,6 +114,17 @@ initial 为零时忽略原页内容,从零状态开始;非零时从当前页继�
 - FP32 路径省去全部转换暂存(比 FP16/BF16 少 33408 B,占 70.1%);FP16/BF16 增加 `stateTmp`×2 与 `qStage`/`kStage`/`vStage` 三段;
 - decode 的状态乒乓(EVENT_ID3/4)与 prefill 的 token 乒乓(EVENT_ID0)共用这一静态布局,占用不随执行阶段与请求规模变化。
 
+## KDA safe-gate 变体
+
+KDA safe-gate 用同一骨架的变体入口（当前 GLM-5.3-Flash 使用）,复用页寻址、MatVec 归约与 64 行 V tile(`csrc/kernels/recurrent_gated_delta_rule_kda_paged.h` 的 `RecurrentGatedDeltaRuleKdaPaged`),差异对应 native `run_recurrent_kda` 契约:
+
+- **beta 原始输入**:kernel 内 fp32 `sigmoid(b)`(native `beta_is_preprocessed=False`),不再要求调用者预处理;
+- **safe_gate 按 K 行衰减**:gate 输入为原始 `[T, Hk*K]`(逐 K head 逐维),kernel 内 fp32 计算 `gate = lowerBound * sigmoid(exp(A_log[h]) * (g1 + dt_bias))`,按 K 行施加 log-decay(state 每 K 行一个 `exp(gate[k])` 广播 `vmul`),而非基础变体的每 head 标量 `g`;
+- **A_log / dt_bias 参数**:`a_log` 为 FP32 `[Hk]`、`dt_bias` 为 FP32 `[Hk*K]`(host 校验,`csrc/op.cpp` 的 `XliteOpRecurrentGatedDeltaRuleKdaPaged`);
+- **L2 归一化核内完成**:q/k 在 kernel 内做 `rstd = rsqrt(sum(x^2) + norm_eps)` 归一化(基础变体要求调用者预归一化),q 额外乘 `scale` 标量。
+
+入口与基础变体一一对应:`recurrent_gated_delta_rule_kda_paged`(decode,raw 块表同样支持 `cached_lens`/`state_block_size`/`aligned`)与 `recurrent_gated_delta_rule_kda_prefill_paged`(packed prefill,`starts`/`initial` 契约相同)。维度约束与基础变体一致(K 16 的倍数 ≤128,V 64 的倍数 ≤128,Hk 整除 Hv);dtype 实例同为 FP32/FP16/BF16 三套(`csrc/kernels/recurrent_gated_delta_rule_kda_paged_{float,float16_t,bfloat16_t}.cpp`、`recurrent_gated_delta_rule_kda_prefill_paged_{float,float16_t,bfloat16_t}.cpp`)。测试见 `tests/kernels/recurrent_gated_delta_rule_kda_paged.py`。
+
 ## 验证
 
 `tests/kernels/recurrent_gated_delta_rule_paged.py` 验证 dtype、分组头、维度、raw-table 页选择和非法 descriptor;`tests/kernels/gdn_prefill_paged.py` 对独立 FP32 recurrence 校验 fresh/续算/ragged/空段、混合单/多 token、null 页、分组头、pitch 与跨阶段交接;`tests/models/gdn_paged.py` 验证小型混合模型的 V1/V2 metadata 和分段执行一致性。
