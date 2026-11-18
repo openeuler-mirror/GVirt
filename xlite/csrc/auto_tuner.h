@@ -30,16 +30,18 @@ uint32_t PickIndexerQTile(const std::vector<uint32_t> &cachedLens,
                           uint32_t compressRatio);
 
 // Pick the indexer_topk partitioning mode: kvSplit=0 schedules one (batch,
-// query tile) task per block (serial KV-chunk walk), so it fills the blocks
-// only when the sparse tiles (last-token causal boundary p0End >= topK, with
-// p0End in token space for compressRatio<=1 and completed-block space
-// otherwise) reach blockNum - counting chunks instead would wrongly keep
-// few-tile/many-chunk decode in the serial mode. Otherwise return 1: (tile,
+// query tile) task per block (serial KV-chunk walk), so it wins once the
+// sparse tiles (last-token causal boundary p0End >= topK, with p0End in token
+// space for compressRatio<=1 and completed-block space otherwise) reach
+// blockNum / 2 - counting chunks instead would wrongly keep few-tile/many-
+// chunk decode in the serial mode (the half-fill bound is measured; see
+// doc/developer_guide/kernels/indexer_topk.md). Otherwise return 1: (tile,
 // chunk) tasks with the cross-core topK relay. Called once per forward from
-// XRuntime::PrepareAttn on the host lens (no D2H); queryTileSize should match
-// the kernel's tile (PickIndexerQTile) to count the real task granularity -
-// 0 or values above MAX_INDEXER_Q_TILE_LEN fall back to the macro default
-// (mirroring the kernel's Init clamp).
+// XRuntime::PrepareAttn on the host lens (no D2H); queryTileSize should
+// match the kernel's tile (PickIndexerQTile)
+// to count the real task granularity - 0 or values above
+// MAX_INDEXER_Q_TILE_LEN fall back to the macro default (mirroring the
+// kernel's Init clamp).
 uint8_t PickIndexerKvSplit(const std::vector<uint32_t> &cachedLens,
                            const std::vector<uint32_t> &queryLens, uint32_t blockNum, uint32_t topK,
                            uint32_t compressRatio, uint32_t queryTileSize);
