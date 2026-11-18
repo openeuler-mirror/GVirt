@@ -28,6 +28,9 @@ pip install . --no-build-isolation --extra-index https://download.pytorch.org/wh
 
 # 若开发环境安装，建议使用"-v .[dev]"（py源码修改后可直接在开发环境中生效）
 pip install -v -e .[dev] --no-build-isolation --extra-index https://download.pytorch.org/whl/cpu/
+
+# 可选：设置 XLITE_BUILD_TEMP 复用稳定的 cmake 构建树，使重复的编辑安装增量编译（wheel/发布构建不受影响，始终全新构建）
+XLITE_BUILD_TEMP=~/.cache/xlite/build pip install -v -e .[dev] --no-build-isolation --extra-index https://download.pytorch.org/whl/cpu/
 ```
 
 若仅需测试正在开发的功能，可直接从主分支安装：
