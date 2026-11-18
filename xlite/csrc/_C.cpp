@@ -3402,6 +3402,33 @@ void SiluGateMul(XRuntime &rt, at::Tensor &normed, at::Tensor &gate, at::Tensor 
     rt.Synchronize();
 }
 
+void KpoolTailCompressAndSpill(XRuntime &rt, at::Tensor &tailCache, at::Tensor &indexerCache,
+                               at::Tensor &k, at::Tensor &gate, at::Tensor &ape,
+                               at::Tensor &positions, at::Tensor &queryStartLoc, at::Tensor &lens,
+                               at::Tensor &cachedLens, at::Tensor &slotMapping,
+                               at::Tensor &tailBlockTable, uint32_t headDim, uint32_t kpool,
+                               uint32_t mainBlockSize)
+{
+    XTensor _tailCache, _indexerCache, _k, _gate, _ape, _positions, _queryStartLoc, _lens,
+        _cachedLens, _slotMapping, _tailBlockTable;
+    // Paged-pool cache views arrive dim0-pitched; kernels consume the pitch via stride.
+    InitXTensor(_tailCache, tailCache, UNKNOWN_DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(_indexerCache, indexerCache, UNKNOWN_DBG_LOC, /*allowPitched=*/true);
+    InitXTensor(_k, k);
+    InitXTensor(_gate, gate);
+    InitXTensor(_ape, ape);
+    InitXTensor(_positions, positions);
+    InitXTensor(_queryStartLoc, queryStartLoc);
+    InitXTensor(_lens, lens);
+    InitXTensor(_cachedLens, cachedLens);
+    InitXTensor(_slotMapping, slotMapping);
+    InitXTensor(_tailBlockTable, tailBlockTable);
+    XliteOpKpoolTailCompressAndSpill(rt, _tailCache, _indexerCache, _k, _gate, _ape, _positions,
+                                     _queryStartLoc, _lens, _cachedLens, _slotMapping,
+                                     _tailBlockTable, headDim, kpool, mainBlockSize);
+    rt.Synchronize();
+}
+
 void RecurrentGatedDeltaRulePrefillPaged(XRuntime &rt, at::Tensor &query, at::Tensor &key,
                                          at::Tensor &value, at::Tensor &beta, at::Tensor &g,
                                          at::Tensor &state, at::Tensor &out, at::Tensor &indices,
@@ -4983,4 +5010,10 @@ TORCH_LIBRARY(xlite_sabi, m)
     ops.def("hc_mean_collapse", op<&HcMeanCollapse>,
             {torch::arg("rt"), torch::arg("input"), torch::arg("output"), torch::arg("m"),
              torch::arg("hc_mult"), torch::arg("hidden")});
+    ops.def("kpool_tail_compress_and_spill", op<&KpoolTailCompressAndSpill>,
+            {torch::arg("rt"), torch::arg("tail_cache"), torch::arg("indexer_cache"),
+             torch::arg("k"), torch::arg("gate"), torch::arg("ape"), torch::arg("positions"),
+             torch::arg("query_start_loc"), torch::arg("lens"), torch::arg("cached_lens"),
+             torch::arg("slot_mapping"), torch::arg("tail_block_table"), torch::arg("head_dim"),
+             torch::arg("kpool"), torch::arg("main_block_size")});
 }

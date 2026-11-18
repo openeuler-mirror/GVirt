@@ -94,6 +94,10 @@ enum class NormKind {
 #define MAX_SWA_SEG_WIDTH 4096
 #define MSD_MERGE_DEQUANT_MAX_N 8064
 
+// kpool tail
+#define KPOOL_TAIL_MAX_HEAD_DIM 256  // kpool_tail input caps
+#define KPOOL_TAIL_MAX_KPOOL 8
+
 // muls
 #define MAX_MULS_CALC_NUM 16320
 

@@ -4821,3 +4821,34 @@ def hc_mean_collapse(rt: Runtime, input: torch.Tensor, output: torch.Tensor, m: 
     budget. The binding synchronizes.
     """
     ...
+
+def kpool_tail_compress_and_spill(
+    rt: Runtime,
+    tail_cache: torch.Tensor,
+    indexer_cache: torch.Tensor,
+    k: torch.Tensor,
+    gate: torch.Tensor,
+    ape: torch.Tensor,
+    positions: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    lens: torch.Tensor,
+    cached_lens: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    tail_block_table: torch.Tensor,
+    head_dim: int,
+    kpool: int,
+    main_block_size: int,
+) -> None:
+    """GLM5 kpool compression: fold pooled indexer keys into the main cache and spill the tail ring.
+
+    Two launches over one binding. Compress: for each current-step token, the pooled
+    write slot ``mainSlot/kpool`` in the paged indexer cache is filled from the request's
+    tail ring (``tail_cache`` [blocks, cap, 2*head_dim] FP32, each row one pool slot's
+    ``[k | gate]`` pair) using the per-kpool-position mean weights ``ape`` [kpool, head_dim]
+    (FP32). Spill: the new tail tokens' ``k``/``gate`` (both FP32, [tokens, head_dim]) are
+    appended to each request's ring row. ``k``/``gate`` are the fused FP32 projections for
+    the current tokens; metadata tensors follow the family convention (positions INT64,
+    the rest INT32). The tail ring capacity must be >= kpool and ``main_block_size`` a
+    multiple of kpool; headDim <= 256 and kpool <= 8 (kernel budget). The binding synchronizes.
+    """
+    ...

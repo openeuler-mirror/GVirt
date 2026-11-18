@@ -33,6 +33,36 @@ inline uint64_t HcMeanUbNeed(uint32_t hcMult, uint32_t hidden, uint32_t dtypeSiz
            ROUND_UP((uint64_t)hidden * 4, UB_BUF_ALIGN_SIZE);
 }
 
+// Kernels read these as dense ND raw pointers; reject stride mismatch on size>1 dims.
+inline void RequireContiguous(const XTensor &t, const char *name)
+{
+    size_t expect = 1;
+    for (int64_t i = (int64_t)t.shape.size() - 1; i >= 0; i--) {
+        if (t.shape[i] > 1 && t.stride[i] != expect) {
+            throw std::runtime_error(std::string(name) + ": non-contiguous descriptor " +
+                                     t.ToStr());
+        }
+        expect *= t.shape[i];
+    }
+}
+
+// Paged-pool cache views: dense inner dims; the dim-0 pitch (page padding) is passed to
+// kernels as a stride, so blocks may be page-aligned with arbitrary padding.
+inline void RequireDim0Pitched(const XTensor &t, const char *name)
+{
+    size_t expect = 1;
+    for (int64_t i = (int64_t)t.shape.size() - 1; i >= 1; i--) {
+        if (t.shape[i] > 1 && t.stride[i] != expect) {
+            throw std::runtime_error(std::string(name) +
+                                     ": non-dense inner dims (dim0-pitched cache contract)");
+        }
+        expect *= t.shape[i];
+    }
+    if (t.shape.size() > 1 && t.shape[0] > 1 && t.stride[0] < expect) {
+        throw std::runtime_error(std::string(name) + ": dim0 stride smaller than inner span");
+    }
+}
+
 // Kernels that index `positions` as a flat 1D array read only the first row of a 2D
 // (mrope) input; warn once per op so a wrong-layout call stays visible in per-step logs.
 static void WarnPositions2D(const char *op)
@@ -3956,4 +3986,102 @@ void XliteOpHcMeanCollapse(XRuntime &rt, XTensor &input, XTensor &output, uint32
     }
     launchKernel(PickMinBlockNum(rt.aivNum, m), rt.stream, input.ptr, output.ptr, m, hcMult, hidden,
                  1.0f / static_cast<float>(hcMult));
+}
+void XliteOpKpoolTailCompressAndSpill(XRuntime &rt, XTensor &tailCache, XTensor &indexerCache,
+                                      XTensor &k, XTensor &gate, const XTensor &ape,
+                                      XTensor &positions, XTensor &queryStartLoc, XTensor &lens,
+                                      XTensor &cachedLens, XTensor &slotMapping,
+                                      XTensor &tailBlockTable, uint32_t headDim, uint32_t kpool,
+                                      uint32_t mainBlockSize)
+{
+    if (IsDummyRuntime(rt) || k.numel == 0) {
+        return;
+    }
+    if (tailCache.dtype != FP32 || ape.dtype != FP32) {
+        throw std::runtime_error(std::string(__func__) + ": tailCache and ape must be FP32");
+    }
+    // Native contract: keys and gate scores are FP32 (upstream computes them in
+    // fp32 end-to-end); the Dtype template only selects the indexerCache width.
+    if (k.dtype != FP32 || gate.dtype != FP32) {
+        throw std::runtime_error(std::string(__func__) + ": k and gate must be FP32");
+    }
+    if (positions.dtype != INT64 || queryStartLoc.dtype != INT32 || lens.dtype != INT32 ||
+        cachedLens.dtype != INT32 || slotMapping.dtype != INT32 || tailBlockTable.dtype != INT32) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": positions must be INT64, int tensors INT32");
+    }
+    if (queryStartLoc.numel == 0) {
+        throw std::runtime_error(std::string(__func__) + ": empty queryStartLoc");
+    }
+    // Rank checks precede any shape[] indexing.
+    if (tailCache.shape.size() < 3 || indexerCache.shape.size() < 4 || k.shape.size() < 2 ||
+        gate.shape.size() < 2 || ape.shape.size() < 2) {
+        throw std::runtime_error(std::string(__func__) + ": rank mismatch");
+    }
+    uint32_t numTokens = static_cast<uint32_t>(k.shape[0]);
+    // queryStartLoc[r] is request r's absolute start; lens[r] its query length.
+    uint32_t numReqs = static_cast<uint32_t>(queryStartLoc.numel) - 1;
+    uint32_t cap = static_cast<uint32_t>(tailCache.shape[1]);
+    uint32_t tailBlocks = static_cast<uint32_t>(tailCache.shape[0]);
+    uint32_t indexerBlockSize = static_cast<uint32_t>(indexerCache.shape[1]);
+    uint32_t idxBlocks = static_cast<uint32_t>(indexerCache.shape[0]);
+    if (headDim == 0 || kpool == 0 || numReqs == 0 || mainBlockSize == 0) {
+        throw std::runtime_error(std::string(__func__) + ": invalid dims");
+    }
+    // Host mirrors of the kernel's silent early-returns.
+    if (headDim > KPOOL_TAIL_MAX_HEAD_DIM || kpool > KPOOL_TAIL_MAX_KPOOL) {
+        throw std::runtime_error(std::string(__func__) + ": headDim/kpool exceed kernel budget");
+    }
+    // Ring must hold one compress window; pooled slots stay integral.
+    if (cap < kpool || mainBlockSize % kpool != 0) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": cap/mainBlockSize incompatible with kpool");
+    }
+    if (tailBlockTable.numel < numReqs) {
+        throw std::runtime_error(std::string(__func__) + ": tailBlockTable too small");
+    }
+    if (tailCache.shape[2] != 2 * headDim || indexerCache.shape[3] != headDim ||
+        k.shape[1] != headDim || gate.shape[1] != headDim || ape.shape[0] != kpool ||
+        ape.shape[1] != headDim || positions.numel < numTokens || cachedLens.numel < numReqs ||
+        lens.numel < numReqs || slotMapping.numel < numTokens) {
+        throw std::runtime_error(std::string(__func__) + ": shape mismatch");
+    }
+    // Pool views carry a dim-0 page pitch the kernels consume via stride; per-step
+    // tensors stay strictly contiguous.
+    RequireDim0Pitched(tailCache, "kpool_tail_compress.tailCache");
+    RequireDim0Pitched(indexerCache, "kpool_tail_compress.indexerCache");
+    RequireContiguous(k, "kpool_tail_compress.k");
+    RequireContiguous(gate, "kpool_tail_compress.gate");
+    RequireContiguous(ape, "kpool_tail_compress.ape");
+    RequireContiguous(positions, "kpool_tail_compress.positions");
+    RequireContiguous(queryStartLoc, "kpool_tail_compress.queryStartLoc");
+    RequireContiguous(lens, "kpool_tail_compress.lens");
+    RequireContiguous(cachedLens, "kpool_tail_compress.cachedLens");
+    RequireContiguous(slotMapping, "kpool_tail_compress.slotMapping");
+    RequireContiguous(tailBlockTable, "kpool_tail_compress.tailBlockTable");
+    KERNEL_PTR_TYPE(kpool_tail_compress) * launchCompress;
+    KERNEL_PTR_TYPE(kpool_tail_spill) * launchSpill;
+    if (indexerCache.dtype == FP32) {
+        launchCompress = aclrtlaunch_kpool_tail_compress_float;
+        launchSpill = aclrtlaunch_kpool_tail_spill_float;
+    } else if (indexerCache.dtype == FP16) {
+        launchCompress = aclrtlaunch_kpool_tail_compress_float16_t;
+        launchSpill = aclrtlaunch_kpool_tail_spill_float16_t;
+    } else if (indexerCache.dtype == BF16) {
+        launchCompress = aclrtlaunch_kpool_tail_compress_bfloat16_t;
+        launchSpill = aclrtlaunch_kpool_tail_spill_bfloat16_t;
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(indexerCache);
+        throw std::runtime_error(err_str + "not supported!");
+    }
+    uint32_t tailStride = static_cast<uint32_t>(tailCache.stride[0]);
+    uint32_t idxStride = static_cast<uint32_t>(indexerCache.stride[0]);
+    launchCompress(PickMinBlockNum(rt.aivNum, numTokens), rt.stream, tailCache.ptr,
+                   indexerCache.ptr, k.ptr, gate.ptr, ape.ptr, positions.ptr, queryStartLoc.ptr,
+                   lens.ptr, cachedLens.ptr, slotMapping.ptr, tailBlockTable.ptr, numReqs,
+                   numTokens, headDim, kpool, cap, tailBlocks, indexerBlockSize, idxBlocks,
+                   mainBlockSize, k.shape[1], gate.shape[1], tailStride, idxStride);
+    launchSpill(PickMinBlockNum(rt.aivNum, numReqs * cap), rt.stream, tailCache.ptr, k.ptr,
+                gate.ptr, queryStartLoc.ptr, lens.ptr, tailBlockTable.ptr, positions.ptr, numReqs,
+                numTokens, headDim, cap, tailBlocks, k.shape[1], gate.shape[1], tailStride);
 }
