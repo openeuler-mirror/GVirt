@@ -467,6 +467,11 @@ Python3_add_library(xlite_sabi MODULE
     USE_SABI 3.11
     WITH_SOABI)
 
+# Some cmake/python-sysconfig combinations compute a platform-tagged
+# WITH_SOABI suffix (xlite_sabi.abi3-<platform>.so); setup.py's abi3 retag
+# and inplace copy expect the literal .abi3.so suffix, so pin it.
+set_target_properties(xlite_sabi PROPERTIES SUFFIX ".abi3.so")
+
 target_compile_options(xlite_sabi PRIVATE
     -std=c++17 -O3 -Wall -Werror -fPIC
 )
