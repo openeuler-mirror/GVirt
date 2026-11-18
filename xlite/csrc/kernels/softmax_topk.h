@@ -11,7 +11,6 @@
 
 #ifdef __DAV_C220_VEC__
 constexpr uint32_t BIT_SIZE_OF_U32 = 32;
-constexpr uint64_t SORT_RESULT_BLOCK_SIZE = SORT_BLOCK_SIZE * 2;
 
 template <typename Dtype>
 class SoftmaxTopK
@@ -218,25 +217,20 @@ public:
         // 分4块排序，每块32个数据
         vbitsort(sortTmp, calc, indicesIn, nSortScores / SORT_BLOCK_SIZE);
         pipe_barrier(PIPE_V);
-        uint64_t mrgRepeat = 1;
-        uint64_t validBits = 0xF;
-        uint64_t ifExhaustedSuspension = 0;
-        uint64_t config = mrgRepeat | validBits << MGR_SORT_VALID_BITS_OFFSET |
-                          ifExhaustedSuspension << MGR_SORT_IF_EXHAUSTED_SUSPENSION_OFFSET;
-        uint64_t lengths =
-            SORT_BLOCK_SIZE | SORT_BLOCK_SIZE << 16 | SORT_BLOCK_SIZE << 32 | SORT_BLOCK_SIZE << 48;
-        __ubuf__ float *addrArray[4] = {sortTmp, sortTmp + SORT_RESULT_BLOCK_SIZE,
-                                        sortTmp + 2 * SORT_RESULT_BLOCK_SIZE,
-                                        sortTmp + 3 * SORT_RESULT_BLOCK_SIZE};
-        vmrgsort4(sortMrgTmp, addrArray, lengths, config);
+        // MrgSort() folds every vbitsort block into one descending run and prunes each merge
+        // level to the top candidates, so neither the 4-way merge limit nor a manual tail
+        // folding loop has to be handled here. The result lands in sortTmp or sortMrgTmp
+        // depending on how many merge levels ran, hence the returned pointer.
+        __ubuf__ float *topSort = nullptr;
+        MrgSort(sortTmp, sortMrgTmp, nSortScores / SORT_BLOCK_SIZE, &topSort, topK);
         pipe_barrier(PIPE_V);
         // 提取出indices
-        vreducev2(indicesTopK, (__ubuf__ uint32_t *)sortMrgTmp, (__ubuf__ uint32_t *)sortMrgTmp, 1,
-                  1, 2, 8, 0);
+        vreducev2(indicesTopK, (__ubuf__ uint32_t *)topSort, (__ubuf__ uint32_t *)topSort, 1, 1, 2,
+                  8, 0);
         pipe_barrier(PIPE_V);
         // 提取出weights
-        vreducev2((__ubuf__ uint32_t *)weightsTopK, (__ubuf__ uint32_t *)sortMrgTmp,
-                  (__ubuf__ uint32_t *)sortMrgTmp, 1, 1, 1, 8, 0);
+        vreducev2((__ubuf__ uint32_t *)weightsTopK, (__ubuf__ uint32_t *)topSort,
+                  (__ubuf__ uint32_t *)topSort, 1, 1, 1, 8, 0);
         pipe_barrier(PIPE_V);
         // weights.sum(dim=-1, keepdim=True)
         ReduceSum(reduceTmp, weightsTopK, topK);
