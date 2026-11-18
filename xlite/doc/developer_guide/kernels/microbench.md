@@ -35,11 +35,11 @@ kernel 内计时家族（`GetSystemCycle()` 读 SYS_CNT，不依赖 profiler）�
 
 ```bash
 # 默认构建（实验 1、2a、2b）
-rm -rf build && cmake -B build && cmake --build build -j "$(nproc)" && cmake --install build
+rm -rf build && cmake -B build && cmake --build build -j "${MAX_JOBS:-64}" && cmake --install build
 
 # timed 构建（追加实验 2c、3、4、5）
 rm -rf build && cmake -B build -DXLITE_BENCH_TIMED=ON \
-    && cmake --build build -j "$(nproc)" && cmake --install build
+    && cmake --build build -j "${MAX_JOBS:-64}" && cmake --install build
 ```
 
 - ascendc 子工程不支持增量编译，必须 `rm -rf build`。

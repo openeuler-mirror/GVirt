@@ -76,13 +76,13 @@ XLite 使用以下端口分配策略（基于 `XLITE_PORT`）：
 
 ```bash
 # 仅前向中间张量打印
-XLITE_DEBUG_ON=forward cmake -B build && cmake --build build -j "$(nproc)"
+XLITE_DEBUG_ON=forward cmake -B build && cmake --build build -j "${MAX_JOBS:-64}"
 
 # 前向 + tuner 调试
-XLITE_DEBUG_ON=forward,tuner cmake -B build && cmake --build build -j "$(nproc)"
+XLITE_DEBUG_ON=forward,tuner cmake -B build && cmake --build build -j "${MAX_JOBS:-64}"
 
 # 全部调试类别
-XLITE_DEBUG_ON=all cmake -B build && cmake --build build -j "$(nproc)"
+XLITE_DEBUG_ON=all cmake -B build && cmake --build build -j "${MAX_JOBS:-64}"
 
 # pip 可编辑安装时携带调试
 XLITE_DEBUG_ON=forward,tuner pip install -v -e .[dev] --no-build-isolation
