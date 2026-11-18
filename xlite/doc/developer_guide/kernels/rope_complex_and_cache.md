@@ -58,8 +58,8 @@ Python 接口(cache 形式):`rope_complex_and_cache(rt, n_local_heads, step_dim,
 - `vRemain`:head 中 rope 区以外部分的暂存(cache 模式整 head 加载时用);
 - fp32 工作区:`inOutFP32`、`x_even`/`x_odd`、`cos`/`sin`、`x_even_cos`/`x_odd_sin`/`x_even_sin`/`x_odd_cos`(各 `ropeDim * nLocalHeads` 个 float);
 - `positionUB`(maxCnt=256 个 uint64)、`slotMappingUB`(cache 模式):索引批量预取区;
-- `interleavedFP32Head` + `vgatherIndicesUB`:仅 `outInterleaved` 路径的单头暂存与 vgather 索引表。
-- `rotateFP32`:`doRotate && fullHeadLoad` 条件分配(`ROUND_UP(totalHeadFPBytes, VECTOR_MAX_BYTESIZE)`,整 head 的 fp32 暂存),供 cache 路径 `vconv→vmuls(rotateScale)→vconv` 整 head 缩放使用;`doRotate` 关闭或 `!fullHeadLoad` 时分配 0 字节([csrc/kernels/rope_complex_and_cache.h](../../../csrc/kernels/rope_complex_and_cache.h) 的 `rope_complex_and_cache` 中 `rotateFP32` 条件分配段,关键字 `doRotate && fullHeadLoad`)。
+- `rotateFP32`:`doRotate && fullHeadLoad` 条件分配(`ROUND_UP(totalHeadFPBytes, VECTOR_MAX_BYTESIZE)`,整 head 的 fp32 暂存),供 cache 路径 `vconv→vmuls(rotateScale)→vconv` 整 head 缩放使用;`doRotate` 关闭或 `!fullHeadLoad` 时分配 0 字节([csrc/kernels/rope_complex_and_cache.h](../../../csrc/kernels/rope_complex_and_cache.h) 的 `rope_complex_and_cache` 中 `rotateFP32` 条件分配段,关键字 `doRotate && fullHeadLoad`);
+- `vgatherIndicesUB` + `interleavedFP32`:仅 `outInterleaved` 路径的 vgather 索引表与交错暂存——`flatGather`(`ropeDim == 64` 且表装得进剩余 UB)时为扁平表(每个向量 repeat 一行 64 项、含各 head 绝对偏移),否则为单头相对偏移表(每头 vgather 基址复用);交错暂存 `interleavedFP32` 别名到 rope 数学死区 `x_odd_cos`(`ropeDim * nLocalHeads` 个 float),不额外占 UB。
 
 `assert(off <= UB_SIZE)` 保证布局可容纳。
 
@@ -72,7 +72,7 @@ Python 接口(cache 形式):`rope_complex_and_cache(rt, n_local_heads, step_dim,
 3. **freqs 搬入**:`freqs_gm = freqs + pos * ropeDim`([csrc/kernels/rope_complex_and_cache.h](../../../csrc/kernels/rope_complex_and_cache.h) 的 `rope_complex_and_cache` 中 `freqs_gm` 搬入段);
 4. **升精度**:`vconv_f162f32` / `vconv_bf162f32` 把 rope 区升到 fp32([csrc/kernels/rope_complex_and_cache.h](../../../csrc/kernels/rope_complex_and_cache.h) 的 `rope_complex_and_cache` 中 `vconv_f162f32`/`vconv_bf162f32` 升精度段);`fullHeadLoad` 时同时把 remain 区 `copy_ubuf_to_ubuf` 暂存到 `vRemain`([csrc/kernels/rope_complex_and_cache.h](../../../csrc/kernels/rope_complex_and_cache.h) 的 `rope_complex_and_cache` 中 `copy_ubuf_to_ubuf(vRemain` 暂存段);
 5. **计算**(纯向量指令,见下节);
-6. **降精度写回**:非交错路径一次 `vconv_f322f16`/`vconv_f322bf16r` 转换全部头;交错路径逐头 `vgather` 重排后转换([csrc/kernels/rope_complex_and_cache.h](../../../csrc/kernels/rope_complex_and_cache.h) 的 `rope_complex_and_cache` 中 `vconv_f322f16`/`vgather` 降精度写回段);`fullHeadLoad` 时把 remain 区拷回输出缓冲;
+6. **降精度写回**:非交错路径一次 `vconv_f322f16`/`vconv_f322bf16r` 转换全部头;交错路径在 `ropeDim == 64`(行与 head 对齐)且扁平表装得进剩余 UB 时(`flatGather`),一次多 repeat `vgather` 把整 token 重排为 `[r0,i0,r1,i1,...]` 后再一次 `vconv` 整体转换(替代每头 `vgather`+`vconv`+双 `pipe_barrier` 串行链,该链是 prefill 交错路径的主导开销);其余形态(ropeDim 非 64、表超 UB)退回逐头循环([csrc/kernels/rope_complex_and_cache.h](../../../csrc/kernels/rope_complex_and_cache.h) 的 `rope_complex_and_cache` 中 `vconv_f322f16`/`vgather` 降精度写回段);`fullHeadLoad` 时把 remain 区拷回输出缓冲;
 7. **(可选)doRotate 缩放 + 写出**:`doRotate` 启用时先对旋转结果做 `vmuls(rotateScale)` 缩放——非 cache 路径(`doRotate && !need_v_cache`)直接对 fp32 rope 区缩放,cache 路径(`doRotate && fullHeadLoad`)对整 head(含 remain)做 `vconv→vmuls(rotateScale)→vconv` 缩放回原 dtype([csrc/kernels/rope_complex_and_cache.h](../../../csrc/kernels/rope_complex_and_cache.h) 的 `rope_complex_and_cache` 中 `doRotate` 缩放两段);随后写出([csrc/kernels/rope_complex_and_cache.h](../../../csrc/kernels/rope_complex_and_cache.h) 的 `rope_complex_and_cache` 中 cache/output 写出段):cache 模式把整 head 写到 `v_cache + (slot / block_size) * MAX(vcacheStride, block_size*nLocalHeads*vdim) + (slot % block_size) * nLocalHeads * vdim`,若 `output_ptr` 非空再把 rope 区写到 output;非 cache 模式直接写 output。
 
 ### 关键计算步骤
@@ -85,7 +85,7 @@ Python 接口(cache 形式):`rope_complex_and_cache(rt, n_local_heads, step_dim,
    - 正向:`real = x_even*cos - x_odd*sin`(`vsub`),`imag = x_even*sin + x_odd*cos`(`vadd`),其中 imag 写到 `inOutFP32 + ropeDim/2`;
    - 逆向:符号取反,即旋转 `-θ`。
 
-交错输出路径在 kernel 启动时用标量单元填一张 vgather 索引表:`indices[2k] = k`(real[k])、`indices[2k+1] = half+k`(imag[k]),之后每头一次 `vgather` 把半分布局 `[r0..r31 | i0..i31]` 重排为 `[r0,i0,r1,i1,...]`([csrc/kernels/rope_complex_and_cache.h](../../../csrc/kernels/rope_complex_and_cache.h) 的 `rope_complex_and_cache` 中 `vgatherIndicesUB` 索引表填写与 `vgather` 重排两段)。
+交错输出路径在 kernel 启动时填一张 vgather 索引表,按 `flatGather` 是否成立分两种:`ropeDim == 64`(行与 head 对齐)且表装得进剩余 UB 时用扁平表——表项为每个输出槽位的绝对源字节偏移(含各 head 基址),标量单元只填第 0 行模板 `indices[2k] = k*4`(real[k])、`indices[2k+1] = (half+k)*4`(imag[k]),其余行各用一条 `vadds` 加上 head 基址(把每次 launch 的标量开销限制在 O(nLocalHeads),decode 不为填表买单),之后每 token 一次多 repeat `vgather` 把整 token 半分布局 `[r0..r31 | i0..i31]` 重排为 `[r0,i0,r1,i1,...]`;其余形态退回相对偏移表 + 每头一次 `vgather` 的逐头链([csrc/kernels/rope_complex_and_cache.h](../../../csrc/kernels/rope_complex_and_cache.h) 的 `rope_complex_and_cache` 中 `vgatherIndicesUB` 索引表填写与 `vgather` 重排两段)。
 
 ### 测试参考
 

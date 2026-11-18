@@ -45,7 +45,11 @@ ROPE_THETA = 10000.0
 MAX_SEQ_LEN = 16384
 
 # model configurations: name, index_head_dim, index_n_heads, rope_head_dim, dtype
+# The 32-head shape matches the GLM-5.2 w8a8 per-rank indexer (TP16); 64 heads exceed
+# the UB budget for the flat single-vgather interleave and exercise its fallback.
 models = [
+    ("indexer_128_32", 128, 32, 64, torch.bfloat16),
+    ("indexer_128_32_fp16", 128, 32, 64, torch.float16),
     ("indexer_128_64", 128, 64, 64, torch.bfloat16),
     ("indexer_128_64_fp16", 128, 64, 64, torch.float16),
 ]

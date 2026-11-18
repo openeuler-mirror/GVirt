@@ -102,12 +102,6 @@ __aicore__ __inline__ void rope_complex_and_cache(
     off += ROUND_UP((maxCnt) * sizeof(uint64_t), VECTOR_MAX_BYTESIZE);
     UBA(uint32_t) slotMappingUB = reinterpret_cast<UBA(uint32_t)>(off);
     off += need_v_cache ? ROUND_UP((maxCnt) * sizeof(uint32_t), VECTOR_MAX_BYTESIZE) : 0;
-    // outInterleaved path: single-head scratch for interleaved [r0,i0,r1,i1,...]
-    // (reused per head) + fixed vgather index table filled once on the scalar unit.
-    UBA(float) interleavedFP32Head = reinterpret_cast<UBA(float)>(off);
-    off += outInterleaved ? ROUND_UP(ropeFPBytes, VECTOR_MAX_BYTESIZE) : 0;
-    UBA(uint32_t) vgatherIndicesUB = reinterpret_cast<UBA(uint32_t)>(off);
-    off += outInterleaved ? ROUND_UP(ropeDim * sizeof(uint32_t), VECTOR_MAX_BYTESIZE) : 0;
     UBA(float) rotateFP32 = reinterpret_cast<UBA(float)>(off);
     off += (doRotate && fullHeadLoad) ? ROUND_UP(totalHeadFPBytes, VECTOR_MAX_BYTESIZE) : 0;
     assert(off <= UB_SIZE);
@@ -116,22 +110,61 @@ __aicore__ __inline__ void rope_complex_and_cache(
     UBA(float) freqs[2] = {freqs0, freqs1};
     UBA(Dtype) outs[2] = {out0, out1};
 
+    // ropeDim == 64 aligns the flat table rows with heads, so one multi-repeat vgather
+    // plus one vconv interleaves the whole token, replacing the per-head
+    // [vgather + vconv + barriers] chain that dominates outInterleaved prefill time.
+    // Shapes that fail the conditions keep the per-head chain.
+    uint64_t flatTableBytes =
+        ROUND_UP(ropeDim * nLocalHeads * sizeof(uint32_t), VECTOR_MAX_BYTESIZE);
+    bool flatGather = outInterleaved && ropeDim == calcPad && totalRepeat <= 255 &&
+                      off + flatTableBytes <= UB_SIZE;
+    // Flat table: absolute per-slot offsets. Non-flat: per-head relative offsets.
+    UBA(uint32_t) vgatherIndicesUB = reinterpret_cast<UBA(uint32_t)>(off);
+    off += outInterleaved ? (flatGather ? flatTableBytes
+                                        : ROUND_UP(ropeDim * sizeof(uint32_t), VECTOR_MAX_BYTESIZE))
+                          : 0;
+    assert(off <= UB_SIZE);
+
+    // Interleave staging aliases x_odd_cos (dead by the conversion point), so the flat
+    // path costs no UB beyond the table.
+    UBA(float) interleavedFP32 = x_odd_cos;
+
     int taskNum = nTokens;
     if (nextCoreOffset) {
         *nextCoreOffset = (coreOffset + taskNum) % block_num;
     }
 
-    // Fill vgather index table: indices[2k]=k*4 (real[k]), indices[2k+1]=(half+k)*4
-    // (imag[k]); vgather then interleaves [r0..r31 | i0..i31] -> [r0,i0,r1,i1,...].
+    // Fill the vgather index table: byte offsets that interleave the half-split
+    // [real|imag] rope result into [r0,i0,r1,i1,...]. Flat rows are head-aligned
+    // (row h = row 0 + h*ropeDim*4), so the scalar unit writes only row 0 and one
+    // vadds per head adds the base on the vector unit, keeping per-launch scalar
+    // cost O(nLocalHeads).
     if (outInterleaved) {
         set_flag(PIPE_V, PIPE_S, EVENT_ID4);
         wait_flag(PIPE_V, PIPE_S, EVENT_ID4);
-        for (int k = 0; k < half; k++) {
-            vgatherIndicesUB[2 * k] = (uint32_t)(k * sizeof(float));
-            vgatherIndicesUB[2 * k + 1] = (uint32_t)((half + k) * sizeof(float));
+        if (flatGather) {
+            for (int k = 0; k < half; k++) {
+                vgatherIndicesUB[2 * k] = (uint32_t)(k * sizeof(float));
+                vgatherIndicesUB[2 * k + 1] = (uint32_t)((half + k) * sizeof(float));
+            }
+            set_flag(PIPE_S, PIPE_V, EVENT_ID4);
+            wait_flag(PIPE_S, PIPE_V, EVENT_ID4);
+            for (uint32_t h = 1; h < nLocalHeads; h++) {
+                vadds(reinterpret_cast<__ubuf__ int32_t *>(vgatherIndicesUB + h * ropeDim),
+                      reinterpret_cast<__ubuf__ int32_t *>(vgatherIndicesUB),
+                      int32_t(h * ropeDim * sizeof(float)), 1, 1, 1, 8, 8);
+            }
+            pipe_barrier(PIPE_V);
+        } else {
+            // Relative per-head offsets; each per-head vgather below adds its head
+            // base address.
+            for (int k = 0; k < half; k++) {
+                vgatherIndicesUB[2 * k] = (uint32_t)(k * sizeof(float));
+                vgatherIndicesUB[2 * k + 1] = (uint32_t)((half + k) * sizeof(float));
+            }
+            set_flag(PIPE_S, PIPE_V, EVENT_ID4);
+            wait_flag(PIPE_S, PIPE_V, EVENT_ID4);
         }
-        set_flag(PIPE_S, PIPE_V, EVENT_ID4);
-        wait_flag(PIPE_S, PIPE_V, EVENT_ID4);
     }
 
     set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
@@ -262,27 +295,41 @@ __aicore__ __inline__ void rope_complex_and_cache(
         }
 
         wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + curr);
-        // out FP32 -> Dtype. outInterleaved: vgather each head into [r0,i0,r1,i1,...] and
-        // convert head-by-head; otherwise convert all heads at once.
+        // out FP32 -> Dtype. Flat path: one vgather + one vconv per token; heads stay
+        // contiguous, so the convert strides match the non-interleaved path. Non-flat
+        // keeps the per-head loop. Otherwise convert all heads at once.
         if (outInterleaved) {
-            set_mask_count();
-            set_vector_mask(0x0, ropeDim);
-            for (uint32_t h = 0; h < nLocalHeads; h++) {
-                uint32_t base =
-                    static_cast<uint32_t>(reinterpret_cast<uint64_t>(inOutFP32 + h * ropeDim));
-                vgather((__ubuf__ uint32_t *)interleavedFP32Head, vgatherIndicesUB, base, 0, 1);
+            if (flatGather) {
+                uint32_t base = static_cast<uint32_t>(reinterpret_cast<uint64_t>(inOutFP32));
+                vgather((UBA(uint32_t))interleavedFP32, vgatherIndicesUB, base, 8, totalRepeat);
                 pipe_barrier(PIPE_V);
                 if constexpr (std::is_same_v<Dtype, float16_t>) {
-                    vconv_f322f16(ropeOut + h * ropeDim, interleavedFP32Head, 1, 1, 1, input_blocks,
+                    vconv_f322f16(ropeOut, interleavedFP32, totalRepeat, 1, 1, input_blocks,
                                   rope_blocks);
                 } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
-                    vconv_f322bf16r(ropeOut + h * ropeDim, interleavedFP32Head, 1, 1, 1,
-                                    input_blocks, rope_blocks);
+                    vconv_f322bf16r(ropeOut, interleavedFP32, totalRepeat, 1, 1, input_blocks,
+                                    rope_blocks);
                 }
-                pipe_barrier(PIPE_V);
+            } else {
+                set_mask_count();
+                set_vector_mask(0x0, ropeDim);
+                for (uint32_t h = 0; h < nLocalHeads; h++) {
+                    uint32_t base =
+                        static_cast<uint32_t>(reinterpret_cast<uint64_t>(inOutFP32 + h * ropeDim));
+                    vgather((__ubuf__ uint32_t *)interleavedFP32, vgatherIndicesUB, base, 0, 1);
+                    pipe_barrier(PIPE_V);
+                    if constexpr (std::is_same_v<Dtype, float16_t>) {
+                        vconv_f322f16(ropeOut + h * ropeDim, interleavedFP32, 1, 1, 1, input_blocks,
+                                      rope_blocks);
+                    } else if constexpr (std::is_same_v<Dtype, bfloat16_t>) {
+                        vconv_f322bf16r(ropeOut + h * ropeDim, interleavedFP32, 1, 1, 1,
+                                        input_blocks, rope_blocks);
+                    }
+                    pipe_barrier(PIPE_V);
+                }
+                set_mask_norm();
+                set_vector_mask((uint64_t)-1, (uint64_t)-1);
             }
-            set_mask_norm();
-            set_vector_mask((uint64_t)-1, (uint64_t)-1);
         } else {
             if constexpr (std::is_same_v<Dtype, float16_t>) {
                 vconv_f322f16(ropeOut, inOutFP32, nLocalHeads, 1, 1, input_blocks, rope_blocks);
