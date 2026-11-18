@@ -3083,7 +3083,8 @@ static void CheckGdnDevices(XRuntime &rt, std::initializer_list<const at::Tensor
 void LinearAttConv1dAndSiLUPaged(XRuntime &rt, at::Tensor &input, at::Tensor &state,
                                  at::Tensor &weight, at::Tensor &output, at::Tensor &indices,
                                  const std::optional<at::Tensor> &cachedLens,
-                                 uint32_t stateBlockSize, bool aligned)
+                                 uint32_t stateBlockSize, bool aligned, uint32_t stateLayout,
+                                 uint32_t chanOffset)
 {
     CheckGdnDevices(rt, {&input, &state, &weight, &output, &indices,
                          cachedLens.has_value() ? &cachedLens.value() : nullptr});
@@ -3101,7 +3102,7 @@ void LinearAttConv1dAndSiLUPaged(XRuntime &rt, at::Tensor &input, at::Tensor &st
         InitXTensor(cached, cachedLens.value());
     }
     XliteOpConv1dAndSiLUPaged(rt, c, x, w, y, pages, cachedLens.has_value() ? &cached : nullptr,
-                              stateBlockSize, aligned);
+                              stateBlockSize, aligned, stateLayout, chanOffset);
     rt.Synchronize();
 }
 
@@ -3507,7 +3508,8 @@ void HcMeanCollapse(XRuntime &rt, at::Tensor &input, at::Tensor &output, uint32_
 
 void Conv1dAndSiLUPrefillPaged(XRuntime &rt, at::Tensor &input, at::Tensor &state,
                                at::Tensor &weight, at::Tensor &output, at::Tensor &indices,
-                               at::Tensor &starts, at::Tensor &initial)
+                               at::Tensor &starts, at::Tensor &initial, uint32_t stateLayout,
+                               uint32_t chanOffset)
 {
     CheckGdnDevices(rt, {&input, &state, &weight, &output, &indices, &starts, &initial});
     XTensor x, st, w, o, ids, bounds, init;
@@ -3518,7 +3520,7 @@ void Conv1dAndSiLUPrefillPaged(XRuntime &rt, at::Tensor &input, at::Tensor &stat
     InitXTensor(ids, indices);
     InitXTensor(bounds, starts);
     InitXTensor(init, initial);
-    XliteOpConv1dAndSiLUPrefillPaged(rt, st, x, w, o, ids, bounds, init);
+    XliteOpConv1dAndSiLUPrefillPaged(rt, st, x, w, o, ids, bounds, init, stateLayout, chanOffset);
     rt.Synchronize();
 }
 
@@ -4940,7 +4942,8 @@ TORCH_LIBRARY(xlite_sabi, m)
               torch::arg("weight"), torch::arg("output"), torch::arg("state_indices"),
               torch::arg("cached_lens") = torch::arg::none(),
               torch::arg("state_block_size") = static_cast<int64_t>(0),
-              torch::arg("aligned") = false})
+              torch::arg("aligned") = false, torch::arg("state_layout") = static_cast<int64_t>(1),
+              torch::arg("chan_offset") = static_cast<int64_t>(0)})
         .def("split_col", op<&SplitCol>,
              {torch::arg("rt"), torch::arg("in_"), torch::arg("outputs")})
         .def("concat", op<&Concat>, {torch::arg("rt"), torch::arg("inputs"), torch::arg("out")})
@@ -4989,7 +4992,8 @@ TORCH_LIBRARY(xlite_sabi, m)
         .def("conv1d_and_silu_prefill_paged", op<&Conv1dAndSiLUPrefillPaged>,
              {torch::arg("rt"), torch::arg("input"), torch::arg("state"), torch::arg("weight"),
               torch::arg("output"), torch::arg("indices"), torch::arg("starts"),
-              torch::arg("initial")})
+              torch::arg("initial"), torch::arg("state_layout") = static_cast<int64_t>(1),
+              torch::arg("chan_offset") = static_cast<int64_t>(0)})
         .def("print", op<&Print>,
              {torch::arg("x"), torch::arg("name") = std::string(""),
               torch::arg("row") = static_cast<int64_t>(6),

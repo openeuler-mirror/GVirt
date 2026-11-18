@@ -4205,6 +4205,8 @@ def linear_att_conv_and_silu_paged(
     cached_lens: Optional[torch.Tensor] = None,
     state_block_size: int = 0,
     aligned: bool = False,
+    state_layout: int = 1,
+    chan_offset: int = 0,
 ) -> None:
     """Update native SD pages selected by INT32 indices or raw block tables.
 
@@ -4730,6 +4732,8 @@ def conv1d_and_silu_prefill_paged(
     indices: torch.Tensor,
     starts: torch.Tensor,
     initial: torch.Tensor,
+    state_layout: int = 1,
+    chan_offset: int = 0,
 ) -> None:
     """Packed [T,C] Conv/SiLU on native [P,W-1,C] pages.
 

@@ -2945,7 +2945,8 @@ static void CheckGdnPageMetadata(const XTensor &indices, const XTensor *cachedLe
 
 void XliteOpConv1dAndSiLUPaged(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
                                XTensor &output, XTensor &stateIndices, XTensor *cachedLens,
-                               uint32_t stateBlockSize, bool aligned)
+                               uint32_t stateBlockSize, bool aligned, uint32_t stateLayout,
+                               uint32_t chanOffset)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -2955,19 +2956,28 @@ void XliteOpConv1dAndSiLUPaged(XRuntime &rt, XTensor &state, XTensor &input, XTe
         (weight.shape.size() == 3 && weight.shape[1] != 1)) {
         throw std::runtime_error("conv decode: invalid activation/weight shape");
     }
+    if (stateLayout != 1 && stateLayout != 2) {
+        throw std::runtime_error("conv decode: unsupported stateLayout (1=split, 2=SD merged)");
+    }
     CheckGdnPageMetadata(stateIndices, cachedLens, input.shape.at(0), stateBlockSize);
     uint32_t channels = input.shape.at(1);
     uint32_t width = weight.shape.back();
+    // stateLayout 1: split page, per-stream [width-1, channels] rows; 2: vLLM SD
+    // merged page [width-1, 3*channels], q|k|v interleaved per timestep row. With
+    // layout 2, `state` is the full merged page and chanOffset (elements) selects
+    // the stream's column slice (kernel: r*stateRowStride + c).
+    uint32_t stateRowStride = stateLayout == 2 ? channels * 3u : channels;
+    uint32_t stateChannels = stateLayout == 2 ? channels * 3u : channels;
     if (input.shape.size() != 2 || output.shape != input.shape || width < 2 || width > 4 ||
         input.stride != std::vector<size_t>{channels, 1} ||
         output.stride != std::vector<size_t>{channels, 1} ||
         weight.stride != (weight.shape.size() == 2 ? std::vector<size_t>{width, 1}
                                                    : std::vector<size_t>{width, width, 1}) ||
         channels % 64 != 0 || state.shape.size() != 3 || state.shape[1] != width - 1 ||
-        state.shape[0] < 2 || state.shape[0] > UINT32_MAX || state.shape[2] != channels ||
-        state.stride.size() != 3 || state.stride[2] != 1 || state.stride[1] != channels ||
-        state.stride[0] < (width - 1) * channels || stateIndices.dtype != INT32 ||
-        weight.shape[0] != channels) {
+        state.shape[0] < 2 || state.shape[0] > UINT32_MAX || state.shape[2] != stateChannels ||
+        state.stride.size() != 3 || state.stride[2] != 1 || state.stride[1] != stateRowStride ||
+        state.stride[0] < (width - 1) * stateRowStride || stateIndices.dtype != INT32 ||
+        weight.shape[0] != channels || (stateLayout == 1 && chanOffset != 0)) {
         throw std::runtime_error("conv: unsupported native SD page descriptor");
     }
     KERNEL_PTR_TYPE(conv1d_and_silu_paged) * launchKernel;
@@ -2980,9 +2990,11 @@ void XliteOpConv1dAndSiLUPaged(XRuntime &rt, XTensor &state, XTensor &input, XTe
     } else {
         throw std::runtime_error("conv: unsupported state dtype");
     }
-    launchKernel(rt.aivNum, rt.stream, state.ptr, input.ptr, weight.ptr, output.ptr,
+    void *stateBase = static_cast<uint8_t *>(state.ptr) +
+                      static_cast<size_t>(chanOffset) * (XDtypeBit(state.dtype) / 8);
+    launchKernel(rt.aivNum, rt.stream, stateBase, input.ptr, weight.ptr, output.ptr,
                  static_cast<uint32_t>(input.shape[0]), channels, width, 1u, stateIndices.ptr,
-                 state.stride[0], 1u, static_cast<uint32_t>(state.shape[0]),
+                 state.stride[0], stateLayout, static_cast<uint32_t>(state.shape[0]),
                  cachedLens == nullptr ? nullptr : cachedLens->ptr,
                  cachedLens == nullptr ? 0 : stateIndices.stride[0],
                  cachedLens == nullptr ? 0 : static_cast<uint32_t>(stateIndices.shape[1]),
@@ -3762,7 +3774,7 @@ void XliteOpSiluGateMul(XRuntime &rt, XTensor &normed, XTensor &gate, XTensor &o
 
 static void Conv1dPrefillImpl(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
                               XTensor &output, XTensor &stateIndices, XTensor *starts,
-                              XTensor *initial)
+                              XTensor *initial, uint32_t stateLayout, uint32_t chanOffset)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -3770,6 +3782,9 @@ static void Conv1dPrefillImpl(XRuntime &rt, XTensor &state, XTensor &input, XTen
     if (input.shape.size() != 2 || (weight.shape.size() != 2 && weight.shape.size() != 3) ||
         (weight.shape.size() == 3 && weight.shape[1] != 1)) {
         throw std::runtime_error("conv: invalid activation/weight rank");
+    }
+    if (stateLayout != 1 && stateLayout != 2) {
+        throw std::runtime_error("conv prefill: unsupported stateLayout (1=split, 2=SD merged)");
     }
     uint32_t batch = starts ? starts->numel - 1 : input.shape.at(0);
     if (starts &&
@@ -3780,6 +3795,10 @@ static void Conv1dPrefillImpl(XRuntime &rt, XTensor &state, XTensor &input, XTen
     }
     uint32_t channels = input.shape.at(1);
     uint32_t width = weight.shape.back();
+    // Same page layouts as the decode variant; with layout 2, chanOffset selects
+    // the stream's column slice of the merged page.
+    uint32_t stateRowStride = stateLayout == 2 ? channels * 3u : channels;
+    uint32_t stateChannels = stateLayout == 2 ? channels * 3u : channels;
     if (input.shape.size() != 2 || output.shape != input.shape || width < 2 || width > 4 ||
         input.stride != std::vector<size_t>{channels, 1} ||
         output.stride != std::vector<size_t>{channels, 1} ||
@@ -3787,10 +3806,11 @@ static void Conv1dPrefillImpl(XRuntime &rt, XTensor &state, XTensor &input, XTen
                                                    : std::vector<size_t>{width, width, 1}) ||
         channels == 0 || channels % 64 != 0 || state.shape.size() != 3 ||
         state.shape[1] != width - 1 || state.shape[0] < 2 || state.shape[0] > UINT32_MAX ||
-        state.shape[2] != channels || state.stride.size() != 3 || state.stride[2] != 1 ||
-        state.stride[1] != channels || state.stride[0] < (width - 1) * channels ||
+        state.shape[2] != stateChannels || state.stride.size() != 3 || state.stride[2] != 1 ||
+        state.stride[1] != stateRowStride || state.stride[0] < (width - 1) * stateRowStride ||
         stateIndices.dtype != INT32 || stateIndices.numel < batch ||
-        stateIndices.stride != std::vector<size_t>{1} || weight.shape[0] != channels) {
+        stateIndices.stride != std::vector<size_t>{1} || weight.shape[0] != channels ||
+        (stateLayout == 1 && chanOffset != 0)) {
         throw std::runtime_error("conv: unsupported native SD page descriptor");
     }
     if (starts) {
@@ -3804,9 +3824,11 @@ static void Conv1dPrefillImpl(XRuntime &rt, XTensor &state, XTensor &input, XTen
         } else {
             throw std::runtime_error("conv prefill: unsupported dtype");
         }
-        kernel(std::min(rt.aivNum, batch * (channels / 64)), rt.stream, state.ptr, input.ptr,
+        void *stateBase = static_cast<uint8_t *>(state.ptr) +
+                          static_cast<size_t>(chanOffset) * (XDtypeBit(state.dtype) / 8);
+        kernel(std::min(rt.aivNum, batch * (channels / 64)), rt.stream, stateBase, input.ptr,
                weight.ptr, output.ptr, batch, channels, width, stateIndices.ptr, state.stride[0],
-               state.shape[0], starts->ptr, initial->ptr, input.shape[0]);
+               stateLayout, state.shape[0], starts->ptr, initial->ptr, input.shape[0]);
         return;
     }
 }
@@ -3878,9 +3900,10 @@ static void RecurrentPrefillImpl(XRuntime &rt, XTensor &query, XTensor &key, XTe
 
 void XliteOpConv1dAndSiLUPrefillPaged(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
                                       XTensor &output, XTensor &indices, XTensor &starts,
-                                      XTensor &initial)
+                                      XTensor &initial, uint32_t stateLayout, uint32_t chanOffset)
 {
-    Conv1dPrefillImpl(rt, state, input, weight, output, indices, &starts, &initial);
+    Conv1dPrefillImpl(rt, state, input, weight, output, indices, &starts, &initial, stateLayout,
+                      chanOffset);
 }
 
 void XliteOpRecurrentGatedDeltaRulePrefillPaged(XRuntime &rt, XTensor &query, XTensor &key,

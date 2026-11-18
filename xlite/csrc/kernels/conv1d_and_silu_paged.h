@@ -63,6 +63,7 @@ public:
         this->stateIndices = (__gm__ int32_t *)stateIndices;
         this->statePageStride = statePageStride;
         this->stateLayout = stateLayout;
+        this->stateRowStride = stateLayout == 2u ? channels * 3u : channels;
         this->numPages = numPages;
         this->cachedLens = (__gm__ int32_t *)cachedLens;
         this->tableRowStride = tableRowStride;
@@ -265,14 +266,16 @@ public:
             __gm__ Dtype *base = state + (uint64_t)page * statePageStride;
             if constexpr (std::is_same<Dtype, float>::value) {
                 for (int r = 0; r < rows; ++r) {
-                    CopyGmToUbufAligned(sf + r * kChanTile, base + (uint64_t)r * channels + c0,
+                    CopyGmToUbufAligned(sf + r * kChanTile,
+                                        base + (uint64_t)r * stateRowStride + c0,
                                         kChanTile * sizeof(float));
                 }
                 CopyGmToUbufAligned(sf + rows * kChanTile, input + (uint64_t)b * channels + c0,
                                     kChanTile * sizeof(float));
             } else {
                 for (int r = 0; r < rows; ++r) {
-                    CopyGmToUbufAligned(sr + r * kChanTile, base + (uint64_t)r * channels + c0,
+                    CopyGmToUbufAligned(sr + r * kChanTile,
+                                        base + (uint64_t)r * stateRowStride + c0,
                                         kChanTile * sizeof(Dtype));
                 }
                 CopyGmToUbufAligned(sr + rows * kChanTile, input + (uint64_t)b * channels + c0,
@@ -336,7 +339,7 @@ public:
             // New page rows are sf[kChanTile .. K*kChanTile) = [row1..,input].
             if constexpr (std::is_same<Dtype, float>::value) {
                 for (int r = 0; r < rows; ++r) {
-                    CopyUbufToGmAligned(base + (uint64_t)r * channels + c0,
+                    CopyUbufToGmAligned(base + (uint64_t)r * stateRowStride + c0,
                                         sf + (r + 1) * kChanTile,
                                         (uint32_t)(kChanTile * sizeof(float)));
                 }
@@ -350,7 +353,7 @@ public:
                 set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
                 wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
                 for (int r = 0; r < rows; ++r) {
-                    CopyUbufToGmAligned(base + (uint64_t)r * channels + c0,
+                    CopyUbufToGmAligned(base + (uint64_t)r * stateRowStride + c0,
                                         st_stage + r * kChanTile,
                                         (uint32_t)(kChanTile * sizeof(Dtype)));
                 }
@@ -477,12 +480,12 @@ public:
             if (hasInitial[b]) {
                 if constexpr (std::is_same<Dtype, float>::value) {
                     for (uint32_t r = 0; r < rows; ++r) {
-                        DmaIn(base + r * channels + c0, y_f + r * kChanTile,
+                        DmaIn(base + r * stateRowStride + c0, y_f + r * kChanTile,
                               kChanTile * sizeof(float));
                     }
                 } else {
                     for (uint32_t r = 0; r < rows; ++r) {
-                        DmaIn(base + r * channels + c0, s_raw + r * kChanTile,
+                        DmaIn(base + r * stateRowStride + c0, s_raw + r * kChanTile,
                               kChanTile * sizeof(Dtype));
                     }
                     ConvUbToFloat(s_raw, rows * kChanTile, y_f);
@@ -605,10 +608,10 @@ public:
             wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
             for (uint32_t r = 0; r < rows; ++r) {
                 if constexpr (std::is_same<Dtype, float>::value) {
-                    CopyUbufToGmAligned(base + r * channels + c0, y_f + r * kChanTile,
+                    CopyUbufToGmAligned(base + r * stateRowStride + c0, y_f + r * kChanTile,
                                         kChanTile * sizeof(float));
                 } else {
-                    CopyUbufToGmAligned(base + r * channels + c0, st_stage + r * kChanTile,
+                    CopyUbufToGmAligned(base + r * stateRowStride + c0, st_stage + r * kChanTile,
                                         kChanTile * sizeof(Dtype));
                 }
             }
@@ -626,9 +629,9 @@ private:
     __gm__ Dtype *input;
     __gm__ Dtype *weight;
     __gm__ Dtype *output;
-    // Paged state (vLLM GDN pages): when stateLayout==1, the per-page layout is
-    // [stateRows, channels] (stateRows = kernelDim-1) and request b lives at
-    // state + stateIndices[b] * statePageStride. Indices are mandatory.
+    // Paged state (vLLM GDN pages), request b at state + stateIndices[b] * statePageStride.
+    // Layout 1: per-page [stateRows, channels] (stateRows = kernelDim-1). Layout 2: vLLM
+    // SD merged page [stateRows, 3*channels], q|k|v interleaved per timestep row.
     __gm__ int32_t *stateIndices;
     __gm__ int32_t *cachedLens;
     uint64_t tableRowStride;
@@ -659,6 +662,7 @@ private:
     uint32_t kernelDim;
     uint32_t updateState;
     uint64_t statePageStride;
+    uint32_t stateRowStride;
     uint32_t numPages;
     uint32_t stateLayout;
 };
@@ -705,19 +709,19 @@ private:
 #endif
 
 #ifdef __DAV_C220_VEC__
-#define CONV1D_AND_SILU_PREFILL_PAGED_BODY(dtype)                                                  \
-    XliteCausalConv1dSiLUDecode<dtype> op;                                                         \
-    op.Init(state, input, weight, output, batch, channels, kernelDim, 1u, indices, pageStride, 1u, \
-            pages, nullptr, 0, 0, 0, 0);                                                           \
+#define CONV1D_AND_SILU_PREFILL_PAGED_BODY(dtype)                                              \
+    XliteCausalConv1dSiLUDecode<dtype> op;                                                     \
+    op.Init(state, input, weight, output, batch, channels, kernelDim, 1u, indices, pageStride, \
+            stateLayout, pages, nullptr, 0, 0, 0, 0);                                          \
     op.ProcessPrefill(starts, initial, tokens);
 #else
 #define CONV1D_AND_SILU_PREFILL_PAGED_BODY(dtype)
 #endif
-#define CONV1D_AND_SILU_PREFILL_PAGED_FUNC_DEFINE(dtype)                              \
-    extern "C" __global__ __aicore__ void conv1d_and_silu_prefill_paged_##dtype(      \
-        GM_ADDR state, GM_ADDR input, GM_ADDR weight, GM_ADDR output, uint32_t batch, \
-        uint32_t channels, uint32_t kernelDim, GM_ADDR indices, uint64_t pageStride,  \
-        uint32_t pages, GM_ADDR starts, GM_ADDR initial, uint32_t tokens)             \
-    {                                                                                 \
-        CONV1D_AND_SILU_PREFILL_PAGED_BODY(dtype)                                     \
+#define CONV1D_AND_SILU_PREFILL_PAGED_FUNC_DEFINE(dtype)                                        \
+    extern "C" __global__ __aicore__ void conv1d_and_silu_prefill_paged_##dtype(                \
+        GM_ADDR state, GM_ADDR input, GM_ADDR weight, GM_ADDR output, uint32_t batch,           \
+        uint32_t channels, uint32_t kernelDim, GM_ADDR indices, uint64_t pageStride,            \
+        uint32_t stateLayout, uint32_t pages, GM_ADDR starts, GM_ADDR initial, uint32_t tokens) \
+    {                                                                                           \
+        CONV1D_AND_SILU_PREFILL_PAGED_BODY(dtype)                                               \
     }

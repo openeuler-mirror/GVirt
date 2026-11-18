@@ -4,14 +4,21 @@
 
 直接在调用者管理的原生 Conv 页面上执行 causal Conv1d + SiLU，并原位更新历史。单 token 使用 `linear_att_conv_and_silu_paged`，packed 多 token 使用 `conv1d_and_silu_prefill_paged`。旧 dense 和 token Conv 入口已删除。
 
+state 支持两种布局形态，由 `state_layout` 选择：
+
+- **stateLayout=1（默认，split page）**：每页 `[S, K-1, C]`，行内步长 = C，每条流独立持有自己的页面。
+- **stateLayout=2（GLM-5.3 KDA conv，vLLM SD merged page）**：每页 `[S, K-1, 3C]`，时间步行内按 q|k|v 三通道交错排列；调用者传入完整 interleaved page，并用 `chan_offset`（元素数）选择本条流的列切片——q/k/v 分别用 `chan_offset = 0 / localProj / 2*localProj`。kernel 内部把行步长取为 `channels * 3`，按 `r * stateRowStride + c` 寻址本流切片，写入也只落在该切片上，因此三条流可共享同一页面而不互相覆盖。decode 与 prefill 入口均支持 layout 2。
+
 | 参数 | 方向 | Shape / dtype | 约束 |
 | --- | --- | --- | --- |
 | input / output | 输入 / 输出 | `[T,C]`，FP32/FP16/BF16 | 连续且 dtype 一致；decode 的 T=B |
-| state | 输入输出 | `[P,W-1,C]`，与 input 同 dtype | 内层连续，允许 dim-0 页间 padding 和 storage offset |
+| state | 输入输出 | layout1 `[P,W-1,C]`；layout2 `[P,W-1,3C]`，与 input 同 dtype | 内层连续，允许 dim-0 页间 padding 和 storage offset；layout2 时 dim-2 必须是 `3C` |
 | weight | 输入 | `[C,W]` 或 `[C,1,W]` | 连续；W=2..4，C 是 64 的正倍数 |
 | indices | 输入 | `int32[B]` | 连续；Conv 与 SSM 可使用不同页号 |
 | starts | Prefill 输入 | `int32[B+1]` | 从 0 到 T 的单调累计 token 边界 |
 | initial | Prefill 输入 | `int32[B]` | 非零保留历史，零表示从零历史开始 |
+| state_layout | kw-only 标量 | uint32_t，Python 默认 1 | 仅允许 1（split page）或 2（SD merged page） |
+| chan_offset | kw-only 标量 | uint32_t，Python 默认 0 | 本流列切片的元素偏移，host 侧直接加到 state 基指针上；layout1 必须为 0，layout2 用 `0/C/2C` 区分 q/k/v |
 
 Decode 还支持二维 raw block table：列连续、行可有 padding，另传连续
 `cached_lens`、正的 `state_block_size` 和 `aligned`。非 aligned 模式选择第零列；
@@ -24,9 +31,18 @@ cached_lens 为正；fresh 请求应调用带 initial flags 的 Prefill 入口�
 `conv1d_and_silu_paged_{float,float16_t,bfloat16_t}.cpp`，Prefill 实例为
 `conv1d_and_silu_prefill_paged_{float,float16_t,bfloat16_t}.cpp`。
 所有 Tensor 必须位于 Runtime 的 NPU。binding 显式允许 state 的页间 pitch，
-通过主分支的 XTensor.stride 传入；不复制、不转置状态。
+通过主分支的 XTensor.stride 传入；不复制、不转置状态。host 侧
+（`csrc/op.cpp` 的 `XliteOpConv1dAndSiLUPaged` 与 `Conv1dPrefillImpl`）校验
+`stateLayout` 取值、layout1 下 `chan_offset` 必须为 0，layout2 下额外校验
+state 的 dim-2 等于 `3C`、行步长等于 `3C`，并把 `chan_offset` 折算成字节偏移加到
+state 基指针后传给 kernel。
 
 ## 实现原理
+
+**实现原理** 一节提到的页面寻址中，kernel 统一用 `stateRowStride` 描述行步长：
+`Init` 里按 `stateLayout == 2 ? channels * 3 : channels` 计算（见
+`csrc/kernels/conv1d_and_silu_paged.h` 的 `XliteCausalConv1dSiLUDecode::Init`），
+layout 1 与 layout 2 的所有历史读写、移位写回逻辑完全共用，无需分支。
 
 **任务分配**。64 通道为一个 channel tile。Decode 以 tile 为任务粒度，各 Vector core
 按 `GetBlockIdx()` 起始、`GetBlockNum()` 跨步认领，tile 内串行处理整个 batch；
@@ -104,4 +120,7 @@ V 指令可见（`pipe_barrier` 不覆盖该写回的 errata）。MTE2→V 标�
 
 `tests/kernels/gdn_native_pages.py` 覆盖 decode 的页重排、raw tables、padding、offset
 和 guard 保护；`gdn_prefill_paged.py` 覆盖 fresh/continuation、空段、混合长度和
-Prefill → Decode 的同页交接。旧 W>4、W=1 等配置不在新接口支持范围内。
+Prefill → Decode 的同页交接，并以 `check_case_layout2` 覆盖 stateLayout=2 的
+q/k/v 三流共享 interleaved page（prefill 与 decode 各自独立对拍同一页面），
+非法 `state_layout`/`chan_offset` 组合在 `check_rejections` 中验证被拒绝。
+旧 W>4、W=1 等配置不在新接口支持范围内。

@@ -289,7 +289,8 @@ void XliteOpTranspose_1_2(XRuntime &rt, XTensor &input, XTensor &output);
 void XliteOpConv1dAndSiLUPaged(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
                                XTensor &output, XTensor &stateIndices,
                                XTensor *cachedLens = nullptr, uint32_t stateBlockSize = 0,
-                               bool aligned = false);
+                               bool aligned = false, uint32_t stateLayout = 1,
+                               uint32_t chanOffset = 0);
 void XliteOpBetaDecay(XRuntime &rt, XTensor &b, XTensor &a, XTensor &A_log, XTensor &dt_bias,
                       XTensor &beta, XTensor &g, uint32_t bsz, uint32_t seqlen,
                       uint32_t num_v_heads);
@@ -345,7 +346,8 @@ uint32_t XliteOpBenchCube(XRuntime &rt, const std::string &variant, const XTenso
 void XliteOpSiluGateMul(XRuntime &rt, XTensor &normed, XTensor &gate, XTensor &out);
 void XliteOpConv1dAndSiLUPrefillPaged(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
                                       XTensor &output, XTensor &indices, XTensor &starts,
-                                      XTensor &initial);
+                                      XTensor &initial, uint32_t stateLayout = 1,
+                                      uint32_t chanOffset = 0);
 void XliteOpRecurrentGatedDeltaRulePrefillPaged(XRuntime &rt, XTensor &query, XTensor &key,
                                                 XTensor &value, XTensor &beta, XTensor &g,
                                                 XTensor &state, XTensor &out, XTensor &indices,
