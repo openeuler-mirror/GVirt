@@ -69,6 +69,25 @@ void XliteOpDsaCpWriteKVCacheBySlot(XRuntime &rt, XTensor &input, XTensor &cache
     }
 }
 
+// Reorders AllGathered NZ weights from [rank, N1, ...] into [N1, rank, ...] at
+// whole-NZ-block granularity. Exposed separately from XliteOpDsaCpGatherWeight
+// so the kernel can be unit-tested without a multi-rank runtime.
+void XliteOpDsaCpReorderWo(XRuntime &rt, XTensor &input, XTensor &output, uint32_t ranks,
+                           uint32_t columnBlocks, uint64_t blockBytes)
+{
+    if (!IsDummyRuntime(rt) && blockBytes > 0) {
+        if (input.numel * XDtypeBit(input.dtype) / 8 <
+                uint64_t(ranks) * columnBlocks * blockBytes ||
+            output.numel * XDtypeBit(output.dtype) / 8 <
+                uint64_t(ranks) * columnBlocks * blockBytes) {
+            throw std::invalid_argument(
+                "DsaCpReorderWo: input/output too small for ranks*columnBlocks*blockBytes");
+        }
+        aclrtlaunch_dsa_cp_reorder_wo(rt.aivNum, rt.stream, input.ptr, output.ptr, ranks,
+                                      columnBlocks, blockBytes);
+    }
+}
+
 XTensor &XliteOpDsaCpGatherWeight(XRuntime &rt, XTensor &weight, bool nz, bool transposed)
 {
     const size_t tp = rt.tpSize();
@@ -103,8 +122,8 @@ XTensor &XliteOpDsaCpGatherWeight(XRuntime &rt, XTensor &weight, bool nz, bool t
         if (!IsDummyRuntime(rt)) {
             const size_t columnBlocks = storageShape[0];
             const size_t blockBytes = storageLen / columnBlocks * XDtypeBit(weight.dtype) / 8;
-            aclrtlaunch_dsa_cp_reorder_wo(rt.aivNum, rt.stream, gathered.ptr, full.ptr, tp,
-                                          columnBlocks, blockBytes);
+            XliteOpDsaCpReorderWo(rt, gathered, full, static_cast<uint32_t>(tp),
+                                  static_cast<uint32_t>(columnBlocks), blockBytes);
         }
         rt.PutTensor(gathered);
         return full.View(fullShape);

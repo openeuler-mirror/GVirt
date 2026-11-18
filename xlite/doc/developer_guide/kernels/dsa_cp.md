@@ -7,7 +7,7 @@ DSA Context Parallelism(DSA-CP)面向 DSA 稀疏注意力的 prefill:在 TP 组�
 - `dsa_cp_metadata`:把全局请求元数据投影到本卡 token shard 的局部元数据;
 - `dsa_cp_write_kv_cache_by_slot`:各卡生成的新 KV 经 TP AllGather 复制后,按全局 slot 写入持久 paged cache(正/负 slot 惟一决定落点);
 - `dsa_cp_gather_mla`:对本卡每个 query 收集其 Top-K KV 并运行 dense-per-query 的 MLA 注意力(host 组装 `dsa_cp_gather_metadata` + `gather_sparse_kv_cache_per_query` + `mla_v2`(dense/densePerQuery)三段流水);
-- 内部 kernel `dsa_cp_reorder_wo`:由 `csrc/op.cpp` 的 `XliteOpDsaCpGatherWeight`(模型内部使用,无 Python 绑定)调用,把 AllGather 得到的 NZ 权重从 `[rank, N1, localK1, 16, C0]` 重排为 matmul 需要的 `[N1, rank, localK1, 16, C0]`。
+- 内部 kernel `dsa_cp_reorder_wo`:由 `csrc/op.cpp` 的 `XliteOpDsaCpGatherWeight`(模型内部使用)调用,把 AllGather 得到的 NZ 权重从 `[rank, N1, localK1, 16, C0]` 重排为 matmul 需要的 `[N1, rank, localK1, 16, C0]`;另有测试绑定 `dsa_cp_reorder_wo`(`csrc/_C.cpp`)供 kernel 级单测直接调用。
 
 模型层的整体设计(token 分片、全量 cache 复制、Top-K 组织、本卡输出投影)见 [mla_v2](mla_v2.md) 的「DSA-CP MLA」章节;路由条件为 `csrc/model.cpp` 的 `XModel::RunDsaCp`(`enableDsaCp` 且 `maxQueryLen > numSpecTokens+1` 且 `batchedTokens > XLITE_DSA_CP_TP_TOKEN_THRESHOLD=1024`,小 batch 回退常规 TP MLA)。
 
@@ -96,7 +96,7 @@ host 侧按组流水,workspace 一次性按容量分配、逐组 `View` 复用:
 
 `csrc/op.cpp` 的 `XliteOpDsaCpGatherWeight` 把本卡 W^O 权重分片经 `XliteOpAllGather` 汇集为 `[tp, storageLen]` 后:
 
-- NZ 且转置(`weightNZ`)时 `dsa_cp_reorder_wo` 把 AllGather 产物 `[rank, N1, localK1, 16, C0]` 重排为 matmul 需要的 `[N1, rank, localK1, 16, C0]`:任务 = rank×columnBlocks×tilesPerBlock,UB 单缓冲按 `UB_SIZE` 分块整块字节拷贝(不转型),MTE2/MTE3 `EVENT_ID0` 握手;
+- NZ 且转置(`weightNZ`)时 `dsa_cp_reorder_wo` 把 AllGather 产物 `[rank, N1, localK1, 16, C0]` 重排为 matmul 需要的 `[N1, rank, localK1, 16, C0]`:任务 = rank×columnBlocks×tilesPerBlock(`bufBytes = UB_SIZE/2` 下取整 32B 对齐后的半区大小),子块字节搬运(不转型)。双缓冲 ping-pong 协议(与 `split.cpp`/`reorder_moe.cpp` 同款):UB 对半分为两个暂存半区,任务 k 读入 `buffer[k % 2]`,上一任务的子块延迟一拍从另一半区写回,使 MTE2(GM→UB)与 MTE3(UB→GM)重叠;延迟写回跨任务边界成立(input 只读、output 只写,事件 flag 仅保护 UB 半区复用),MTE2/MTE3 按 `EVENT_ID0 + 半区号` 握手,收尾冲刷最后一个待写子块并排空两个半区;
 - NZ 分片须含完整 NZ 块(`csrc/dsa_cp_weight.h` 的 `DsaCpWeightStorageShape`:FRACTAL_NZ 按 `[列块, 行块, 16, C0]` 存储,`DSA_CP_NZ_ROWS=16`、列块 `C0` 为 32 字节对应元素数);
 - ND 非转置时直接 `XliteOpConcatCol` 按列拼接;非转置 NZ 与转置 ND 返回原 AllGather 结果的 View。
 
@@ -108,6 +108,6 @@ host 侧按组流水,workspace 一次性按容量分配、逐组 `View` 复用:
 
 ## 验证
 
-- [tests/kernels/dsa_cp.py](../../../tests/kernels/dsa_cp.py):metadata 逐 rank 重构全局序列、cache 写入 gap/pitch/负 slot 精确比对、局部全头 attention 对比 FP32 参考实现;
+- [tests/kernels/dsa_cp.py](../../../tests/kernels/dsa_cp.py):metadata 逐 rank 重构全局序列、cache 写入 gap/pitch/负 slot 精确比对、`dsa_cp_reorder_wo` 块置换(INT8 字节精确比对,覆盖单/多子块、尾子块与毒化输出缓冲)、局部全头 attention 对比 FP32 参考实现;
 - [tests/kernels/dsa_cp_comm.py](../../../tests/kernels/dsa_cp_comm.py):torchrun 双卡验证集体通信边界(Norm/AllGather 分片恒等);
 - [tests/kernels/mla.py](../../../tests/kernels/mla.py) 的 `check_dsa_cp_gather_mla`(以 `--dsa-cp` 运行):含短/长历史、多请求、稠密行、乱序/降序索引、pitched block tables、多组溢出等 case,与 FP32 参考实现对比。

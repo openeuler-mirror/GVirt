@@ -13,7 +13,7 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from xlite._C import Runtime, dsa_cp_metadata, dsa_cp_write_kv_cache_by_slot, mla_v2
+from xlite._C import Runtime, dsa_cp_metadata, dsa_cp_reorder_wo, dsa_cp_write_kv_cache_by_slot, mla_v2
 
 
 @pytest.fixture(scope="module")
@@ -83,6 +83,31 @@ def test_dsa_cp_write_kv_cache_by_slot(runtime, dtype, width, pitched_input):
     torch.npu.synchronize()
     dsa_cp_write_kv_cache_by_slot(runtime, new, cache, slots, len(slots), block_size)
     torch.testing.assert_close(storage, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "ranks,column_blocks,block_bytes",
+    [
+        # One sub-chunk per block: many small tasks, cross-task pipelining.
+        (1, 1, 32),
+        (2, 3, 512),
+        (8, 64, 49152),
+        # blockBytes above one staging half: tail sub-chunk plus full tiles.
+        (4, 7, 131136),
+        (2, 5, 294912),
+    ],
+)
+def test_dsa_cp_reorder_wo(runtime, ranks, column_blocks, block_bytes):
+    total = ranks * column_blocks * block_bytes
+    torch.manual_seed(7)
+    inp = torch.randint(-128, 128, (total,), dtype=torch.int8)
+    # A poisoned output catches skipped blocks and unwritten tail sub-chunks.
+    out = torch.full((total,), -35, dtype=torch.int8)
+    expected = inp.reshape(ranks, column_blocks, block_bytes).transpose(0, 1).reshape(total)
+    inp, out = inp.npu(), out.npu()
+    torch.npu.synchronize()
+    dsa_cp_reorder_wo(runtime, inp, out, ranks, column_blocks, block_bytes)
+    torch.testing.assert_close(out.cpu(), expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("heads", [64, 128])
