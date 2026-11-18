@@ -52,7 +52,7 @@ pip install -r requirements-dev.txt --extra-index https://download.pytorch.org/w
 # 准备（可选）: 清理旧的构建目录
 rm -rf build && mkdir -p build
 # 编译
-cmake -B build && cmake --build build -j
+cmake -B build && cmake --build build -j "$(nproc)"
 # 安装
 cmake --install build
 # 测试验证：可使用算子测试，也可使用完整模型测试
@@ -65,11 +65,11 @@ xlite 的调试能力集中在 `csrc/debug.{h,cpp}` 模块：提供 rank 感知�
 
 ```bash
 # 仅前向中间张量打印（每层 attn/ffn 前后的张量检查）
-XLITE_DEBUG_ON=forward cmake -B build && cmake --build build -j
+XLITE_DEBUG_ON=forward cmake -B build && cmake --build build -j "$(nproc)"
 # 前向 + auto_tuner tile size 调试
-XLITE_DEBUG_ON=forward,tuner cmake -B build && cmake --build build -j
+XLITE_DEBUG_ON=forward,tuner cmake -B build && cmake --build build -j "$(nproc)"
 # 全部调试类别
-XLITE_DEBUG_ON=all cmake -B build && cmake --build build -j
+XLITE_DEBUG_ON=all cmake -B build && cmake --build build -j "$(nproc)"
 ```
 
 支持的类别 token（逗号分隔、不区分大小写）及对应编译宏见 [环境变量说明文档](../user_guide/ENVIRONMENT_VARIABLES.md#xlite_debug_on)。机制上，CMake 将该变量解析为编译宏（`XLITE_DEBUG_ON` 基础宏 + 每个 token 的 `XLITE_DEBUG_ON_<TOK>`），具体哪个宏控制哪段调试代码由 `csrc/debug.h` 决定，因此 `forward` 与 `tuner`/`gettensor` 相互独立、可按需组合。
