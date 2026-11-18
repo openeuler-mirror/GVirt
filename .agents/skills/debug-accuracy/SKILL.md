@@ -65,7 +65,7 @@ Run both backends and compare their outputs:
    ```bash
    cd ${XLITE_DIR}
    rm -rf build && mkdir -p build
-   cmake -B build -DXLITE_DEBUG=ON && cmake --build build -j "$(nproc)"
+   cmake -B build -DXLITE_DEBUG=ON && cmake --build build -j "${MAX_JOBS:-64}"
    cmake --install build
    ```
 
