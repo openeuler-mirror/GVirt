@@ -44,7 +44,7 @@ flash_mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, sv, max, sum
 | qAbsorb | 输入 | `[total_tokens, nHeads, kvLoraRank]` | BF16 | host 已做 WUK 吸收的 Q latent |
 | qr | 输入 | `[total_tokens, nHeads, ropeHeadDim]` | BF16 | Q 的 RoPE 部分 |
 | kCache / peCache | 输入 | paged: `[numBlocks, blockSize, kvLoraRank]`;dense: `[batch, capacity, kvLoraRank]` / `[..., ropeHeadDim]` | BF16 | latent K / RoPE K cache |
-| topkIndices | 输入(可选) | `[total_tokens, topK]` | INT32 | DSA top-k token 下标(升序);host 限制 `topK ≤ MAX_TOPK_NUM=2048`(`csrc/op.cpp` 的 `XliteOpFlashMLAV2`,关键字 `MAX_TOPK_NUM`) |
+| topkIndices | 输入(可选) | `[total_tokens, topK]` | INT32 | DSA top-k token 下标(升序);host 限制 `topK ≤ MAX_TOPK_RUN_NUM=2056`(`csrc/op.cpp` 的 `XliteOpFlashMLAV2`,关键字 `MAX_TOPK_RUN_NUM`;语义见下文「all-miss tile 的 zeroSum 防御」末段) |
 | qk | workspace | `[aicNum * XLITE_MAX_M0 * 2, tileSizeOfCachedKV]` | BF16 | 当前 KV tile 的 QK 分数,按核双缓冲 |
 | sv | workspace | `[aicNum * XLITE_MAX_M0 * 2, kvLoraRank]` | BF16 | 当前 tile 的 softmax·kCache 部分和 |
 | max / sum | workspace | `[aivNum * XLITE_MAX_M0 * 2]` | FP32 | 当前 tile 局部 max / Σexp |
@@ -80,13 +80,25 @@ SFA-C8 在 host 接受独立的 INT8 `kCache[numBlocks, blockSize, 1, kvLoraRank
 1. AIC `RunAicQK(qAbsorb, qr, batchKCache, batchPeCache, ..., kvOffset, kvLen, qk[curr])`——KV tile 窗口由 kvOffset/kvLen 表达；paged 查 blockTable，块基址 = 物理块号 × dim-0 跨度(kCacheStride/peCacheStride)；dense 先按请求跨度取子视图，再按 token 偏移读取。完成 `ffts_cross_core_sync(PIPE_FIX, flag0)`(`csrc/kernels/flash_mla_v2.h` 的 `RunAic`,关键字 `ffts_cross_core_sync(PIPE_FIX, softmaxConfig`);
 2. AIV `RunAivSoftmaxPingPong`:对 tile 内行做带 scale 的 softmax,行有效长度 `actualCalcSoftmaxLen = cachedLen + queryTaskStart + 1 - kvOffset`(clip 到 kvLen);输出行宽 `ROUND_UP(kvLen, 4*svk0)`(SV 每次 256 列预取,防残留脏数据,见 `csrc/kernels/flash_mla_v2.h` 的 `RunAiv`,关键字 `4 * svk0`);若 `calcLen > topK` 且 topK>0,走 vgather/scatter 的 top-k softmax 路径(见 `RunAiv`,关键字 `calcLen > topK`);局部 max/sum 写 workspace → `ffts_cross_core_sync(PIPE_MTE3, flag2)`;
 3. AIC `wait_flag_dev(2)` 后 `RunAicSV(qk[last], lastKCache, ..., lastKvOffset, lastKvLen, sv[last])`:`sv = softmax_local(QK)·kCache` → `ffts_cross_core_sync(PIPE_FIX, flag1)`；lastKCache 保留上一任务的请求视图；
-4. AIV `wait_flag_dev(1)` 后 `RunAivSoftmaxUpdate`:把 sv/max/sum 与 output/lastMax/lastSum 在线合并(算法见 flash_attention 文档;此处 headSize 参数为 kvLoraRank,maskStride=nHeads)。
+4. AIV `wait_flag_dev(1)` 后 `RunAivSoftmaxUpdate`:把 sv/max/sum 与 output/lastMax/lastSum 在线合并(算法见 flash_attention 文档;此处 headSize 参数为 kvLoraRank,maskStride=nHeads;all-miss tile 防御见下文「all-miss tile 的 zeroSum 防御」)。
 
 相邻任务错峰(QK 先行、SV/update 滞后一个任务),末尾补做,与 flash_attention 完全一致(`csrc/kernels/flash_mla_v2.h` 的 `RunAic`(关键字 `RunAicQK`/`RunAicSV`)与 `RunAiv`(关键字 `RunAivSoftmaxPingPong`/`RunAivSoftmaxUpdate`))。
 
 ### top-k(DSA)语义
 
 topkIndices 形状 `[total_tokens, topK]`,按 `topkIndices + topK * queryTaskOffset` 定位当前 query tile 的行;softmax 内用 vgather 只对 top-k token 的分数归一,scatter 回写后非 top-k 位置为 0,从而 SV 只在 top-k token 上有非零贡献(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`,关键字 `vcmpvs_ge`/`vgather` 与 scatter 段)。kvOffset 参数同时用于 topk 下标窗过滤(`vcmpvs_ge/lt` 与 [kvOffset, kvOffset+calcLen) 比较)。
+
+### all-miss tile 的 zeroSum 防御
+
+**问题**：长序列 decode 下,某个 KV tile 内的所有 token 都未入选 topk(该 tile 的 QK score 经 top-k mask 后恒为 -inf),`RunAivSoftmaxPingPong` 对该 tile 输出的局部 `currSum=0`。`RunAivSoftmaxUpdate` 在线合并时 `newSum = sumPrev*scalePrev + sumCurr*scaleCurr` 也可能为 0,Step 10 归一化 `vdiv(svOut, svOut, newSum)` 变成 0/0=NaN,NaN 随 output/lastSum 写回并污染同一 query 后续所有 tile 的合并链,最终表现为长序列输出乱码(P0)。
+
+**判定条件**：`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxUpdate`(调用点:`csrc/kernels/flash_mla_v2.h` 的 `RunAiv`,关键字 `RunAivSoftmaxUpdate`)。Step 10 中 `newSum` 经 `vbrcb` 广播到 `newSumOutUb` 后,以标量读出首元素 `newSumScalar`,判定 `zeroSum = (newSumScalar == 0.0f) || (newSumScalar != newSumScalar)`——newSum 为 0 或 NaN(自反比较不成立)均视为 all-miss。
+
+**修复**：`zeroSum` 命中时跳过 `vdiv`,`vector_dup` 将 `svOutFloatUb` 与 `newSumOutUb` 直接置 0 再走正常写回——output 清零、`lastSum=0`、`lastMax` 保留,下一个命中 topk 的 tile 从干净的 `lastSum=0` 重新起步,不再继承 NaN(任何后续 tile 一旦有 token 入选 topk,newSum 即非 0,归一化恢复正常)。
+
+**同步链**:`newSumOutUb` 在 PIPE_V 上写入,标量读 `newSumScalar` 在 PIPE_S 上执行,跨 pipe 读必须显式同步——写读两侧用 `set_flag/wait_flag(PIPE_V, PIPE_S, EVENT_ID6)` 与 `set_flag/wait_flag(PIPE_S, PIPE_V, EVENT_ID6)` 夹住(见 `csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxUpdate`,函数头注释 `EVENT_ID6: V<->S sync around the newSum scalar read`);漏掉该链时标量读可能取到旧值,zeroSum 判定失真。
+
+**topk 缓冲上限**:`csrc/kernels/softmax_attn_aiv.h` 顶部的 UB 预算 static_assert 全部改按 `MAX_TOPK_RUN_NUM` 校验(原为 `MAX_TOPK_NUM`)。两者语义不同(`csrc/kernels/kernel_param.h`):`MAX_TOPK_NUM=2048` 是 DSA 常驻 topk 缓冲的编译期上限;运行期 topk 行宽可超出——GLM5 kpool 路径把 PKI causal tail 打包进 topk 缓冲的 `[topK, topK+kpool-1)` 列(如 2048+3=2051),故运行期上限放宽为 `MAX_TOPK_RUN_NUM = MAX_TOPK_NUM + 8 = 2056`,aiv softmax 的 UB workspace 按运行期 topK 缩放,host 校验同步改为 `topK > MAX_TOPK_RUN_NUM` 抛错(`csrc/op.cpp` 的 `XliteOpFlashMLAV2`)。
 
 ### 跨核 RingSync
 

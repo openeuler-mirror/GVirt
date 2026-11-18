@@ -122,7 +122,7 @@ void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, 
                   XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                   uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t maxSeqLen,
                   float scale, uint32_t topK = 0, const XTensor &topkIndices = XTensor(),
-                  bool dense = false, bool densePerQuery = true);
+                  bool dense = false, bool densePerQuery = true, uint32_t topkStride = 0);
 void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache,
                        XTensor &peCache, XTensor &qk, XTensor &sv, XTensor &max, XTensor &sum,
                        XTensor &lastMax, XTensor &lastSum, XTensor &sync, XTensor &oAbsorb,
@@ -130,7 +130,8 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
                        XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                        uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, float scale,
                        uint32_t tileSizeOfCachedKV = MAX_KV_TILE_SIZE, uint32_t topK = 0,
-                       const XTensor &topkIndices = XTensor(), bool dense = false);
+                       const XTensor &topkIndices = XTensor(), bool dense = false,
+                       uint32_t topkStride = 0);
 // C8 supports sequential expansion with null indices.
 void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &peCache,
                                 XTensor &blockTables, XTensor &topkIndices, XTensor &queryStartLoc,

@@ -26,7 +26,7 @@ public:
                                 GM_ADDR cachedLens, GM_ADDR blockTables, uint32_t nHeads,
                                 uint32_t ropeHeadDim, uint32_t kvLoraRank, uint32_t blockSize,
                                 uint32_t batch, uint32_t blockTableStride, float scale,
-                                uint32_t tileSizeOfCachedKV, uint32_t topK,
+                                uint32_t tileSizeOfCachedKV, uint32_t topK, uint32_t topkStride,
                                 uint32_t kCacheStride = 0, uint32_t peCacheStride = 0,
                                 uint32_t dense = 0, GM_ADDR zeroGm = 0)
     {
@@ -54,6 +54,7 @@ public:
         this->peCacheStride = MAX(peCacheStride, blockSize * ropeHeadDim);
         this->scale = scale;
         this->topK = (topkIndices == nullptr) ? 0 : topK;
+        this->topkStride = this->topK != 0 ? (topkStride != 0 ? topkStride : this->topK) : 0;
         this->tileSizeOfCachedKV = tileSizeOfCachedKV;
         this->qkStride = tileSizeOfCachedKV;
         ringSync.Init(sync);
@@ -313,13 +314,14 @@ public:
                     dbgBlockIdx, get_subblockid(), batchIdx, queryTaskOffset,
                     queryTaskOffset + queryTaskLen, nWorkStart, nWorkStart + nWorkCurCore, kvOffset,
                     kvOffset + kvLen, actualCalcSoftmaxLen, nWorkStart, nHeads, outN, curr);
-                RunAivSoftmaxPingPong(
-                    (__gm__ Dtype *)qk[curr][qkOffset].GetPhyAddr(), nWorkCurCore, qkStride,
-                    actualCalcSoftmaxLen, outN, true, nWorkStart, nHeads,
-                    (__gm__ float *)max[curr][nWorkStart].GetPhyAddr(),
-                    (__gm__ float *)sum[curr][nWorkStart].GetPhyAddr(), true, scale, kvOffset,
-                    calcLen > topK ? topK : 0,
-                    (calcLen > topK && topK > 0) ? topkIndices + topK * queryTaskOffset : nullptr);
+                RunAivSoftmaxPingPong((__gm__ Dtype *)qk[curr][qkOffset].GetPhyAddr(), nWorkCurCore,
+                                      qkStride, actualCalcSoftmaxLen, outN, true, nWorkStart,
+                                      nHeads, (__gm__ float *)max[curr][nWorkStart].GetPhyAddr(),
+                                      (__gm__ float *)sum[curr][nWorkStart].GetPhyAddr(), true,
+                                      scale, kvOffset, calcLen > topK ? topkStride : 0,
+                                      (calcLen > topK && topK > 0)
+                                          ? topkIndices + topkStride * queryTaskOffset
+                                          : nullptr);
                 ffts_cross_core_sync(PIPE_MTE3, config);
 
                 if (needDoUpdate != 0) {
@@ -449,6 +451,7 @@ private:
     uint32_t blockTableStride;
     float scale;
     uint32_t topK;
+    uint32_t topkStride;
     uint32_t kCacheStride;
     uint32_t peCacheStride;
     uint32_t qkStride;
@@ -457,20 +460,20 @@ private:
     int svk0;
 };
 
-#define FLASH_MLA_V2_FUNC_DEFINE(dtype)                                                        \
-    extern "C" __global__ __aicore__ void flash_mla_v2_##dtype(                                \
-        GM_ADDR qAbsorb, GM_ADDR qr, GM_ADDR kCache, GM_ADDR peCache, GM_ADDR topkIndices,     \
-        GM_ADDR qk, GM_ADDR sv, GM_ADDR max, GM_ADDR sum, GM_ADDR lastMax, GM_ADDR lastSum,    \
-        GM_ADDR sync, GM_ADDR oAbsorb, GM_ADDR queryStartLoc, GM_ADDR queryLens,               \
-        GM_ADDR cachedLens, GM_ADDR blockTables, uint32_t nHeads, uint32_t ropeHeadDim,        \
-        uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t blockTableStride,    \
-        float scale, uint32_t tileSizeOfCachedKV, uint32_t topK, uint32_t kCacheStride,        \
-        uint32_t peCacheStride, uint32_t dense, GM_ADDR zeroGm)                                \
-    {                                                                                          \
-        FLASHMLAV2<dtype> op;                                                                  \
-        op.Init(qAbsorb, qr, kCache, peCache, topkIndices, qk, sv, max, sum, lastMax, lastSum, \
-                sync, oAbsorb, queryStartLoc, queryLens, cachedLens, blockTables, nHeads,      \
-                ropeHeadDim, kvLoraRank, blockSize, batch, blockTableStride, scale,            \
-                tileSizeOfCachedKV, topK, kCacheStride, peCacheStride, dense, zeroGm);         \
-        op.Run();                                                                              \
+#define FLASH_MLA_V2_FUNC_DEFINE(dtype)                                                            \
+    extern "C" __global__ __aicore__ void flash_mla_v2_##dtype(                                    \
+        GM_ADDR qAbsorb, GM_ADDR qr, GM_ADDR kCache, GM_ADDR peCache, GM_ADDR topkIndices,         \
+        GM_ADDR qk, GM_ADDR sv, GM_ADDR max, GM_ADDR sum, GM_ADDR lastMax, GM_ADDR lastSum,        \
+        GM_ADDR sync, GM_ADDR oAbsorb, GM_ADDR queryStartLoc, GM_ADDR queryLens,                   \
+        GM_ADDR cachedLens, GM_ADDR blockTables, uint32_t nHeads, uint32_t ropeHeadDim,            \
+        uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t blockTableStride,        \
+        float scale, uint32_t tileSizeOfCachedKV, uint32_t topK, uint32_t topkStride,              \
+        uint32_t kCacheStride, uint32_t peCacheStride, uint32_t dense, GM_ADDR zeroGm)             \
+    {                                                                                              \
+        FLASHMLAV2<dtype> op;                                                                      \
+        op.Init(qAbsorb, qr, kCache, peCache, topkIndices, qk, sv, max, sum, lastMax, lastSum,     \
+                sync, oAbsorb, queryStartLoc, queryLens, cachedLens, blockTables, nHeads,          \
+                ropeHeadDim, kvLoraRank, blockSize, batch, blockTableStride, scale,                \
+                tileSizeOfCachedKV, topK, topkStride, kCacheStride, peCacheStride, dense, zeroGm); \
+        op.Run();                                                                                  \
     }

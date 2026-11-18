@@ -1308,31 +1308,42 @@ void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, 
                   XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                   uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t maxSeqLen,
                   float scale, uint32_t topK, const XTensor &topkIndices, bool dense,
-                  bool densePerQuery)
+                  bool densePerQuery, uint32_t topkStride)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
+    uint32_t effectiveTopkStride = topK == 0 ? 0 : (topkStride != 0 ? topkStride : topK);
     if (!dense || (topK != 0 && topkIndices.ptr != nullptr)) {
         if (topK != 0 && maxSeqLen > MAX_SOFTMAX_PINGPONG_LEN) {
             throw std::runtime_error(
                 std::string(__func__) + ": topK > 0 is not supported when maxSeqLen (" +
                 std::to_string(maxSeqLen) + ") > " + std::to_string(MAX_SOFTMAX_PINGPONG_LEN));
         }
-        // topK is the topk-buffer row width; the GLM5 kpool path widens it past
-        // MAX_TOPK_NUM (PKI causal tail packed into the trailing kpool-1 columns).
-        if (topK > MAX_TOPK_RUN_NUM) {
+        if (effectiveTopkStride < topK) {
             throw std::runtime_error(std::string(__func__) +
-                                     ": topK should be less than or equal to " +
+                                     ": topkStride must be >= topK (logical top-k width)");
+        }
+        // topkStride is the physical topk-buffer row width; the GLM5 kpool path
+        // widens it past MAX_TOPK_NUM (PKI causal tail + 128-slot padding).
+        if (effectiveTopkStride > MAX_TOPK_RUN_NUM) {
+            throw std::runtime_error(std::string(__func__) +
+                                     ": topkStride should be less than or equal to " +
                                      std::to_string(MAX_TOPK_RUN_NUM));
         }
-        if (topK % TOPK_RUN_ALIGN != 0) {
-            throw std::runtime_error(std::string(__func__) + ": topK must be a multiple of " +
+        if (effectiveTopkStride % TOPK_RUN_ALIGN != 0) {
+            throw std::runtime_error(std::string(__func__) + ": topkStride must be a multiple of " +
                                      std::to_string(TOPK_RUN_ALIGN));
+        }
+        if (topK != 0 && topkIndices.ptr != nullptr && topkIndices.shape.size() > 1 &&
+            topkIndices.shape[1] != effectiveTopkStride) {
+            throw std::runtime_error(std::string(__func__) + ": topkIndices.shape[1] must equal " +
+                                     std::to_string(effectiveTopkStride));
         }
     }
     // topK-gated: topK == 0 runs RunAivSoftmax without the pingpong carve.
-    if (topK != 0 && SoftmaxPingPongUbNeed(std::max(maxSeqLen, topK), topK) > UB_SIZE) {
+    if (topK != 0 && SoftmaxPingPongUbNeed(std::max(maxSeqLen, effectiveTopkStride),
+                                           effectiveTopkStride) > UB_SIZE) {
         throw std::runtime_error(std::string(__func__) + ": softmax pingpong UB budget exceeded");
     }
     // The cube tiles the query dimension as mSize = queryTaskLen * nHeads rows into an
@@ -1350,8 +1361,8 @@ void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, 
             qk.ptr, oAbsorb.ptr, queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr,
             nHeads, ropeHeadDim, kvLoraRank, blockSize, batch,
             dense ? 0u : static_cast<uint32_t>(blockTables.stride[0]), maxSeqLen, scale, topK,
-            kCache.stride[0], peCache.stride[0], dense ? 1u : 0u, densePerQuery ? 1u : 0u,
-            rt._attnZeroBuffer.ptr);
+            effectiveTopkStride, kCache.stride[0], peCache.stride[0], dense ? 1u : 0u,
+            densePerQuery ? 1u : 0u, rt._attnZeroBuffer.ptr);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(qAbsorb) + XT_STR(qr) + XT_STR(kCache) +
                               XT_STR(peCache) + XT_STR(oAbsorb);
@@ -1366,7 +1377,7 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
                        XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                        uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, float scale,
                        uint32_t tileSizeOfCachedKV, uint32_t topK, const XTensor &topkIndices,
-                       bool dense)
+                       bool dense, uint32_t topkStride)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1376,16 +1387,28 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
                                  std::to_string(tileSizeOfCachedKV) + " > " +
                                  std::to_string(MAX_SOFTMAX_PINGPONG_LEN));
     }
-    if (topK > MAX_TOPK_RUN_NUM) {
-        throw std::runtime_error(std::string(__func__) + ": topK should be less than or equal to " +
+    uint32_t effectiveTopkStride = topK == 0 ? 0 : (topkStride != 0 ? topkStride : topK);
+    if (effectiveTopkStride < topK) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": topkStride must be >= topK (logical top-k width)");
+    }
+    if (effectiveTopkStride > MAX_TOPK_RUN_NUM) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": topkStride should be less than or equal to " +
                                  std::to_string(MAX_TOPK_RUN_NUM));
     }
-    if (topK != 0 && topK % TOPK_RUN_ALIGN != 0) {
-        throw std::runtime_error(std::string(__func__) + ": topK must be a multiple of " +
+    if (effectiveTopkStride != 0 && effectiveTopkStride % TOPK_RUN_ALIGN != 0) {
+        throw std::runtime_error(std::string(__func__) + ": topkStride must be a multiple of " +
                                  std::to_string(TOPK_RUN_ALIGN));
     }
+    if (topK != 0 && topkIndices.ptr != nullptr && topkIndices.shape.size() > 1 &&
+        topkIndices.shape[1] != effectiveTopkStride) {
+        throw std::runtime_error(std::string(__func__) + ": topkIndices.shape[1] must equal " +
+                                 std::to_string(effectiveTopkStride));
+    }
     // RunAivSoftmaxPingPong carve mirror fail-closed.
-    if (SoftmaxPingPongUbNeed(std::max(tileSizeOfCachedKV, topK), topK) > UB_SIZE) {
+    if (SoftmaxPingPongUbNeed(std::max(tileSizeOfCachedKV, effectiveTopkStride),
+                              effectiveTopkStride) > UB_SIZE) {
         throw std::runtime_error(std::string(__func__) + ": softmax pingpong UB budget exceeded");
     }
     // See XliteOpMLAV2: one query token's heads must fit a single XLITE_MAX_M0-row tile.
@@ -1401,8 +1424,8 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
             qk.ptr, sv.ptr, max.ptr, sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr, oAbsorb.ptr,
             queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, ropeHeadDim,
             kvLoraRank, blockSize, batch, dense ? 0u : static_cast<uint32_t>(blockTables.stride[0]),
-            scale, tileSizeOfCachedKV, topK, kCache.stride[0], peCache.stride[0], dense ? 1u : 0u,
-            rt._attnZeroBuffer.ptr);
+            scale, tileSizeOfCachedKV, topK, effectiveTopkStride, kCache.stride[0],
+            peCache.stride[0], dense ? 1u : 0u, rt._attnZeroBuffer.ptr);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(qAbsorb) + XT_STR(qr) + XT_STR(kCache) +
                               XT_STR(peCache) + XT_STR(oAbsorb);
@@ -1499,7 +1522,11 @@ void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &pe
                                 uint32_t kvHeads, uint32_t compressRatio, uint32_t burstCopySize,
                                 const XTensor &kScaleCache)
 {
-    const bool useK = kCache.ptr != nullptr, usePe = peCache.ptr != nullptr;
+    // a zero-size channel (NoPE rope head) counts as absent; a non-empty input
+    // channel with an absent output (or vice versa) is a caller bug
+    auto channelPresent = [](const XTensor &t) { return t.ptr != nullptr && t.numel > 0; };
+    const bool useK = channelPresent(kCache);
+    const bool usePe = channelPresent(peCache);
     if (IsDummyRuntime(rt) || (!useK && !usePe)) {
         return;
     }
@@ -1508,9 +1535,7 @@ void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &pe
                                  ": kvHeads should be less than or equal to 1");
     }
     const bool c8 = useK && kCache.dtype == INT8;
-    // an empty input channel with a non-empty output (or vice versa) is a caller
-    // bug: null-pointer write or a never-written output
-    if (!c8 && (useK != (kDenseCache.ptr != nullptr) || usePe != (peDenseCache.ptr != nullptr))) {
+    if (!c8 && (useK != channelPresent(kDenseCache) || usePe != channelPresent(peDenseCache))) {
         throw std::runtime_error(std::string(__func__) +
                                  ": cache and dense cache channel emptiness must match");
     }
