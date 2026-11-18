@@ -3456,6 +3456,17 @@ void RecurrentGatedDeltaRuleKdaPrefillPaged(XRuntime &rt, at::Tensor &query, at:
     rt.Synchronize();
 }
 
+void HcMeanCollapse(XRuntime &rt, at::Tensor &input, at::Tensor &output, uint32_t m,
+                    uint32_t hcMult, uint32_t hidden)
+{
+    CheckGdnDevices(rt, {&input, &output});
+    XTensor _input, _output;
+    InitXTensor(_input, input);
+    InitXTensor(_output, output);
+    XliteOpHcMeanCollapse(rt, _input, _output, m, hcMult, hidden);
+    rt.Synchronize();
+}
+
 void Conv1dAndSiLUPrefillPaged(XRuntime &rt, at::Tensor &input, at::Tensor &state,
                                at::Tensor &weight, at::Tensor &output, at::Tensor &indices,
                                at::Tensor &starts, at::Tensor &initial)
@@ -4969,4 +4980,7 @@ TORCH_LIBRARY(xlite_sabi, m)
              torch::arg("initial"),     torch::arg("num_key_heads"), torch::arg("num_value_heads"),
              torch::arg("k_dim"),       torch::arg("v_dim"),         torch::arg("scale"),
              torch::arg("lower_bound"), torch::arg("norm_eps")});
+    ops.def("hc_mean_collapse", op<&HcMeanCollapse>,
+            {torch::arg("rt"), torch::arg("input"), torch::arg("output"), torch::arg("m"),
+             torch::arg("hc_mult"), torch::arg("hidden")});
 }

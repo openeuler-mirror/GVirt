@@ -25,6 +25,14 @@ static inline bool IsDummyRuntime(const XRuntime &rt)
     return rt.IsDummyRuntime();
 }
 
+inline uint64_t HcMeanUbNeed(uint32_t hcMult, uint32_t hidden, uint32_t dtypeSize)
+{
+    return ROUND_UP((uint64_t)hcMult * hidden * dtypeSize, UB_BUF_ALIGN_SIZE) +
+           ROUND_UP((uint64_t)hidden * dtypeSize, UB_BUF_ALIGN_SIZE) +
+           ROUND_UP((uint64_t)hcMult * hidden * 4, UB_BUF_ALIGN_SIZE) +
+           ROUND_UP((uint64_t)hidden * 4, UB_BUF_ALIGN_SIZE);
+}
+
 // Kernels that index `positions` as a flat 1D array read only the first row of a 2D
 // (mrope) input; warn once per op so a wrong-layout call stays visible in per-step logs.
 static void WarnPositions2D(const char *op)
@@ -3906,4 +3914,46 @@ void XliteOpRecurrentGatedDeltaRuleKdaPrefillPaged(XRuntime &rt, XTensor &query,
            batch, kHeads, vHeads, kDim, vDim, state.stride[0], state.shape[0],
            state.dtype == FP32 ? 1u : 0u, scale, lowerBound, normEps, starts.ptr, initial.ptr,
            tokens);
+}
+// HcMeanCollapse: y[m,hidden] = (1/hcMult) * 危_{h} x[m, h*hidden + j]. Weight-free mean over
+// the hcMult MHC streams (GLM-5.3 head has no hc_head param). invHcMult is host-computed and
+// passed as float (CCE forbids uint->float cast inside aicore). Accumulation is fp32 inside the
+// kernel (mirrors PyTorch bf16 .mean() upcast), so only bf16/f16 hidden-state dtypes are wired.
+void XliteOpHcMeanCollapse(XRuntime &rt, XTensor &input, XTensor &output, uint32_t m,
+                           uint32_t hcMult, uint32_t hidden)
+{
+    if (IsDummyRuntime(rt) || input.numel == 0) {
+        return;
+    }
+    if (hcMult == 0 || hidden == 0 || m == 0) {
+        throw std::runtime_error(std::string(__func__) + ": invalid dims");
+    }
+    // Kernel converts in 64-element repeats with no tail handling.
+    if (hidden % 64 != 0) {
+        throw std::runtime_error(std::string(__func__) + ": hidden must be a multiple of 64, got " +
+                                 std::to_string(hidden));
+    }
+    // Host mirror of the kernel's InitUB budget.
+    const uint64_t dSize = input.dtype == FP32 ? 4 : 2;
+    if (HcMeanUbNeed(hcMult, hidden, dSize) + 512 > UB_SIZE) {
+        throw std::runtime_error(std::string(__func__) + ": exceeds kernel UB budget");
+    }
+    if (input.shape.size() < 2 || input.shape[0] != m || input.shape[1] != hcMult * hidden ||
+        output.shape.size() < 2 || output.shape[0] != m || output.shape[1] != hidden) {
+        throw std::runtime_error(std::string(__func__) + ": shape mismatch");
+    }
+    if (input.dtype != output.dtype) {
+        throw std::runtime_error(std::string(__func__) + ": input/output dtype must match");
+    }
+    KERNEL_PTR_TYPE(hc_mean_collapse) * launchKernel;
+    if (EachXDtype(BF16, input, output)) {
+        launchKernel = aclrtlaunch_hc_mean_collapse_bfloat16_t;
+    } else if (EachXDtype(FP16, input, output)) {
+        launchKernel = aclrtlaunch_hc_mean_collapse_float16_t;
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(input) + XT_STR(output);
+        throw std::runtime_error(err_str + "not supported! (only BF16/FP16 hidden state)");
+    }
+    launchKernel(PickMinBlockNum(rt.aivNum, m), rt.stream, input.ptr, output.ptr, m, hcMult, hidden,
+                 1.0f / static_cast<float>(hcMult));
 }

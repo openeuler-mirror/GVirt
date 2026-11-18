@@ -4810,3 +4810,14 @@ def recurrent_gated_delta_rule_kda_prefill_paged(
     sequential within each state tile (not FLA chunked WY). The binding synchronizes.
     """
     ...
+
+def hc_mean_collapse(rt: Runtime, input: torch.Tensor, output: torch.Tensor, m: int, hc_mult: int, hidden: int) -> None:
+    """Mean-collapse the MHC streams: ``output[m, hidden] = (1/hc_mult) * sum_h input[m, h*hidden + j]``.
+
+    Weight-free reduction over the ``hc_mult`` residual streams (GLM-5.3 head has no
+    hc_head param). Accumulation is fp32 inside the kernel; only BF16/FP16 hidden state
+    is wired (input/output must match dtype). Kernel limits, enforced fail-closed:
+    ``hidden`` must be a multiple of 64 and the fp32 working set must fit the 192KB UB
+    budget. The binding synchronizes.
+    """
+    ...

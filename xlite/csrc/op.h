@@ -360,4 +360,8 @@ void XliteOpRecurrentGatedDeltaRuleKdaPrefillPaged(XRuntime &rt, XTensor &query,
                                                    XTensor &initial, uint32_t kHeads,
                                                    uint32_t vHeads, uint32_t kDim, uint32_t vDim,
                                                    float scale, float lowerBound, float normEps);
+// GLM5 head: weight-free mean collapse over hcMult streams. input: [m, hcMult*hidden] -> output:
+// [m, hidden].
+void XliteOpHcMeanCollapse(XRuntime &rt, XTensor &input, XTensor &output, uint32_t m,
+                           uint32_t hcMult, uint32_t hidden);
 #endif
