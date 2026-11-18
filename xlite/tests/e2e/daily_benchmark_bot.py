@@ -568,79 +568,71 @@ def generate_offline_report(
     total_rows_with_change = 0
     total_degradations = 0
     total_improvements = 0
+    # 前一天汇总 (信息性, 与基线分开计)
+    prev_day_total_degradations = 0
+    prev_day_total_improvements = 0
+    prev_day_date_label = None  # 任一 scenario 的前一天日期 (同一目录, 日期一致)
+
+    offline_metrics_order = ["decode_tps", "step_latency_ms", "total_ms"]
+    offline_table_header = " | 场景 | throughput(tokens/s) | step latency(ms) | total(ms) |"
+    offline_table_sep = " |------|------|------|------|"
 
     detail_lines = []
     scenario_idx = 0
     for comparison in comparisons:
         row_changes = comparison.get("row_changes", [])
-        if row_changes or comparison.get("error"):
+        prev_day = comparison.get("prev_day") or {}
+        prev_day_rows = prev_day.get("row_changes", [])
+        # 明细显示门槛: 基线或前一天有变化, 或基线有 error (无基线数据等)
+        if row_changes or comparison.get("error") or prev_day_rows:
             scenario_idx += 1
+            input_len = comparison.get("input_len", "N/A")
+            output_len = comparison.get("output_len", "N/A")
+            bs = comparison.get("batch_size", "N/A")
+
             if comparison.get("error"):
                 # 无基线数据等 error: 无 row_changes, 用 comparison 自身的场景字段渲染
-                input_len = comparison.get("input_len", "N/A")
-                output_len = comparison.get("output_len", "N/A")
-                bs = comparison.get("batch_size", "N/A")
                 detail_lines.append(f"{scenario_idx}. in={input_len} out={output_len} bs={bs}")
                 detail_lines.append(f"  ⚠️  {comparison['error']}")
-                detail_lines.append("")
-                continue
-            for row in row_changes:
-                service = row["service"]
-                concurrency = row["concurrency"]
-                changes = row["changes"]
-                input_len = row.get("input_len")
-                output_len = row.get("output_len")
+            else:
+                for row in row_changes:
+                    service = row["service"]
+                    concurrency = row["concurrency"]
+                    changes = row["changes"]
+                    row_input_len = row.get("input_len")
+                    row_output_len = row.get("output_len")
 
-                detail_lines.append(f"{scenario_idx}. {service} in={input_len} out={output_len} bs={concurrency}")
+                    detail_lines.append(
+                        f"{scenario_idx}. {service} in={row_input_len} out={row_output_len} bs={concurrency}"
+                    )
+                    detail_lines.append(f"  {offline_table_header.strip()}")
+                    detail_lines.append(f"  {offline_table_sep.strip()}")
 
-                detail_lines.append(" | 场景 | throughput(tokens/s) | step latency(ms) | total(ms) |")
-                detail_lines.append(" |------|------|------|------|")
+                    total_degradations += sum(1 for c in changes.values() if c.get("is_degradation"))
+                    total_improvements += sum(1 for c in changes.values() if c.get("is_improvement"))
+                    total_rows_with_change += 1
+                    cells = _render_metric_cells(changes, offline_metrics_order, _format_offline_change_value)
+                    detail_lines.append(f"  | {service} bs={concurrency} | {' | '.join(cells)} |")
 
-                row_degradations = sum(1 for c in changes.values() if c.get("is_degradation"))
-                row_improvements = sum(1 for c in changes.values() if c.get("is_improvement"))
-
-                total_degradations += row_degradations
-                total_improvements += row_improvements
-                total_rows_with_change += 1
-
-                def format_value(metric_name, change_info):
-                    current_v = change_info["current"]
-                    baseline_v = change_info["baseline"]
-                    change_ratio = change_info["change_ratio"]
-
-                    if current_v is None or baseline_v is None:
-                        return "N/A"
-
-                    if change_info["is_degradation"] or change_info["is_improvement"]:
-                        change_percent = change_ratio * 100
-                        return f"{current_v:.2f} ({change_percent:+.0f}%)"
-                    else:
-                        return f"{current_v:.2f}"
-
-                metrics_order = ["decode_tps", "step_latency_ms", "total_ms"]
-                formatted_parts = []
-                i = 0
-                while i < len(metrics_order):
-                    metric = metrics_order[i]
-                    change_info = changes[metric]
-
-                    if change_info.get("is_degradation"):
-                        red_parts = []
-                        while i < len(metrics_order) and changes[metrics_order[i]].get("is_degradation"):
-                            red_parts.append(format_value(metrics_order[i], changes[metrics_order[i]]))
-                            i += 1
-                        formatted_parts.append(f'<font color="red"><b>{" | ".join(red_parts)}</b></font>')
-                    elif change_info.get("is_improvement"):
-                        green_parts = []
-                        while i < len(metrics_order) and changes[metrics_order[i]].get("is_improvement"):
-                            green_parts.append(format_value(metrics_order[i], changes[metrics_order[i]]))
-                            i += 1
-                        formatted_parts.append(f'<font color="green"><b>{" | ".join(green_parts)}</b></font>')
-                    else:
-                        formatted_parts.append(format_value(metric, change_info))
-                        i += 1
-
-                detail_lines.append(f"  | {service} bs={concurrency} | {' | '.join(formatted_parts)} |")
+            # 前一天对比明细 (信息性)
+            if prev_day.get("date"):
+                prev_day_date_label = prev_day["date"]
+            detail_lines.append(f"  ↳ 与前一天({prev_day.get('date', 'unknown')})对比:")
+            if prev_day.get("error"):
+                detail_lines.append(f"    ⚠️  {prev_day['error']}")
+            elif prev_day_rows:
+                for prow in prev_day_rows:
+                    pservice = prow["service"]
+                    pconcurrency = prow["concurrency"]
+                    pchanges = prow["changes"]
+                    prev_day_total_degradations += sum(1 for c in pchanges.values() if c.get("is_degradation"))
+                    prev_day_total_improvements += sum(1 for c in pchanges.values() if c.get("is_improvement"))
+                    detail_lines.append(f"    {offline_table_header.strip()}")
+                    detail_lines.append(f"    {offline_table_sep.strip()}")
+                    cells = _render_metric_cells(pchanges, offline_metrics_order, _format_offline_change_value)
+                    detail_lines.append(f"    | {pservice} bs={pconcurrency} | {' | '.join(cells)} |")
+            else:
+                detail_lines.append("    无显著变化")
             detail_lines.append("")
 
     status_icon = "⚠️" if total_degradations > 0 else "✅"
@@ -663,14 +655,27 @@ def generate_offline_report(
         f"【对比基线】 vllm-ascend 版本: {baseline_info['vllm_ascend_version']}, xlite 版本: {baseline_info['version']}"
     )
     lines.append(f"{status_icon} {status_text}")
+    # 前一天合计 (信息性, 不影响上面的 status_icon/退出码)
+    prev_day_label = prev_day_date_label or "unknown"
+    lines.append(
+        f"↳ 与前一天({prev_day_label})对比: 劣化项: {prev_day_total_degradations} | 提升项: {prev_day_total_improvements}"
+    )
 
     if report_path:
         lines.append(f"报告保存路径: {report_path}")
         lines.append("")
 
-    # 添加详细数据（性能异常/提升, 或存在无基线数据等 error 时显示）
+    # 添加详细数据（性能异常/提升, 或存在无基线/前一天数据等 error 时显示）
     has_error = any(c.get("error") for c in comparisons)
-    if total_degradations > 0 or total_improvements > 0 or has_error:
+    has_prev_day_error = any((c.get("prev_day") or {}).get("error") for c in comparisons)
+    if (
+        total_degradations > 0
+        or total_improvements > 0
+        or has_error
+        or prev_day_total_degradations > 0
+        or prev_day_total_improvements > 0
+        or has_prev_day_error
+    ):
         lines.extend(detail_lines)
 
     return "\n".join(lines)
@@ -958,16 +963,27 @@ def generate_model_report(
     total_rows_with_change = 0
     total_degradations = 0
     total_improvements = 0
+    # 前一天汇总 (信息性, 与基线分开计)
+    prev_day_total_degradations = 0
+    prev_day_total_improvements = 0
+    prev_day_date_label = None  # 任一 scenario 的前一天日期 (同一目录, 日期一致)
 
     # 按输入输出长度分别显示（按input长度排序）
     sorted_comparisons = sorted(model_comparisons, key=lambda x: x.get("input_len", 0))
+
+    online_metrics_order = ["ttft_avg", "ttft_p99", "tpot_avg", "tpot_p99", "output_speed"]
+    online_table_header = " | 并发 | 服务 | TTFT Avg(ms) | TTFT P99 | TPOT Avg(ms) | TPOT P99 | Throughput(toks/s) |"
+    online_table_sep = " |------|------|------|------|------|------|------|"
 
     # 收集详细数据内容
     detail_lines = []
     scenario_idx = 0
     for comparison in sorted_comparisons:
         row_changes = comparison.get("row_changes", [])
-        if row_changes or comparison.get("error"):
+        prev_day = comparison.get("prev_day") or {}
+        prev_day_rows = prev_day.get("row_changes", [])
+        # 明细显示门槛: 基线或前一天有变化, 或基线有 error (无基线数据等)
+        if row_changes or comparison.get("error") or prev_day_rows:
             scenario_idx += 1
             input_len = comparison.get("input_len", "N/A")
             output_len = comparison.get("output_len", "N/A")
@@ -976,80 +992,35 @@ def generate_model_report(
 
             if comparison.get("error"):
                 detail_lines.append(f"  ⚠️  {comparison['error']}")
-                detail_lines.append("")
-                continue
+            else:
+                # 基线对比明细: 每行 | 并发 | 服务 | <指标单元格> |
+                detail_lines.append(online_table_header)
+                detail_lines.append(online_table_sep)
+                for row in row_changes:
+                    changes = row["changes"]
+                    total_degradations += sum(1 for c in changes.values() if c.get("is_degradation"))
+                    total_improvements += sum(1 for c in changes.values() if c.get("is_improvement"))
+                    total_rows_with_change += 1
+                    cells = _render_metric_cells(changes, online_metrics_order, _format_change_value)
+                    detail_lines.append(f"  | {row['concurrency']} | {row['service']} | {' | '.join(cells)} |")
 
-            # 显示表格头
-            detail_lines.append(
-                " | 并发 | 服务 | TTFT Avg(ms) | TTFT P99 | TPOT Avg(ms) | TPOT P99 | Throughput(toks/s) |"
-            )
-            detail_lines.append(" |------|------|------|------|------|------|------|")
-
-            # 显示每一行数据
-            for row in row_changes:
-                concurrency = row["concurrency"]
-                service = row["service"]
-                changes = row["changes"]
-
-                # 统计劣化和提升数量
-                row_degradations = sum(1 for c in changes.values() if c.get("is_degradation"))
-                row_improvements = sum(1 for c in changes.values() if c.get("is_improvement"))
-
-                total_degradations += row_degradations
-                total_improvements += row_improvements
-                total_rows_with_change += 1
-
-                # 格式化每个指标值
-                def format_value(metric_name, change_info):
-                    current = change_info["current"]
-                    baseline = change_info["baseline"]
-                    change_ratio = change_info["change_ratio"]
-
-                    if current is None or baseline is None:
-                        return "N/A"
-
-                    if change_info["is_degradation"]:
-                        # 劣化：红色标记
-                        change_percent = change_ratio * 100
-                        return f"{current:.0f} ({change_percent:+.0f}%)"
-                    elif change_info["is_improvement"]:
-                        # 提升：绿色标记
-                        change_percent = change_ratio * 100
-                        return f"{current:.0f} ({change_percent:+.0f}%)"
-                    else:
-                        # 正常：只显示当前值
-                        return f"{current:.0f}"
-
-                # 构建表格行，合并连续的相同颜色标签
-                metrics_order = ["ttft_avg", "ttft_p99", "tpot_avg", "tpot_p99", "output_speed"]
-                formatted_parts = []
-                i = 0
-
-                while i < len(metrics_order):
-                    metric = metrics_order[i]
-                    change_info = changes[metric]
-
-                    if change_info.get("is_degradation"):
-                        # 收集连续的红色指标
-                        red_parts = []
-                        while i < len(metrics_order) and changes[metrics_order[i]].get("is_degradation"):
-                            red_parts.append(format_value(metrics_order[i], changes[metrics_order[i]]))
-                            i += 1
-                        formatted_parts.append(f'<font color="red"><b>{" | ".join(red_parts)}</b></font>')
-                    elif change_info.get("is_improvement"):
-                        # 收集连续的绿色指标
-                        green_parts = []
-                        while i < len(metrics_order) and changes[metrics_order[i]].get("is_improvement"):
-                            green_parts.append(format_value(metrics_order[i], changes[metrics_order[i]]))
-                            i += 1
-                        formatted_parts.append(f'<font color="green"><b>{" | ".join(green_parts)}</b></font>')
-                    else:
-                        # 正常指标
-                        formatted_parts.append(format_value(metric, change_info))
-                        i += 1
-
-                row_str = f"  | {concurrency} | {service} | {' | '.join(formatted_parts)} |"
-                detail_lines.append(row_str)
+            # 前一天对比明细 (信息性): 有数据时列出变化行, 缺失/无变化时给一行提示
+            if prev_day.get("date"):
+                prev_day_date_label = prev_day["date"]
+            detail_lines.append(f"  ↳ 与前一天({prev_day.get('date', 'unknown')})对比:")
+            if prev_day.get("error"):
+                detail_lines.append(f"    ⚠️  {prev_day['error']}")
+            elif prev_day_rows:
+                detail_lines.append(f"    {online_table_header.strip()}")
+                detail_lines.append(f"    {online_table_sep.strip()}")
+                for prow in prev_day_rows:
+                    pchanges = prow["changes"]
+                    prev_day_total_degradations += sum(1 for c in pchanges.values() if c.get("is_degradation"))
+                    prev_day_total_improvements += sum(1 for c in pchanges.values() if c.get("is_improvement"))
+                    cells = _render_metric_cells(pchanges, online_metrics_order, _format_change_value)
+                    detail_lines.append(f"    | {prow['concurrency']} | {prow['service']} | {' | '.join(cells)} |")
+            else:
+                detail_lines.append("    无显著变化")
             detail_lines.append("")
 
     # 汇总摘要（作为折叠标题）
@@ -1073,15 +1044,28 @@ def generate_model_report(
         f"【对比基线】 vllm-ascend 版本: {baseline_info['vllm_ascend_version']}, xlite 版本: {baseline_info['version']}"
     )
     lines.append(f"{status_icon} {status_text}")
+    # 前一天合计 (信息性, 不影响上面的 status_icon/退出码)
+    prev_day_label = prev_day_date_label or "unknown"
+    lines.append(
+        f"↳ 与前一天({prev_day_label})对比: 劣化项: {prev_day_total_degradations} | 提升项: {prev_day_total_improvements}"
+    )
 
     # 添加报告路径
     if report_path:
         lines.append(f"报告保存路径: {report_path}")
         lines.append("")
 
-    # 添加详细数据（性能异常/提升, 或存在无基线数据等 error 时显示）
+    # 添加详细数据（性能异常/提升, 或存在无基线/前一天数据等 error 时显示）
     has_error = any(c.get("error") for c in sorted_comparisons)
-    if total_degradations > 0 or total_improvements > 0 or has_error:
+    has_prev_day_error = any((c.get("prev_day") or {}).get("error") for c in sorted_comparisons)
+    if (
+        total_degradations > 0
+        or total_improvements > 0
+        or has_error
+        or prev_day_total_degradations > 0
+        or prev_day_total_improvements > 0
+        or has_prev_day_error
+    ):
         lines.extend(detail_lines)
 
     return "\n".join(lines)
@@ -1612,6 +1596,163 @@ def _send_phase_crash_notification(report_dir: Path, receiver: str, phase_name: 
     send_notification("\n".join(lines), receiver)
 
 
+# ====================== 前一天对比 (按日期) ======================
+# 与基线 (发布 tag) 对比互补: 基线是两次 tag 之间的官方回归门槛, 前一天是日级波动
+# 信息。前一天数据取自前一天报告目录里已落盘的 current 指标 (机器人自己存的
+# metrics_*.json, 首选) / 原始对比报告 (回退), 复用 parse_benchmark_report /
+# parse_offline_bench_report 解析, 与基线同款。
+# 退出码/失败收集只看基线: 前一天缺失 (首次运行/那天没跑) 不算失败、不翻转退出码,
+# 仅在报告里以"无前一天数据"提示。
+_PREV_DAY_DIR_RE = re.compile(r"xlite-[\w.\+]+-(\d{8})$")
+
+
+def get_previous_day_report_dir(current_report_dir: Path) -> tuple[Path | None, str | None]:
+    """
+    取"最近一个有数据的日期 < 今天"的报告目录。
+
+    判定: 扫描 current_report_dir.parent 下所有 xlite-*-{YYYYMMDD} 目录 (排除无日期
+    后缀的基线目录 xlite-{tag}), 取日期严格小于今天者中日期最大的; 同日期多个目录取
+    字典序最大 (最新 dev 版本)。这样能自动跨越周末/失败/维护等空档, 几乎总有可比数据。
+
+    参数:
+        current_report_dir: 本次运行报告目录 (xlite-{dev_version}-{YYYYMMDD})
+
+    返回:
+        (前一天目录路径, 前一天日期串), 不存在返回 (None, None)
+    """
+    match = _PREV_DAY_DIR_RE.search(str(current_report_dir.name))
+    if not match:
+        # 无日期后缀 (如 --report-dir 指向基线目录): 无"今天", 不做前一天对比
+        return None, None
+    today = match.group(1)
+
+    parent = current_report_dir.parent
+    candidates: list[tuple[str, Path]] = []  # (日期串, 目录)
+    for child in parent.iterdir():
+        if not child.is_dir():
+            continue
+        m = _PREV_DAY_DIR_RE.search(str(child.name))
+        if not m:
+            continue
+        day = m.group(1)
+        if day < today:  # 严格小于今天
+            candidates.append((day, child))
+
+    if not candidates:
+        return None, None
+
+    # 日期最大; 同日期取目录名字典序最大 (版本最新)
+    candidates.sort(key=lambda x: (x[0], x[1].name))
+    prev_day, prev_dir = candidates[-1]
+    return prev_dir, prev_day
+
+
+def _load_prev_day_online_metrics(prev_day_dir: Path, model_name: str, input_len: int, output_len: int) -> dict | None:
+    """
+    加载前一天指定 online 场景的指标。
+
+    首选前一天目录里的 metrics_{model}_input{in}_output{out}.json (机器人当日存的
+    current 指标), 回退 benchmark_comparison_{model}_input{in}_output{out}_*.log
+    (parse_benchmark_report, 与基线同款解析)。
+
+    返回:
+        含 scenarios 的指标 dict, 找不到返回 None
+    """
+    json_path = prev_day_dir / f"metrics_{model_name}_input{input_len}_output{output_len}.json"
+    if json_path.exists():
+        metrics = load_metrics_json(json_path)
+        if metrics.get("scenarios"):
+            return metrics
+
+    pattern = f"benchmark_comparison_{model_name}_input{input_len}_output{output_len}_*.log"
+    reports = list(prev_day_dir.glob(pattern))
+    if reports:
+        metrics = parse_benchmark_report(reports[0])
+        if metrics.get("scenarios"):
+            return metrics
+    return None
+
+
+def _load_prev_day_offline_metrics(prev_day_dir: Path, input_len: int, output_len: int, batch_size: int) -> dict | None:
+    """
+    加载前一天指定离线 bench 场景的指标。
+
+    首选 offline_metrics_{model}_in{in}_out{out}_bs{bs}.json, 回退
+    offline_bench_{model}_in{in}_out{out}_bs{bs}_*.log (parse_offline_bench_report)。
+
+    返回:
+        含 decode_tps 的指标 dict, 找不到返回 None
+    """
+    scenario_tag = f"in{input_len}_out{output_len}_bs{batch_size}"
+    json_path = prev_day_dir / f"offline_metrics_{OFFLINE_BENCH_MODEL}_{scenario_tag}.json"
+    if json_path.exists():
+        metrics = load_metrics_json(json_path)
+        if metrics.get("decode_tps") is not None:
+            return metrics
+
+    pattern = f"offline_bench_{OFFLINE_BENCH_MODEL}_in{input_len}_out{output_len}_bs{batch_size}_*.log"
+    reports = list(prev_day_dir.glob(pattern))
+    if reports:
+        metrics = parse_offline_bench_report(reports[0])
+        if metrics.get("decode_tps") is not None:
+            return metrics
+    return None
+
+
+def _format_change_value(change_info: dict) -> str:
+    """格式化单个指标的当前值 + 变化百分比 (劣化/提升时带 %, 否则只显示当前值)。"""
+    current = change_info["current"]
+    baseline = change_info["baseline"]
+    if current is None or baseline is None:
+        return "N/A"
+    if change_info["is_degradation"] or change_info["is_improvement"]:
+        change_percent = change_info["change_ratio"] * 100
+        return f"{current:.0f} ({change_percent:+.0f}%)"
+    return f"{current:.0f}"
+
+
+def _format_offline_change_value(change_info: dict) -> str:
+    """离线版 _format_change_value: 保留两位小数 (与 generate_offline_report 现状一致)。"""
+    current = change_info["current"]
+    baseline = change_info["baseline"]
+    if current is None or baseline is None:
+        return "N/A"
+    if change_info["is_degradation"] or change_info["is_improvement"]:
+        change_percent = change_info["change_ratio"] * 100
+        return f"{current:.2f} ({change_percent:+.0f}%)"
+    return f"{current:.2f}"
+
+
+def _render_metric_cells(changes: dict, metrics_order: list[str], format_value) -> list[str]:
+    """
+    渲染一行的指标单元格 (复用于基线与前一天路径, 在线/离线通用)。
+
+    遍历 metrics_order, 把连续同色 (劣化红/提升绿) 合并成一个 font 标签, 正常指标单列。
+    返回单元格字符串列表 (不含行外壳, 由调用方拼 | 并发 | 服务 | ... |)。
+    format_value 为单指标格式化函数 (在线/离线精度不同)。
+    """
+    formatted_parts: list[str] = []
+    i = 0
+    while i < len(metrics_order):
+        change_info = changes[metrics_order[i]]
+        if change_info.get("is_degradation"):
+            red_parts: list[str] = []
+            while i < len(metrics_order) and changes[metrics_order[i]].get("is_degradation"):
+                red_parts.append(format_value(changes[metrics_order[i]]))
+                i += 1
+            formatted_parts.append(f'<font color="red"><b>{" | ".join(red_parts)}</b></font>')
+        elif change_info.get("is_improvement"):
+            green_parts: list[str] = []
+            while i < len(metrics_order) and changes[metrics_order[i]].get("is_improvement"):
+                green_parts.append(format_value(changes[metrics_order[i]]))
+                i += 1
+            formatted_parts.append(f'<font color="green"><b>{" | ".join(green_parts)}</b></font>')
+        else:
+            formatted_parts.append(format_value(change_info))
+            i += 1
+    return formatted_parts
+
+
 def _process_online_reports(report_dir: Path, current_reports: list[Path]) -> list[dict]:
     """
     解析 online 性能测试报告并与基线对比 (报告处理阶段)
@@ -1624,6 +1765,14 @@ def _process_online_reports(report_dir: Path, current_reports: list[Path]) -> li
         对比结果字典列表
     """
     all_comparison_results = []
+
+    # 前一天对比目录: 本次运行目录同辈中"最近一个日期 < 今天"的报告目录, 整个处理阶段
+    # 共用同一前一天目录, 故在循环外查一次。
+    prev_day_dir, prev_day_date = get_previous_day_report_dir(report_dir)
+    if prev_day_dir:
+        log_info(f"前一天对比目录: {prev_day_dir} (日期: {prev_day_date})")
+    else:
+        log_info("未找到前一天报告目录, 跳过前一天对比")
 
     for current_report in current_reports:
         model_info = extract_model_info(current_report)
@@ -1673,6 +1822,30 @@ def _process_online_reports(report_dir: Path, current_reports: list[Path]) -> li
                 "output_len": output_len,
             }
 
+        # 与前一天对比 (信息性, 不影响退出码/失败收集): 复用 compare_metrics, baseline
+        # 位换成前一天 current 指标。前一天缺失仅在报告里提示, 不算失败。
+        prev_day_info: dict = {"date": prev_day_date, "row_changes": [], "error": None}
+        if prev_day_dir:
+            prev_day_metrics = _load_prev_day_online_metrics(prev_day_dir, model_name, input_len, output_len)
+            if prev_day_metrics:
+                log_info(f"对比前一天: {prev_day_dir} (日期: {prev_day_date})")
+                prev_day_comparison = compare_metrics(current_metrics, prev_day_metrics)
+                prev_day_info["row_changes"] = prev_day_comparison.get("row_changes", [])
+                prev_day_info["error"] = prev_day_comparison.get("error")
+            else:
+                log_warning(
+                    f"前一天目录无模型 {model_name} (input={input_len}, output={output_len}) 的有效指标, 跳过前一天对比"
+                )
+                prev_day_info["error"] = "无前一天数据"
+        else:
+            prev_day_info["error"] = "无前一天数据"
+        comparison_result["prev_day"] = prev_day_info
+
+        # 落盘对比结果 (含基线 + 前一天); 基线分支上面已存过一次, 这里统一再存一次
+        # 确保 prev_day 信息进入 comparison_*.json。
+        comparison_json = report_dir / f"comparison_{model_name}_input{input_len}_output{output_len}.json"
+        save_metrics_json(comparison_result, comparison_json)
+
         all_comparison_results.append(comparison_result)
 
     return all_comparison_results
@@ -1695,6 +1868,13 @@ def _process_offline_reports(report_dir: Path) -> list[dict]:
     if not offline_reports:
         log_error("未找到离线 bench 测试报告文件")
         return all_comparison_results
+
+    # 前一天对比目录: 整个处理阶段共用同一前一天目录。
+    prev_day_dir, prev_day_date = get_previous_day_report_dir(report_dir)
+    if prev_day_dir:
+        log_info(f"前一天对比目录: {prev_day_dir} (日期: {prev_day_date})")
+    else:
+        log_info("未找到前一天报告目录, 跳过前一天对比")
 
     for current_report in offline_reports:
         log_info(f"处理离线 bench 报告: {current_report}")
@@ -1747,6 +1927,27 @@ def _process_offline_reports(report_dir: Path) -> list[dict]:
                 "batch_size": batch_size,
             }
 
+        # 与前一天对比 (信息性, 不影响退出码/失败收集): 复用 compare_offline_metrics,
+        # baseline 位换成前一天 current 指标。
+        prev_day_info: dict = {"date": prev_day_date, "row_changes": [], "error": None}
+        if prev_day_dir:
+            prev_day_metrics = _load_prev_day_offline_metrics(prev_day_dir, input_len, output_len, batch_size)
+            if prev_day_metrics:
+                log_info(f"对比前一天: {prev_day_dir} (日期: {prev_day_date}, 场景: {scenario_tag})")
+                prev_day_comparison = compare_offline_metrics(current_metrics, prev_day_metrics)
+                prev_day_info["row_changes"] = prev_day_comparison.get("row_changes", [])
+                prev_day_info["error"] = prev_day_comparison.get("error")
+            else:
+                log_warning(f"前一天目录无离线 bench 场景 {scenario_tag} 的有效指标, 跳过前一天对比")
+                prev_day_info["error"] = "无前一天数据"
+        else:
+            prev_day_info["error"] = "无前一天数据"
+        comparison_result["prev_day"] = prev_day_info
+
+        # 落盘对比结果 (含基线 + 前一天)
+        comparison_json = report_dir / f"offline_comparison_{OFFLINE_BENCH_MODEL}_{scenario_tag}.json"
+        save_metrics_json(comparison_result, comparison_json)
+
         all_comparison_results.append(comparison_result)
 
     return all_comparison_results
@@ -1792,6 +1993,8 @@ def _report_phase(
     model_names = list(model_groups.keys())
     log_info(f"准备为 {len(model_names)} 个模型生成报告")
     # 先生成全部模型报告。有任一变化则每模型各发一条(含无变化), 否则只发一条合并通知。
+    # "任一变化" 含基线与前一天两个维度: 基线是官方回归门槛, 前一天是日级波动信息,
+    # 任一有显著变化行都逐模型发, 使前一天明细也能在通知里看到。
     model_reports = []
     any_change = False
     for idx, model_name in enumerate(model_names):
@@ -1815,8 +2018,16 @@ def _report_phase(
         print("=" * 60 + "\n")
 
         model_reports.append((model_name, model_report))
-        if "发现性能优化" in model_report or "发现性能劣化" in model_report:
+
+    # any_change 数据驱动: 任一 comparison 的基线或前一天有显著变化行即逐模型发。
+    for comparison in all_comparison_results:
+        if comparison.get("row_changes"):
             any_change = True
+            break
+        prev_day = comparison.get("prev_day") or {}
+        if prev_day.get("row_changes"):
+            any_change = True
+            break
 
     if any_change:
         for idx, (model_name, model_report) in enumerate(model_reports):

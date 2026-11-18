@@ -85,6 +85,17 @@ case "${mode}" in
 		;;
 esac
 
+# load_format / n_layers: 仅跑前 n_layers 层时用 dummy 加载（默认 auto、跑全部层）
+# N_LAYERS>0 时强制 dummy 并通过 hf-overrides 覆盖 num_hidden_layers
+n_layers="${N_LAYERS:-0}"
+load_format="${LF:-auto}"
+extra_args=()
+if [ "${n_layers}" -gt 0 ]; then
+	load_format="dummy"
+	extra_args+=(--hf-overrides '{"num_hidden_layers": '"${n_layers}"'}')
+	echo "Using ${n_layers} layers"
+fi
+
 python -m vllm.entrypoints.openai.api_server \
 	--model ${model_path}  \
 	--tensor-parallel-size ${tensor_parallel_size} \
@@ -103,4 +114,6 @@ python -m vllm.entrypoints.openai.api_server \
 	${quantization_param} \
 	--profiler-config "${profiler_param}" \
 	--host ${ip} \
-	--port ${port} > ${log} 2>&1 &
+	--port ${port} \
+	--load-format "${load_format}" \
+	"${extra_args[@]}" > ${log} 2>&1 &
