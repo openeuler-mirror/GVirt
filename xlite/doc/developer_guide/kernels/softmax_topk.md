@@ -2,7 +2,7 @@
 
 ## 功能概述
 
-MoE(Mixture of Experts)路由门控算子:对每个 token 的 router 得分做 softmax,再选出 topK 个专家,输出"稀疏权重行 + 专家路由位图"两个结果(DeepSeek 系列模型 `norm_topk_prob=True` 的标准门控,`softmax → topk → 归一化` 全融合在单个向量 kernel 内)。当 `numRoutedExperts` 低于 `vmrgsort4` 无条件 4 路归并的下限 `4*SORT_BLOCK_SIZE = 128`(如 GLM-4.7-Flash 的 64 专家)时,排序宽度补齐到 128,机制见实现原理 SelectTopK 段。数学语义(见测试 `tests/kernels/softmax_topk.py` 参考实现段,关键字 `standard_softmax`/`torch.topk`):
+MoE(Mixture of Experts)路由门控算子:对每个 token 的 router 得分做 softmax,再选出 topK 个专家,输出"稀疏权重行 + 专家路由位图"两个结果(DeepSeek 系列模型 `norm_topk_prob=True` 的标准门控,`softmax → topk → 归一化` 全融合在单个向量 kernel 内)。排序宽度随专家数自适应:`numRoutedExperts` 低于 `vmrgsort4` 无条件 4 路归并的下限 `4*SORT_BLOCK_SIZE = 128`(如 GLM-4.7-Flash 的 64 专家)时补齐到 128;高于 128 时由 `MrgSort` 按 4 叉平衡树逐层归并(见实现原理 SelectTopK 段),因此 256 专家的 Qwen3.5-MoE / 512 专家的 Qwen3.8-Max 同样适用。数学语义(见测试 `tests/kernels/softmax_topk.py` 参考实现段,关键字 `standard_softmax`/`torch.topk`):
 
 ```text
 p = softmax(scores)                       # [nRoutedExperts]
@@ -34,7 +34,7 @@ softmax_topk_<dtype>(GM_ADDR scores, GM_ADDR indices, GM_ADDR weightsMap,
 | indices | 输入 | `[numRoutedExperts]` | int32 | `arange` 恒等索引表(host 传 `indices.shape[0]` 作为专家数) |
 | weightsMap | 输出 | `[numTokens, numRoutedExperts]` | 与 scores 同 dtype | 稀疏权重行:topK 个被选槽位为归一化后的概率,其余为 0 |
 | routingMap | 输出 | `[numTokens, ceil(numRoutedExperts/32)]`(BIT1 打包) | BIT1(uint32 位图) | 每个被选专家置 1 bit。注意:BIT1 语义下每 32 个专家打包为 1 个 u32(测试 `tests/kernels/softmax_topk.py` BIT1 打包段,关键字 `elem / 64`、`1 << (elem % 64)` 是因为 BIT1 张量在 torch 侧被视作 int64 承载) |
-| numTokens / numRoutedExperts / topK / normTopKProb | — | 标量 | uint32 / bool | 测试配置:nRoutedExperts=64/128(64 覆盖 <128 的补齐路径),topK=8,normTopKProb=True。测试仅取 64 的倍数是测试侧 BIT1 位图以 int64 承载的约束:kernel 本身按 `nRoutedExperts/32` 个 u32 步进 GM、每 token DMA 精确 `nRoutedExperts/8` 字节,非 64 倍数时 int64 载体凑不成整字(`tests/kernels/sqrtsoftplus_hash_topk.py` 的 int32 载体即覆盖 96 专家) |
+| numTokens / numRoutedExperts / topK / normTopKProb | — | 标量 | uint32 / bool | 测试配置:nRoutedExperts=64/128/192/256/512(64 覆盖 <128 的补齐路径,192/256/512 覆盖尾块累积归并),topK=8,normTopKProb=True。测试仅取 64 的倍数是测试侧 BIT1 位图以 int64 承载的约束:kernel 本身按 `nRoutedExperts/32` 个 u32 步进 GM、每 token DMA 精确 `nRoutedExperts/8` 字节,非 64 倍数时 int64 载体凑不成整字(`tests/kernels/sqrtsoftplus_hash_topk.py` 的 int32 载体即覆盖 96 专家) |
 
 ## 支持的数据类型
 
@@ -62,7 +62,7 @@ dtype 分派见 `csrc/op.cpp` 的 `XliteOpSoftmaxTopK`(dtype 分派分支):要�
    - 排序宽度 `nSortScores = max(numRoutedExperts, 4*SORT_BLOCK_SIZE)`(`SORT_BLOCK_SIZE=32`,定义于 `csrc/kernels/kernel_macro.h`,即下限 128)。`vmrgsort4` 是无条件 4 路归并,候选不足 4 块时归并会消费未初始化 lane、静默污染 topK,故宽度补齐;
    - `vbitsort(sortTmp, calc, indicesIn, nSortScores/32)`:`nSortScores/32` 组、每组 32 元素的位排序,输出值+索引成对的元素;
    - 补齐段处理:`InitSortTail`(`SoftmaxTopK::InitSortTail`,每 Run 一次)把 `indicesIn` 的补齐 lane 索引填 0(与真实专家 0 重复,但永远不会被选中,见下)并以 `PIPE_ALL` 栅栏保序;`PadCalcTail`(`SoftmaxTopK::PadCalcTail`,每 token)把 `calc` 的补齐 lane 重钉为 `FLOAT_MIN`——`CalcSoftmax` 按 `DIV_ROUND_UP(numRoutedExperts, 64)` 个 repeat 重写 `calc`,专家数非 64 整数倍(如 96→2 repeat→128 lane)时写宽会覆写补齐段,故须逐 token 重钉;softmax 输出恒正,必须用 `FLOAT_MIN` 而非 0 才能保证排在最后、抢不走 topK 名额。两侧 `PIPE_ALL` 栅栏分别将 S 管线标量写保序于在飞的 V 管线读写;`numRoutedExperts >= 128` 时两函数直接早退,零开销;
-   - `vmrgsort4(sortMrgTmp, addrArray, lengths, config)`:4 路归并(`validBits=0xF`,4 队列各长 32),一次指令把整行排成降序;
+   - 归并(`SoftmaxTopK::SelectTopK`):`vbitsort` 之后统一调用 `MrgSort`(`csrc/kernels/kernel_macro.h` 的 `MrgSort`)——它按 4 叉平衡树逐层归并 `nSortScores/SORT_BLOCK_SIZE` 个块,并在每层把队列剪枝到 `MIN(lenPerRepeat, topK)`,因此候选数超过 128 时既不需要手写折叠循环,也不受 `vmrgsort4` 单次 4 队列的限制;函数通过出参返回结果所在缓冲(`sortTmp` 或 `sortMrgTmp`,取决于归并层数),后续 `vreducev2` 从该指针抽取;
    - `vreducev2` 两次(mode=2 隔 2 取索引、mode=1 取值)分别抽出 topK 的**索引载荷** `indicesTopK` 与**值载荷** `weightsTopK`;
    - `normTopKProb` 时 `ReduceSum` + `vbrcb` + `vdiv` 对 topK 权重归一化;
 5. **`FillOutMap`**(`SoftmaxTopK::FillOutMap`):S 管线标量循环 topK 次,`bitmapSet`(`csrc/kernels/kernel_macro.h` 的 `bitmapSet`,u64 字内置位)写路由位图,并按索引 scatter 权重到 `weightsOut` 稀疏槽位;bf16 时再 `vconv_f322bf16r` 转换输出;

@@ -30,7 +30,14 @@ n_tokens = 8
 # expressible here: the routing bitmap is carried as int64, while the kernel strides GM by
 # n_routed_experts/32 uint32 = 12 bytes per token. See sqrtsoftplus_hash_topk.py, which
 # uses an int32 carrier and therefore does cover 96.)
-expert_counts = [64, 128]
+#
+# Above 128 candidates SelectTopK() must also fold the leftover sort blocks into the
+# merge: vmrgsort4 handles at most 4 * SORT_BLOCK_SIZE candidates per call. 192 exercises
+# a two-block tail, 256 a four-block one; without the tail loop the top-K is picked from
+# the first 128 candidates only, which silently mis-routes most tokens of a 256-expert
+# softmax model (measured: 32/32 tokens wrong at 256, 31/32 at 192). 512 covers the
+# Qwen3.8-Max generation (512 experts, same qwen3_5_moe path).
+expert_counts = [64, 128, 192, 256, 512]
 
 failed = []
 for n_routed_experts in expert_counts:
