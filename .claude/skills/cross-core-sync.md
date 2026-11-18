@@ -1,0 +1,1 @@
+../../.agents/skills/cross-core-sync/SKILL.md
