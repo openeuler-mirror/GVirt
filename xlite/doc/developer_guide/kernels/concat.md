@@ -59,3 +59,27 @@ host 侧不做 dtype 分派；测试覆盖 float16/bfloat16/float32/int32/int8 �
 - `nInputs == 0 || numPackets == 0 || totalSize == 0` 直接返回（`csrc/kernels/concat.cpp` 的 `concat_kernel`，关键字 `if (nInputs == 0 || numPackets == 0 || totalSize == 0)` 早返回段）；
 - 超过 8 个输入时 host 侧回退为逐 tensor 的 `aclrtMemcpyAsync`（`csrc/op.cpp` 的 `XliteOpConcat`，关键字 `Fallback for the rare > maxInputs case` 段）；
 - Python 侧校验 `out.bytes == Σ inputs.bytes`，不符抛错（`csrc/_C.cpp` 的 `Concat` wrapper，关键字 `output bytes` / `sum(inputs bytes)` 校验段）；`concat_col` 额外校验各输入 dtype 与前导维一致、out 为 `[times, Σ lastDim]`（`csrc/op.cpp` 的 `XliteOpConcatCol`，关键字 `XliteOpConcatCol: inputs must share dtype` / `out must be [times, sum(inputs last dim)]` 校验段）。
+
+### 片上缓冲分配与占用汇总（AIV UB）
+
+`concat_kernel`（`csrc/kernels/concat.cpp` 的 `concat_kernel`）把 UB 静态均分为两半作乒乓 staging：`dataBuf[0]` 在偏移 0、`dataBuf[1]` 在偏移 `halfBuf = UB_SIZE / PINGPONG`；每个子段固定从所在半区偏移 0 起排（MTE2 写 UB 目的、MTE3 读 UB 源均要求 32B block 对齐）。硬件容量基准（910B/dav C220，NpuArch 2201）：AIV UB 预算取 `UB_SIZE=192KB`（`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`，4KB×48 bank），各 AIV block 各持一份独立 UB、布局相同。dtype 记法：kernel 按 `__ubuf__ uint8_t` 字节搬运，任意 dtype 只影响字节总数、不影响缓冲布局，占用单列。典型配置：MoE packedSend 打包（bf16、hidden=7168，最大输入为 token 批，14336 B/token；hoist 量化时 int8 行 7168 B/token，fp16/bf16 同取）——子段按输入/包边界切分，单段上限 `segBufSize = halfBuf`，占用不随配置变化。
+
+**AIV UB（预算 `UB_SIZE=192KB`）**
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `dataBuf[curr]` | 单个子段，上限 `segBufSize` 字节 | uint8 | 2（事件0/1） | `UB_SIZE / PINGPONG` | 196608 |
+| **合计** | | | | | **196608** |
+
+**占用汇总**（占用 vs 硬件容量；字节数）：
+
+| 存储级 | 硬件容量 | 占用 | 占比 |
+|---|---|---|---|
+| UB | 192 KB | 196608 B | 100% |
+
+要点：
+
+- **UB 静态均分两半、恰好占满 192KB**：槽位由 `UB_SIZE / PINGPONG` 编译期固定，占比恒 100%，与输入个数、行宽、dtype 均无关；
+- 单个子段上限 `segBufSize = 98304 B`（半个 UB）：单行（单输入）超过它时在输入内连续再切，行宽小于它时按输入/包边界切分（见上文「子段分解与乒乓搬运」）；
+- 无 kernel 侧容量断言；容量相关的 host 侧控制只有按 `totalBytes` 缩放 block 数（`CopyKernelBlockNum`，tilePerCore≈2MB）与超过 8 个输入回退 `aclrtMemcpyAsync`（见上文「边界处理与 host 侧校验」）；
+- 乒乓以 `EVENT_ID0/1` 区分两个半区，读当前段与写上一段重叠（见上文「流水线同步」）。

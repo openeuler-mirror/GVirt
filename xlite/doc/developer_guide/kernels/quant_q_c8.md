@@ -88,6 +88,44 @@ host 仅接受 `q.dtype == BF16`,kernel 入口符号为 `quant_q_c8_bfloat16_t`(
 - dim 必须 64 的倍数(op 检查;`convert_input` 无 tail)且 ≤ `QUANT_Q_C8_MAX_DIM`(op 检查);
 - host 侧 `q.shape[0] == 0` 直接返回(`csrc/op.cpp` 的 `XliteOpQuantQC8`)。
 
+### 片上缓冲分配与占用汇总(AIV UB)
+
+本算子为纯向量(AIV)算子,只使用 UB 一级片上缓冲,无 L1/L0A/L0B/L0C 占用。`csrc/kernels/quant_q_c8.h` 的 `quant_q_c8` 在函数入口手工排布:偏移 0 起按 `qRow[0] → qRow[1] → headWeightHalf[0] → headWeightHalf[1] → qRowF32 → absValues → rounded → halfValues → quant[0] → quant[1] → headWeightF32 → scaleF32 → scaledWeightsF32 → scaledWeightsF16[0] → scaledWeightsF16[1]` 顺序累进,各段按 `ROUND_UP(段字节, VECTOR_MAX_BYTESIZE=256B)` 对齐;跨管线缓冲双缓冲(MTE2 写的 qRow/headWeightHalf、MTE3 读的 quant/scaledWeightsF16 各两份),V 内部缓冲单份。硬件容量基准(910B/dav C220,NpuArch 2201):UB 预算取 `kernel_macro.h` 的 `UB_SIZE=192KB`(4KB×48 bank),每个 AIV subblock 各持一份独立 UB。dtype 记法:模板实参 `dtype` 唯一实例化为 `bfloat16_t`(2B),中转 float 4B、int32 4B、half 2B、int8 1B,单条 dtype 路径无需分列。
+
+容量核算取上界配置 dim=4096(`QUANT_Q_C8_MAX_DIM`,host 允许的最大行宽;V4 实配 dim=128——indexer Q 行宽,rotateScale=1/√128——时合计仅 4608 B,见下表合计行注)。占用 = 各段 ROUND_UP 后槽位字节数之和。
+
+**AIV UB(预算 `UB_SIZE=192KB`)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B,dim=4096) |
+|---|---|---|---|---|---|
+| `qRow` | `(dim,)` | bfloat16 | 2(事件0/1,curr) | `ROUND_UP(dim*sizeof(dtype), 256B)` | 16384 |
+| `headWeightHalf` | `(64,)` | bfloat16 | 2(事件0/1,curr) | `VECTOR_MAX_BYTESIZE` | 512 |
+| `qRowF32` | `(dim,)` | float | 1 | `ROUND_UP(dim*sizeof(float), 256B)` | 16384 |
+| `absValues` | `(dim,)` | float | 1 | `ROUND_UP(dim*sizeof(float), 256B)` | 16384 |
+| `rounded` | `(dim,)` | int32 | 1 | `ROUND_UP(dim*sizeof(int32_t), 256B)` | 16384 |
+| `halfValues` | `(dim,)` | half | 1 | `ROUND_UP(dim*sizeof(half), 256B)` | 8192 |
+| `quant` | `(dim,)` | int8 | 2(事件0/1,curr) | `ROUND_UP(dim*sizeof(int8_t), 256B)` | 8192 |
+| `headWeightF32` | `(64,)` | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
+| `scaleF32` | `(64,)` | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
+| `scaledWeightsF32` | `(64,)` | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
+| `scaledWeightsF16` | `(64,)` | half | 2(事件0/1,curr) | `VECTOR_MAX_BYTESIZE` | 512 |
+| **合计** | | | | `20*dim + 7*256B`(dim ≥ 256 时精确) | **83712** |
+
+合计式 `20*dim + 7*256B` 在 dim ≥ 256 时各 ROUND_UP 无垫片、逐段精确;V4 实配 dim=128 时 `quant` 两槽各由 128B 垫至 256B,合计 4608 B(占 UB 2.3%)。
+
+**占用汇总**:
+
+| 存储级 | 硬件容量 | dim=4096(上界)占用 | 占比 | dim=128(V4 实配)占用 | 占比 |
+|---|---|---|---|---|---|
+| UB(每 AIV subblock) | 192 KB | 83712 B | 42.6% | 4608 B | 2.3% |
+
+要点:
+
+- **UB 是唯一使用的片上级,上界配置也仅占 42.6%**,布局远未触顶:绑定约束不是 UB 容量,而是 `csrc/kernels/kernel_param.h` 的 `QUANT_Q_C8_MAX_DIM=4096` 上界(host 侧 `XliteOpQuantQC8` 检查 dim 为非零 64 倍数且 ≤ 4096,kernel 内 `assert(off <= UB_SIZE)` 兜底);
+- 该常量的注释按「17B/elem UB footprint + five 64-lane staging bufs」口径记录量级来源——17B/元素是 qRow/quant 各计一份的单槽口径(2+4+4+4+2+1 B/元素),「五段 64-lane staging」即 headWeightHalf/headWeightF32/scaleF32/scaledWeightsF32/scaledWeightsF16 五段标量缓冲(其中 headWeightHalf/scaledWeightsF16 双缓冲),共 7 个 256B 槽位、合计 1792 B——与上文「UB 内存布局」的「20B/元素 + 7 个 256B 暂存」一致(20B/元素为乒乓化后的实际口径);
+- 占用大头是四个 `dim` 宽的 fp32/int32 中转(qRowF32/absValues/rounded 各 16384 B + qRow 双槽 16384 B,合计约 78%),标量暂存合计 1792 B,占比可忽略;
+- V4 实配 dim=128 时全表仅 4608 B(2.3%),UB 布局对行宽几乎不设实际限制。
+
 ## 与浮点路径的等价性
 
 浮点路径(model.cpp 的 `ForwardAttnCXAIndexer`)对 Q 施加 rope(doRotate=true,rope 区 × 1/√dim)+ Muls(nope 区 × 1/√dim)——**整行均匀** × 1/√dim。本算子接收 doRotate=false 的 rope 结果(未缩放),`q8` 的 int8 值与"先整行缩放再量化"完全相同(逐行 scale 不变性),`rotateScale` 折叠进 `scaledWeights` 后,topk 的 int8 分数 = 浮点分数 × 每查询常数(√dim 相关)——排序与 ReLU 均不变。K 侧([quant_cache_c8](quant_cache_c8.md))同理(cache 路径 rotate 为整行均匀缩放,被 k_scale 吸收)。

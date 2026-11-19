@@ -53,3 +53,27 @@ block 数由 host 侧按段数缩放：decode（约 48 段）只起几个 block�
 ### 边界处理
 
 `numTokens/nKHeads/nVHeads/headBytes` 为 0、`nVHeads % nKHeads != 0`、`expand == 0` 时 kernel 直接返回（`csrc/kernels/repeat_interleave.cpp` 的 `repeat_interleave_kernel`，关键字 `if (numTokens == 0 || nKHeads == 0 || nVHeads == 0 || headBytes == 0)`、`if (nVHeads % nKHeads != 0)`、`if (expand == 0)`）；host 侧对非法维度与 `headBytes > 96KB` 提前抛错（`csrc/op.cpp` 的 `XliteOpRepeatInterleave`，关键字 `kMaxHeadBytes`、`invalid dims`）。
+
+### 片上缓冲分配与占用汇总（AIV UB）
+
+`repeat_interleave_kernel`（`csrc/kernels/repeat_interleave.cpp` 的 `repeat_interleave_kernel`）把 UB 静态均分为两半作乒乓 staging：`dataBuf[0]` 在偏移 0、`dataBuf[1]` 在偏移 `halfBuf = UB_SIZE / PINGPONG`；每个输出头段固定从所在半区偏移 0 起排（MTE2 写 UB 目的、MTE3 读 UB 源均要求 32B block 对齐）。硬件容量基准（910B/dav C220，NpuArch 2201）：AIV UB 预算取 `UB_SIZE=192KB`（`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`，4KB×48 bank），各 AIV block 各持一份独立 UB、布局相同。dtype 记法：kernel 按 `__ubuf__ uint8_t` 字节搬运，headBytes 以字节数传入，dtype 不影响缓冲布局，占用单列。典型配置：GDN 头扩展 headDim=128、bf16（headBytes=256 B），decode 约 48 段/层、prefill 约 24576 段——单段数据远小于槽位，占用不随配置变化。
+
+**AIV UB（预算 `UB_SIZE=192KB`）**
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `dataBuf[curr]` | 单段 `min(headBytes, halfBuf)` 字节 | uint8 | 2（事件0/1） | `UB_SIZE / PINGPONG` | 196608 |
+| **合计** | | | | | **196608** |
+
+**占用汇总**（占用 vs 硬件容量；字节数）：
+
+| 存储级 | 硬件容量 | 占用 | 占比 |
+|---|---|---|---|
+| UB | 192 KB | 196608 B | 100% |
+
+要点：
+
+- **UB 静态均分两半、恰好占满 192KB**：槽位由 `UB_SIZE / PINGPONG` 编译期固定，占比恒 100%，与 headBytes、头数、dtype 均无关；
+- host 侧 `kMaxHeadBytes = 96KB`（`csrc/op.cpp` 的 `XliteOpRepeatInterleave`）恰等于半个 UB（98304 B），即 host 校验的容量来源就是 UB 半区槽位；kernel 内 `segBytes` 钳到 `halfBuf` 是同一边界的防御性兜底；
+- 实际段数据典型仅 256 B（decode，headDim=128、bf16），槽位利用率很低，是以固定半区乒乓换取「读下一段与写上一段重叠」的设计选择（见上文「UB staging 与乒乓」）；
+- 乒乓以 `EVENT_ID0/1` 区分两个半区（见上文「流水线同步」）。

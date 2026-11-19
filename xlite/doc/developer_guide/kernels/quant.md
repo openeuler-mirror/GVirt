@@ -93,3 +93,50 @@ cast 链用 `f322f16o`(ODD)→`f162s8r`(RINT)两步:ODD 舍入使 FP16 值停在
 - tile 越界(`rowStart >= m`)直接 return([csrc/kernels/quant.h](../../../csrc/kernels/quant.h) 的 `Quant::RunTileByIdxMultiRow`,关键字 `skip when tile out of range`)。
 - m 不足 block_num 时循环自然跳过空闲核。
 - host 侧拒绝 `k % 32 != 0`(ragged k,2D DMA 步长要求 32B 对齐),kernel 内 `assert(this->k % 32 == 0)` 守护([csrc/op.cpp](../../../csrc/op.cpp) 的 `XliteOpQuant`,关键字 `must be a multiple of 32`)。
+
+### 片上缓冲分配与占用汇总(AIV UB)
+
+本算子为纯向量(AIV)算子,只使用 UB 一级片上缓冲,无 L1/L0A/L0B/L0C 占用。`TaskTilesInit` 按运行期 `kPad`(`ROUND_UP(ceil(k/kLoop), 128)`)推导布局:多行路径(`csrc/kernels/quant.h` 的 `Quant::TaskTilesInitMultiRow`)在 UB 偏移 0 处按 `x1 → x2 → xf32 → xf16 → z1 → z2 → scale → offset → scale_f32 → offset_f32` 顺序累进指针排布,`xf16` 特意排在 `z1` 之前吸收 `vconv` 硬件 overread;单行路径(`Quant::TaskTilesInitSingleRow`)按 `s_x → s_xf32 → s_z → s_xf16 → s_scale → s_offset → s_scale_f32 → s_offset_f32` 单份排布。硬件容量基准(910B/dav C220,NpuArch 2201):UB 预算取 `kernel_macro.h` 的 `UB_SIZE=192KB`(4KB×48 bank),每个 AIV subblock 各持一份独立 UB。dtype 记法:模板实参 `dtype` 唯一实例化为 `bfloat16_t`(2B,见 [quant_bfloat16_t.cpp](../../../csrc/kernels/quant_bfloat16_t.cpp)),cast 链中转 half 2B、float 4B、int8 1B,单条 dtype 路径无需分列。
+
+典型配置取 k=4096(W8A8 线性层 hiddenSize,即测试注释的 `kPad=4096, rows=3` 引擎边界档):`kLoop=1`、`kPad=4096`;多行路径 `rMax = (UB_SIZE - 12*kPad)/(12*kPad) = 3`,行数足够(tileRows ≥ 3)时 `rows=3`;单行路径(tileRows == 1,小 batch decode)同取 `kPad=4096`。两条路径互斥,占用差异仅来自乒乓份数。
+
+**AIV UB(预算 `UB_SIZE=192KB`)——多行路径**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B,kPad=4096/rows=3) |
+|---|---|---|---|---|---|
+| `x1`/`x2` | `(rows, kPad)` | bfloat16 | 2(事件0/1,xId) | `rows*kPad*sizeof(dtype)` | 49152 |
+| `xf32` | `(rows, kPad)` | float | 1 | `rows*kPad*sizeof(float)` | 49152 |
+| `xf16` | `(rows, kPad)` | half | 1 | `rows*kPad*sizeof(half)` | 24576 |
+| `z1`/`z2` | `(rows, kPad)` | int8 | 2(事件0/1,eventId) | `rows*kPad*sizeof(int8_t)` | 24576 |
+| `scale` | `(kPad,)` | bfloat16 | 1(事件2) | `kPad*sizeof(dtype)` | 8192 |
+| `offset` | `(kPad,)` | bfloat16 | 1(事件2) | `kPad*sizeof(dtype)` | 8192 |
+| `scale_f32` | `(kPad,)` | float | 1 | `kPad*sizeof(float)` | 16384 |
+| `offset_f32` | `(kPad,)` | float | 1 | `kPad*sizeof(float)` | 16384 |
+| **合计** | | | | `12*(rows+1)*kPad` | **196608** |
+
+**AIV UB(预算 `UB_SIZE=192KB`)——单行路径(tileRows == 1)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B,kPad=4096) |
+|---|---|---|---|---|---|
+| `s_x` | `(kPad,)` | bfloat16 | 1(事件0) | `kPad*sizeof(dtype)` | 8192 |
+| `s_xf32` | `(kPad,)` | float | 1 | `kPad*sizeof(float)` | 16384 |
+| `s_z` | `(kPad,)` | int8 | 1(事件0) | `kPad*sizeof(int8_t)` | 4096 |
+| `s_xf16` | `(kPad,)` | half | 1 | `kPad*sizeof(half)` | 8192 |
+| `s_scale` | `(kPad,)` | bfloat16 | 1(事件2) | `kPad*sizeof(dtype)` | 8192 |
+| `s_offset` | `(kPad,)` | bfloat16 | 1(事件2) | `kPad*sizeof(dtype)` | 8192 |
+| `s_scale_f32` | `(kPad,)` | float | 1 | `kPad*sizeof(float)` | 16384 |
+| `s_offset_f32` | `(kPad,)` | float | 1 | `kPad*sizeof(float)` | 16384 |
+| **合计** | | | | `21*kPad` | **86016** |
+
+**占用汇总**(两条路径互斥,各对 UB 容量;字节数):
+
+| 存储级 | 硬件容量 | 多行路径占用 | 占比 | 单行路径占用 | 占比 |
+|---|---|---|---|---|---|
+| UB(每 AIV subblock) | 192 KB | 196608 B | 100% | 86016 B | 43.8% |
+
+要点:
+
+- **UB 是唯一也是顶满的一级**:多行路径 k=4096 时 `12*(rows+1)*kPad` = 196608 B 恰好占满 192KB——`rMax = (UB_SIZE - 12*kPad)/(12*kPad)` 的推导保证 12*(rows+1)*kPad ≤ `UB_SIZE`,这是 `rows` 行组上限的容量来源,`Quant::TaskTilesInitMultiRow` 末尾的 `assert(offset_f32 + kPad <= UB_SIZE)` 兜底;
+- `x1`/`x2` 与 `xf32` 各 49152 B(各占 25%)是占用大头,行输入乒乓与 FP32 升精度缓冲合计占 50%;
+- `kPad` 的切块上限 `maxOneRowKTile = ROUND_DOWN(UB_SIZE/24, 128) = 8192` 保证 k > 8192 时裂成 kLoop 段后 `kPad ≤ 8192`、12*(rows+1)*kPad 仍不越界,即任意合法 k 的 UB 占用均由运行期公式自适应,host 侧无需容量校验(`k % 32 == 0` 是 2D DMA 步长约束而非容量约束);
+- 单行路径合计 `21*kPad`(86016 B,43.8%)恒小于多行路径下限 `24*kPad`(rows=1 时),路径选择天然安全。

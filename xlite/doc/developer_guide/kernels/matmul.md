@@ -120,3 +120,60 @@ bias 从 L1 到 C2 的搬运以 64B 数据块为单位（`C2_DATABLOCK`），deq
 
 - `weightNZ=True` 时 y 已是 Fractal NZ 格式（`torch_npu.npu_format_cast(..., ACL_FORMAT_FRACTAL_NZ)` 或 `matrix_nd2nz`），kernel 走 `CopyGmToL1` 免去 ND→NZ 转换（`csrc/kernels/matmul.h` 的 `Matmul::RunTileBody`，B GM→L1 分支中 `CopyGmToL1` 的 nz 分支），节省 MTE2 带宽；float 类型不支持 NZ（测试中 `weight_nz and dtype != torch.float`）。
 - bias 仅在量化路径为 int32；浮点路径 MatDtype=float，bf16 调用时 host 先用 `cast_bfloat16_t_float` 把 bias 升精度（`csrc/op.cpp` 的 `XliteOpMatmul`，关键字 `aclrtlaunch_cast_bfloat16_t_float`）。bias 在首个 K 块通过 `Mmad(c, a, b, bias, params)` 一次进入 L0C（`csrc/kernels/matmul.h` 的 `Matmul::RunTileBody`，关键字 `CalMmadWithBias` 首轮）。
+
+### 片上缓冲分配与占用汇总（AIC L1/L0A/L0B/L0C）
+
+`Init`（`csrc/kernels/matmul.h` 的 `Matmul::Init`）按分块尺寸手动排布全部片上缓冲：L1 上 `l1aBuf`/`l1bBuf` 两对乒乓自偏移 0 顺序累进，`l1BiasBuf` 与 `l1DeqScaleBuf` 逻辑位为 C1、偏移重置回 `l1bBuf[0]` 起点与其共享槽位（bias/deqScale 在 B 的首次 GM→L1 之前用毕释放，时序互斥，见 `Init` 的 `shared with l1bBuf` 注释）；L0A（A2）、L0B（B2）、L0C（CO1）三级物理独立、各自从偏移 0 重新起排；bias 表与 deqScale 分别落在 CO1 之外的固定专用区 C2 Bias Table（1KB）与 C2PIPE2GM fixpipe buffer（2KB）。硬件容量（910B/dav C220，NpuArch 2201，CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`）：L0A 64KB、L0B 64KB、L1 512KB，L0C 总容量 256KB（`l0_c_size=262144`）为 CO1/CO2 两区之和，mmad 累加缓冲（`TPosition::CO1`）可用的 CO1 区为 **128KB**，下文 L0C 占用均按 CO1 128KB 计；本算子为 `KERNEL_TYPE_AIC_ONLY`，不使用 UB。
+
+dtype 记法（模板实参，见宏 `MATMUL_FUNC_DEFINE`）：`Dtype` 为 x/y 元素类型，`MatDtype` 为 bias/L0C 累加类型，`OutDtype` 为 z 类型——浮点路径 `<fp16|bf16|float, float, 同 Dtype>`，int8 路径 `<int8_t, int32_t, half>`（W8A8），int4 路径 `<int4b_t, int32_t, half>`（W4A4/W4A8）。典型配置取 GLM-5.1 TP16 per-rank dense W8A8 线性（`tests/performance/perf_fused_quant_matmul_dequant.py` 的 `MODEL_SIZES` 中 `dense_gate_up`：m=4096、n=1536、k=6144，带 deqScale），host `PickMatmulTiling`（`csrc/auto_tuner.cpp` 的 `PickMatmulTiling`）产出 m0=128、n0=256、k0=512（int8）/256（fp16/bf16）/1024（int4）。默认 `k0 = 512*8/dtypeBits` 随 dtype 反比缩放，三条路径的字节占用完全一致（差异仅在单份 shape 的 K 维深度：fp16 256、int8 512、int4 1024），占用列故取单列；占用只由分块决定，与问题规模 m/n/k 无关（尾部 tile 只会更小）。下表 shape 为逻辑形状（L1/L0 内实际按 Nd2Nz/NZ 分形排布）。
+
+**AIC L1（A1/B1/C1，容量 512KB）**
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
+|---|---|---|---|---|---|
+| `l1aBuf` | `(m0, kDtileSize)`=`(128, 2×k0)` | Dtype | 2（事件0/1） | `m0*kDtileSize*sizeof(Dtype)` | 262144 |
+| `l1bBuf` | `(n0, k0)`=`(256, k0)` | Dtype | 2（事件2/3） | `n0*k0*sizeof(Dtype)` | 262144 |
+| `l1BiasBuf` | `(n0,)`=`(256,)` | MatDtype | 1（事件4） | `n0*sizeof(MatDtype)` | 0（与 `l1bBuf[0]` 共享槽位） |
+| `l1DeqScaleBuf` | `(n0,)`=`(256,)` | uint64_t | 1（事件5） | `n0*sizeof(uint64_t)` | 0（与 `l1bBuf[0]` 共享槽位） |
+| **合计** | | | | | **524288** |
+
+`l1BiasBuf`/`l1DeqScaleBuf` 的 1024/2048 B 槽位落在 `l1bBuf[0]`（131072 B）头部，不新增 L1 占用；`n0 ≤ 256` 的钳制保证其不越出 `l1bBuf[0]`。
+
+**AIC L0A（A2，容量 64KB）**
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
+|---|---|---|---|---|---|
+| `l0aBuf` | `(m0, kQtileSize)`=`(128, k0/4)` | Dtype | 2（事件0/1，kIdx2） | `m0*kQtileSize*sizeof(Dtype)` | 32768 |
+| **合计** | | | | | **32768** |
+
+**AIC L0B（B2，容量 64KB）**
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
+|---|---|---|---|---|---|
+| `l0bBuf` | `(n0, kQtileSize)`=`(256, k0/4)` | Dtype | 2（事件0/1，kIdx2） | `n0*kQtileSize*sizeof(Dtype)` | 65536 |
+| **合计** | | | | | **65536** |
+
+**AIC L0C（CO1 区，容量 128KB；总容量 256KB 含 CO2）**
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
+|---|---|---|---|---|---|
+| `l0cBuf` | `(m0, n0)`=`(128, 256)` | MatDtype | 1（事件0） | `m0*n0*sizeof(MatDtype)`（Mmad 分形累加，无显式分配字节数，按满 tile 计） | 131072 |
+| **合计** | | | | | **131072** |
+
+bias 链路的 `l0BiasBuf`（C2 Bias Table，固定 1KB，64B 数据块）与 deqScale 链路的 `fixpipeBuf`（C2PIPE2GM，固定 2KB，128B 数据块）是 CO1 之外的独立专用硬件区，占用恒定、不计入上表；`n0 ≤ 256` 钳制的容量来源即这两区（deqScale `n0*8B ≤ 2KB`、bias `n0*4B ≤ 1KB`）。
+
+**占用汇总**（各表占用列之和 vs 硬件容量；字节数）：
+
+| 存储级 | 硬件容量 | 占用 | 占比 |
+|---|---|---|---|
+| L1 | 512 KB | 524288 B | 100% |
+| L0A | 64 KB | 32768 B | 50% |
+| L0B | 64 KB | 65536 B | 100% |
+| L0C（CO1） | 128 KB | 131072 B | 100% |
+
+要点：
+
+- **默认分块恰好同时顶满 L1、L0B 与 L0C CO1 三级**：m0=128、n0=256、k0=512×8/dtypeBits 下三者均达容量 100%，L0A 因 m0 只有 n0 的一半而半满（50%）——任何分块维度的放大都先破这三级，默认值即容量上界点；
+- `l1aBuf` 与 `l1bBuf`（各 262144 B）平分 L1、是绝对大头；bias/deqScale 共享 `l1bBuf[0]` 头部槽位，零额外 L1 开销；
+- **`n0 ≤ 256` 钳制的容量来源是 CO1 之外的 C2 Bias Table（1KB）与 C2PIPE2GM fixpipe buffer（2KB）**（`csrc/kernels/matmul.h` 的 `Matmul::Init` 的 `bias buffer 1k`/`fixpipe buffer 2k` 注释），而非 L1/L0 本身；
+- host `PickMatmulTiling` 的均载再平衡（`csrc/auto_tuner.cpp` 的 `PickMatmulTiling`：小 n 时 m0≤64/n0=64，特大 n 时 m0≤64/n0=384/k0 减半）只会按比例缩小占用，不改变「L1/L0B/L0C 同紧」的格局。

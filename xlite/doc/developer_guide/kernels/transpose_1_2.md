@@ -51,3 +51,28 @@ UB 被均分为 4 份,两份输入 ping-pong 缓冲(`VECIN`)+ 两份输出 ping-
 ### 测试参考
 
 [tests/kernels/transpose_1_2.py](../../../tests/kernels/transpose_1_2.py):对 batch 1~8、seq_len 2^0~2^12、fp16/bf16 组合验证,与 `torch.transpose(1, 2)` 对比。
+
+### 片上缓冲分配与占用汇总(AIV UB)
+
+`Init`(`csrc/kernels/transpose_1_2.h` 的 `Transpose_1_2::Init`)静态把 UB 四等分:输入两份 `inBuf[0]`/`inBuf[1]`(`TPosition::VECIN`)与输出两份 `outBuf[0]`/`outBuf[1]`(`TPosition::VECOUT`)各占 `UB_SIZE / 4`,自偏移 0 顺序排布,槽位编译期固定、与输入规模无关。硬件容量基准(910B/dav C220,NpuArch 2201):AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每个 AIV block 各持一份独立 UB、布局相同。dtype 记法:模板参数 `Dtype` 只决定实例化入口,缓冲与搬运均按 `half`(2B)处理(`LocalTensor<half>` 硬编码),fp16 与 bf16 两条路径布局完全相同,占用单列。典型配置取注意力 Q/K 布局变换(如 `[4, 4096, 64×128]`,nHeads=64、headDim=128,fp16/bf16 同取):处理块恒为 `16×tileDim1 × 16×tileDim2` = 128×128,单块数据 128×128×2 = 32768 B,占用不随配置变化。
+
+**AIV UB(预算 `UB_SIZE=192KB`)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `inBuf[ping]` | `(16×tileDim1, 16×tileDim2)` = (128, 128) | half | 2(事件0/1) | `UB_SIZE / 4` | 98304 |
+| `outBuf[ping]` | `(16×tileDim2, 16×tileDim1)` = (128, 128) | half | 2(事件0/1) | `UB_SIZE / 4` | 98304 |
+| **合计** | | | | | **196608** |
+
+**占用汇总**(占用 vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | 占用 | 占比 |
+|---|---|---|---|
+| UB | 192 KB | 196608 B | 100% |
+
+要点:
+
+- **UB 静态四等分、恰好占满 192KB**:槽位由 `UB_SIZE / 4` 编译期固定,占比恒为 100%,与输入规模、dtype 均无关;
+- 单块实际数据仅 32768 B,约为槽位(49152 B)的 2/3,余量来自固定划分而非数据需求,不存在运行期动态扩缩;
+- 无运行期断言或 host 侧容量校验:tile 尺寸(`tileDim1 = tileDim2 = 8`)硬编码,`Init` 一次排定全部缓冲;
+- 乒乓以 `EVENT_ID0 + ping` 区分两组事件,MTE2→V→MTE3 三级流水在 `inBuf`/`outBuf` 各两份之间轮转(见上文「三级流水」)。

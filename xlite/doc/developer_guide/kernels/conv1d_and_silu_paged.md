@@ -61,6 +61,45 @@ V 指令可见（`pipe_barrier` 不覆盖该写回的 errata）。MTE2→V 标�
 （start==end）不改页面。同一次 launch 的有效请求必须拥有互不重叠的写入页。页的分配、
 清理和请求映射由调用者负责。
 
+### 片上缓冲分配与占用汇总
+
+`XliteCausalConv1dSiLUDecode::Init`(`csrc/kernels/conv1d_and_silu_paged.h` 的 `XliteCausalConv1dSiLUDecode::Init`)为 decode 与 prefill 两个入口一次性静态排布全部 UB 槽位:偏移按段间 32B 对齐累进(本布局各段尺寸天然 32B 对齐、无垫片),段大小全部由编译期常量决定(`kMaxWin=256`、`kRawLen=320`、`kBlock=64`、`kPrefillWin=4288`、`kPrefillTile=4096`),与 channels/kernelDim 的运行期取值无关。硬件容量基准(910B/dav C220):UB 192KB(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE=196608`);本算子为纯 AIV 向量算子,不使用 L1/L0A/L0B/L0C。dtype 记法:模板实参 `Dtype` 为 state/input/weight/output 元素类型,fp16/bf16 实例均 2B 同列、float 实例 4B 单列。典型配置同取 GLM-5.2 短卷积(channels=8192、W=4,即 `tests/models/glm5_next.py` 的 `la_num_heads×la_head_dim=64×128`;Qwen3.5-MoE GDN 同为 2×16×128+32×128=8192),占用差异仅来自 sizeof(Dtype)。
+
+**UB(静态布局,decode/prefill 共用,预算 `UB_SIZE=192KB`)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | fp16/bf16 占用(B) | float 占用(B) |
+|---|---|---|---|---|---|---|
+| `w_raw`(权重 tile 原始 dtype) | `(64,K)`,`kMaxWin=256` | Dtype | 1(事件2,每 tile 重装) | `256*sizeof(Dtype)` | 512 | 1024 |
+| `s_raw`/`s_raw2`(decode 窗口暂存) | `(320,)`,`kRawLen` | Dtype | 2(事件3/4) | `320*sizeof(Dtype)` | 1280 | 2560 |
+| `w_f`(权重 tile 升 fp32) | `(64,K)` | float | 1(事件2) | `kMaxWin*4` | 1024 | 1024 |
+| `s_f`/`s_f2`(窗口升 fp32) | `(320,)` | float | 2(事件3/4) | `kRawLen*4` | 2560 | 2560 |
+| `win_f`(权重列聚集 `[K][64]`) | `(256,)` | float | 1 | `kMaxWin*4` | 1024 | 1024 |
+| `acc_f`(遗留槽位,未被引用) | `(256,)` | float | 1 | `kMaxWin*4` | 1024 | 1024 |
+| `r_f`(遗留槽位,未被引用) | `(64,)` | float | 1 | `kBlock*4` | 256 | 256 |
+| `calc_buf`(decode SiLU 中间量) | `(64,)` | float | 1 | `kBlock*4` | 256 | 256 |
+| `out_f`(decode 卷积累加+SiLU 结果) | `(64,)` | float | 1 | `kBlock*4` | 256 | 256 |
+| `out_buf`(decode 输出) | `(64,)` | Dtype | 1(事件0) | `kChanTile*sizeof(Dtype)` | 128 | 256 |
+| `st_stage`(状态回写暂存) | `(256,)` | Dtype | 1(事件0) | `kMaxWin*sizeof(Dtype)` | 512 | 1024 |
+| `off_win`(vgather 偏移表,遗留) | `(256,)` | uint32 | 1(BuildRamps 预留,未被调用) | `kMaxWin*4` | 1024 | 1024 |
+| `off_k`(权重列聚集偏移表) | `(64,)` | uint32 | 1(事件1) | `kBlock*4` | 256 | 256 |
+| `y_f`(prefill 扩展窗口) | `(4288,)`,`kPrefillWin` | float | 1(事件2/5) | `kPrefillWin*4` | 17152 | 17152 |
+| `inp_raw`(prefill 输入/round-trip 暂存) | `(64,64)`,`kPrefillTile` | Dtype | 1(事件2) | `kPrefillTile*sizeof(Dtype)` | 8192 | 16384 |
+| `pre_acc`(prefill 卷积累加) | `(64,64)` | float | 1(事件0) | `kPrefillTile*4` | 16384 | 16384 |
+| `pre_calc`(prefill SiLU 中间量) | `(64,64)` | float | 1 | `kPrefillTile*4` | 16384 | 16384 |
+| **合计** | | | | | **68224** | **78848** |
+
+**占用汇总**(各表占用列之和 vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | fp16/bf16 占用 | 占比 | float 占用 | 占比 |
+|---|---|---|---|---|---|
+| UB | 192 KB | 68224 B | 34.7% | 78848 B | 40.1% |
+
+要点:
+
+- **布局完全静态、与规模无关**:channels 只决定 tile 数(8192/64=128 个),kernelDim ≤ kMaxK=4 时槽位一律按上限预留——最小配置(C=64、W=2)与 8192 通道占用完全相同;`channels%64==0`、`K∈[2,4]` 由 kernel 入口守卫(`csrc/kernels/conv1d_and_silu_paged.h` 的 `XliteCausalConv1dSiLUDecode::ProcessPaged` 起始校验段)保证,容量本身无 host 校验、无 kernel 断言,布局常量即容量上限。
+- **prefill 时间轴分块缓冲是大头**:`y_f`+`inp_raw`+`pre_acc`+`pre_calc` 在 fp16/bf16 路径合计 58112 B(占布局 85%);decode 专属的窗口双缓冲(`s_raw`/`s_raw2`+`s_f`/`s_f2`,prefill 借用 s_raw 暂存 initial 历史)仅 3840 B。
+- **遗留槽位仍占 UB**:`off_win`(仅未被调用的 `BuildRamps` 写入)、`acc_f`/`r_f`(全文无引用)合计 2304 B,当前 decode/prefill 路径均不使用,回收可省同额 UB。
+
 ## 验证
 
 `tests/kernels/gdn_native_pages.py` 覆盖 decode 的页重排、raw tables、padding、offset

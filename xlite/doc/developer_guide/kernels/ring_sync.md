@@ -41,3 +41,15 @@ GM 信号读写都经由 UB 中转并显式做流水线同步:
 ### 在 flash_attention/flash_mla_v2 中的用法
 
 两处用法相同,以 `flash_attention.h` 为例:一个 KV tile 的 softmax 计算完成后,若后续还有 KV tile(`!lastIsLastKvTile`),`SetNextCore()` 放行下一核(`csrc/kernels/flash_attention.h` 的 `RunAiv` 中 `ringSync.SetNextCore` 调用点);下一核进入 update(合并前一核的 `max/sum` 统计量做 online-softmax 修正)前 `WaitPrevCore()`(`RunAiv` 中 `ringSync.WaitPrevCore` 调用点,围绕 `RunAivSoftmaxUpdate`);kernel 收尾若等过 prev(`resetPrevCore` 标记),`ResetPrevCore()` 复位信号(`RunAiv` 末尾 `ringSync.ResetPrevCore` 调用点)。由此,同一段 query 跨多核的 softmax 统计量传递形成一条沿核编号回绕的环形依赖链,这正是"ring"得名的由来。
+
+### 片上缓冲分配与占用汇总
+
+`RingSync` 无独立的片上缓冲分配:信号本体在 GM——`Init` 只记录 `setNextSync`/`waitPrevSync` 两个 GM int32 槽位指针与 ring 邻居编号、generation 计数,不申请任何 UB/L1/L0 区域。三个接口(`SetNextCore`/`WaitPrevCore`/`ResetPrevCore`)各自使用一个函数内局部标量 `val`(`csrc/kernels/ring_sync.h` 的 `RingSync::SetNextCore` / `RingSync::WaitPrevCore` / `RingSync::ResetPrevCore`,关键字 `__ubuf__ int32_t *val = (__ubuf__ int32_t *)(0ull)`)——**借用宿主 kernel UB 偏移 0 的 4 字节**,与宿主 kernel 的 UB 首缓冲别名、不占独立槽位,因此没有任何可计入容量预算的占用(4B vs UB 192KB,`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`),也无需容量校验。
+
+正因这 4 字节是借用而非分配,正确性约束全部转嫁给宿主 kernel 的调用点:在 `SetNextCore` 的标量写与 `copy_ubuf_to_gm_align_b16` 落盘期间,宿主 kernel 的 UB 偏移 0 处不得有未完成的 MTE2/MTE3 访问。`flash_attention`/`flash_mla_v2` 中该位置是 softmax 的输入槽 `in1` 首元素(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`,关键字 `in1` 自偏移 0 排布),须依赖宿主 kernel 的乒乓事件族保证调用时刻无在途搬运;`indexer_topk` 的 `kvSplit=1` 路径则显式在调用前先 `set_flag/wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0)` 排空 MTE3 队列再进 `SetNextCore`(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::SetNextCore` 调用点,详见 [indexer_topk.md](indexer_topk.md) 的 `kvSplit=1` 段)。`WaitPrevCore` 的轮询读与 `SetNextCore` 的写共用同一个借用标量,每次都在 `PIPE_S↔PIPE_MTE3` / `PIPE_MTE2↔PIPE_S` 的 `EVENT_ID0` 事件对内完成,不跨调用残留任何片上状态。
+
+要点:
+
+- 无独立片上缓冲、无 GM staging 大块,是本仓库中"零缓冲"的同步组件——同步开销仅每核一次 4B 的 GM 信号写与对端 4B 轮询读;
+- 唯一的片上足迹是借用宿主 kernel UB 偏移 0 的 4 字节标量,须由宿主 kernel 的事件族管理保证该时刻无别名冲突(容量维度无约束,正确性维度有约束);
+- 信号槽(`sync` 数组,每 block 2×int32)在 GM 上由 host 分配,大小与 `block_num` 线性相关,不占片上。

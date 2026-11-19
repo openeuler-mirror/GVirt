@@ -88,3 +88,43 @@ topK 相关缓冲按 256B 向量块对齐(`padK`,`SqrtsoftplusHashTopK::Init` �
 ### 流水线同步
 
 全算子以计数事件构成多轨软件流水(头注释 `SqrtsoftplusHashTopK::Run` 内 flag 轨道注释):scores 轨道 V↔MTE2 ID0+curr、输出轨道 V↔MTE3 ID0+curr、tid2eid 轨道 V↔MTE2 ID2+curr,`Run` 开头"预置"全部 slot-free flag 使首 token 不阻塞(`SqrtsoftplusHashTopK::Run` 内 `Pre-arm` 预置段),循环结束后 drain 最后一次 set,防止计数 flag 泄漏到下一次 launch(`SqrtsoftplusHashTopK::Run` 末尾 drain 段)。V→S 的 EVENT_ID0 用于 S 管线读 `indicesTopK` 前的栅栏(`NormalizeAndScale` 末尾 `set_flag(PIPE_V, PIPE_S, EVENT_ID0)` 与 `FillRoutingMap` 开头 `wait_flag`);S→MTE2 的 EVENT_ID1 用于 tid2eid 行地址可见性(`SqrtsoftplusHashTopK::CopyIn` 内 `addr ready` 栅栏)。
+
+### 片上缓冲分配与占用汇总(AIV UB)
+
+`Init`(`csrc/kernels/sqrtsoftplus_hash_topk.h` 的 `SqrtsoftplusHashTopK::Init`)自偏移 0 起在 UB 上按"输入 DMA 乒乓 → 常驻 → 计算区 → 输出 DMA 乒乓"四类区域顺序排布:行缓冲以 `padN = ROUND_UP(numRoutedExperts, VECTOR_MAX_NUM_OF_FP32)*4` 定尺,被排序触碰的 `indicesIn`/`calc` 及 `sortTmp`/`sortMrgTmp` 按补齐宽度 `padSortN = MAX(padN, ROUND_UP(nSortScores,64)*4)` 定尺,topK 相关槽位按 256B 向量块对齐(`padK = ROUND_UP(topK,64)*4`),hash 预取窗口 `inputIdsArr` 固定 `ROUND_UP(HASH_INPUT_IDS_BATCH*4, VECTOR_MAX_BYTESIZE)`;计算全程 fp32。硬件容量基准(910B/dav C220,NpuArch 2201):UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每个 AIV subblock 各持一份独立 UB、布局相同。dtype 记法:`Dtype` 为 scores/outWeights 元素类型(fp32/bf16),`padNDtype = ROUND_UP(numRoutedExperts, VECTOR_MAX_BYTESIZE/sizeof(Dtype))*sizeof(Dtype)`;hash 与非 hash 共用同一布局(排序缓冲在 hash 路径闲置),`numTokens` 不参与定尺。典型配置:numRoutedExperts=256、topK=6、scale=1.5(V4 门控,`nSortScores=256`、`padSortN == padN`);两条 dtype 路径同取该配置,占用差异仅来自 `padNDtype` 定尺的 4 个 Dtype 槽。
+
+**AIV UB(预算 `UB_SIZE=192KB`,每 subblock 一份)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | fp32 占用(B) | bf16 占用(B) |
+|---|---|---|---|---|---|---|
+| `scoresInTmp[2]` | 256 Dtype(得分行 DMA) | Dtype | 2(scores 轨道,ID0+curr) | `padNDtype` | 2048 | 1024 |
+| `scoresIn` | 256 float(V 私有 fp32) | float | 1 | `padN` | 1024 | 1024 |
+| `biasIn` | 256 float | float | 1 | `padN` | 1024 | 1024 |
+| `indicesIn` | 256 uint32 | uint32 | 1 | `padSortN` | 1024 | 1024 |
+| `tid2eidRow[2]` | 6 uint32(按 padK 槽位) | uint32 | 2(tid2eid 轨道,ID2+curr) | `padK` | 512 | 512 |
+| `inputIdsArr` | 256 uint32(hash 预取窗口) | uint32 | 1 | `ROUND_UP(HASH_INPUT_IDS_BATCH*4, VECTOR_MAX_BYTESIZE)` | 1024 | 1024 |
+| `calc` | 256 float | float | 1 | `padSortN` | 1024 | 1024 |
+| `calc_unbiased` | 256 float | float | 1 | `padN` | 1024 | 1024 |
+| `reduceTmp` | 64 float 槽位 | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 | 256 |
+| `sortTmp` | 512 float(排序工作区) | float | 1 | `2*padSortN` | 2048 | 2048 |
+| `sortMrgTmp` | 512 float(排序工作区) | float | 1 | `2*padSortN` | 2048 | 2048 |
+| `weightsTopK` | 64 float 槽位(topK=6 载荷) | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 | 256 |
+| `indicesTopK` | 64 uint32 槽位(topK=6 载荷) | uint32 | 1 | `VECTOR_MAX_BYTESIZE` | 256 | 256 |
+| `weightsSparse` | 256 float | float | 1 | `padN` | 1024 | 1024 |
+| `routingMap` | 8 uint32(位图,按 padN 定尺) | uint32 | 1 | `padN` | 1024 | 1024 |
+| `weightsOut[2]` | 256 Dtype(输出乒乓) | Dtype | 2(输出轨道,ID0+curr) | `padNDtype` | 2048 | 1024 |
+| `routingMapOut[2]` | 8 uint32(输出乒乓,按 padN 定尺) | uint32 | 2(输出轨道,ID0+curr) | `padN` | 2048 | 2048 |
+| **合计** | | | | | **19712** | **17664** |
+
+**占用汇总**(各表占用列之和 vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | fp32 路径占用 | 占比 | bf16 路径占用 | 占比 |
+|---|---|---|---|---|---|
+| UB(每 AIV subblock) | 192 KB | 19712 B | 10.0% | 17664 B | 9.0% |
+
+要点:
+
+- **fp32 路径占用反而高于 bf16**:`padNDtype` 定尺的 `scoresInTmp[2]`/`weightsOut[2]` 四个 Dtype 槽在 fp32 时各 1024 B、bf16 减半到 512 B,这是两条路径唯一的占用差异(其余槽位全为 fp32);
+- 排序工作区 `sortTmp`/`sortMrgTmp`(各 `2*padSortN`,合计 4096 B)与 `padN`/`padSortN` 定尺的行缓冲共占主体;hash 路径不排序但共用同一布局,`inputIdsArr` 预取窗口恒为 1024 B(与 numTokens 无关);
+- `numRoutedExperts >= 128` 时 `padSortN == padN`(N=256 即是);低于 128(GLM-4.7-Flash 的 64/96)时补齐宽度 `ROUND_UP(128,64)*4 = 512` 接管定尺;
+- 无 kernel 断言,host(`csrc/op.cpp` 的 `XliteOpSqrtsoftplusHashTopK`)只校验 dtype/BIT1;布局随 `numRoutedExperts` 线性缩放,测试最大 384 专家时 fp32 占用亦仅 28416 B(14.5%),容量风险不存在。

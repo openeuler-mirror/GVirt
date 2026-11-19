@@ -134,3 +134,76 @@ compress pass 与两个 spill 子函数均用 MTE2(载入)↔ V(计算)↔ MTE3(
 - 非分块 UB:8×(mergeSize×paddedHeadDim) + 4×paddedHeadDim 个 float(kv/score 乒乓 + calc + tmp + ape + mx/sm + kvOut 乒乓),`assert(off <= UB_SIZE)`(`csrc/kernels/compressor.h` 的 `compressor_blocks_weighted_sum`(关键字 `assert(off <= UB_SIZE)` 非分块));
 - 分块 UB:列切片 32 float,`assert` 验证 head_dim=512/ratio=128 约 128KB ≤ UB(`csrc/kernels/compressor.h` 的 `compressor_blocks_weighted_sum`(关键字 `assert(off <= UB_SIZE)` 分块));
 - state 行布局 `[kv | score]`:前 `coff*head_dim` float 为 kv、后 `coff*head_dim` float 为 score(含 ape),`stateRowFloats = 2*coff*head_dim`。
+
+### 片上缓冲分配与占用汇总(AIV UB)
+
+compressor 的全部片上缓冲都在 UB(纯 AIV,`KERNEL_TYPE_MIX_AIV_1_0`,无 L1/L0A/L0B/L0C 占用),分散在四段串行执行的代码里、各自从偏移 0 累加 `off` 排布并复用同一块 UB:compress pass 的非分块/分块两分支(`csrc/kernels/compressor.h` 的 `compressor_blocks_weighted_sum`)按 `useTiled` 二选一,其后 spill 溢写(`compressor_spill_prefill_to_state`)与 decode token 写 state(`compressor_decode_token_state`)依次执行,每段布局各自以 `assert(off <= UB_SIZE)` 把守,峰值取四段最大者而非求和(与上文「关键内存布局要点」的 assert 描述一致)。硬件容量基准(910B/dav C220,NpuArch 2201):UB 192KB(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`)。dtype 记法:Dtype 为 weightedSum/compressKv 元素类型(bf16/fp16 2B、float 4B;kv/score/state 恒 fp32),布局中仅 `kvOutUb` 两份槽位随 Dtype 变化,下表给两列。典型配置:head_dim=512、ratio=128、overlap=0(DSV4 compress 层),mergeSize=(1+overlap)*ratio=128、coff=1、分块列切片 slice=calcPad/2=32 float(head_dim=512 切 16 片);非分块代表配置取 ratio=4、overlap=1(mergeSize=8,测试矩阵中最重的非分块组合)。
+
+**compress pass,分块路径(ratio=128 时 useTiled 必为真;下表为典型 head_dim=512、ratio=128、overlap=0)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | bf16/fp16 占用(B) | float 占用(B) |
+|---|---|---|---|---|---|---|
+| `kvUb` | `(mergeSize, slice)` | float | 2(事件 ID0/1) | `mergeSize*slice*sizeof(float)` | 32768 | 32768 |
+| `scoreUb` | `(mergeSize, slice)` | float | 2(事件 ID0/1) | `mergeSize*slice*sizeof(float)` | 32768 | 32768 |
+| `kvCalcUb` | `(mergeSize, slice)` | float | 1 | `mergeSize*slice*sizeof(float)` | 16384 | 16384 |
+| `scoreCalcUb` | `(mergeSize, slice)` | float | 1 | `mergeSize*slice*sizeof(float)` | 16384 | 16384 |
+| `kvOutF32Ub` | `(slice,)` | float | 1 | `slice*sizeof(float)` | 128 | 128 |
+| `kvOutUb` | `(slice,)` | Dtype | 2(事件 ID2/3) | `slice*sizeof(Dtype)` | 128 | 256 |
+| `mxUb` | `(slice,)` | float | 1 | `slice*sizeof(float)` | 128 | 128 |
+| `smUb` | `(slice,)` | float | 1 | `slice*sizeof(float)` | 128 | 128 |
+| `tmpUb` | `(mergeSize, slice)` | float | 1 | `mergeSize*slice*sizeof(float)` | 16384 | 16384 |
+| `apeUb` | `(mergeSize, slice)` | float | 1 | `mergeSize*slice*sizeof(float)` | 16384 | 16384 |
+| **合计** | | | | | **131584** | **131712** |
+
+**compress pass,非分块路径(ratio=2/4;下表为 head_dim=512、ratio=4、overlap=1,mergeSize=8、paddedHeadDim=ROUND_UP(head_dim, 64)=512)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | bf16/fp16 占用(B) | float 占用(B) |
+|---|---|---|---|---|---|---|
+| `kvUb` | `(mergeSize, paddedHeadDim)` | float | 2(事件 ID0/1) | `mergeSize*paddedHeadDim*sizeof(float)` | 32768 | 32768 |
+| `scoreUb` | `(mergeSize, paddedHeadDim)` | float | 2(事件 ID0/1) | `mergeSize*paddedHeadDim*sizeof(float)` | 32768 | 32768 |
+| `kvOutUb` | `(paddedHeadDim,)` | Dtype | 2(事件 ID2/3) | `paddedHeadDim*sizeof(Dtype)` | 2048 | 4096 |
+| `kvCalcUb` | `(mergeSize, paddedHeadDim)` | float | 1 | `mergeSize*paddedHeadDim*sizeof(float)` | 16384 | 16384 |
+| `scoreCalcUb` | `(mergeSize, paddedHeadDim)` | float | 1 | `mergeSize*paddedHeadDim*sizeof(float)` | 16384 | 16384 |
+| `mxUb` | `(paddedHeadDim,)` | float | 1 | `paddedHeadDim*sizeof(float)` | 2048 | 2048 |
+| `smUb` | `(paddedHeadDim,)` | float | 1 | `paddedHeadDim*sizeof(float)` | 2048 | 2048 |
+| `tmpUb` | `(mergeSize, paddedHeadDim)` | float | 1 | `mergeSize*paddedHeadDim*sizeof(float)` | 16384 | 16384 |
+| `apeUb` | `(mergeSize, paddedHeadDim)` | float | 1 | `mergeSize*paddedHeadDim*sizeof(float)` | 16384 | 16384 |
+| **合计** | | | | | **137216** | **139264** |
+
+**spill:prefill 尾段溢写(`compressor_spill_prefill_to_state`;典型 head_dim=512、overlap=0,rowStride=ROUND_UP(coff*head_dim, 64)=512,SPILL_ROWS=4;全 float,与 Dtype 无关)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `kvUb` | `(SPILL_ROWS, rowStride)` | float | 2(事件 ID0/1) | `SPILL_ROWS*rowStride*sizeof(float)` | 16384 |
+| `scoreUb` | `(SPILL_ROWS, rowStride)` | float | 2(事件 ID0/1) | 同上 | 16384 |
+| `apeUb` | `(SPILL_ROWS, rowStride)` | float | 2(事件 ID0/1) | 同上 | 16384 |
+| `scoreOutUb` | `(SPILL_ROWS, rowStride)` | float | 2(事件 ID2/3) | 同上 | 16384 |
+| `calcUb` | `(SPILL_ROWS, rowStride)` | float | 1 | 同上 | 8192 |
+| **合计** | | | | | **73728** |
+
+**decode token 写 state(`compressor_decode_token_state`;典型 head_dim=512、overlap=0,full_dim=512;全 float,与 Dtype 无关)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `kvUb` | `(full_dim,)` | float | 2(事件 ID0/1) | `full_dim*sizeof(float)` | 4096 |
+| `scoreUb` | `(full_dim,)` | float | 2(事件 ID0/1) | 同上 | 4096 |
+| `apeUb` | `(full_dim,)` | float | 2(事件 ID0/1) | 同上 | 4096 |
+| `calcUb` | `(full_dim,)` | float | 2(事件 ID0/1) | 同上 | 4096 |
+| `outUb` | `(full_dim,)` | float | 2(事件 ID2/3) | 同上 | 4096 |
+| **合计** | | | | | **20480** |
+
+**占用汇总**(四段布局串行复用同一 UB,各行 = 对应表合计 vs 容量;峰值取最大一段,非求和):
+
+| 布局(阶段) | 硬件容量 | bf16/fp16 占用(B) | 占比 | float 占用(B) | 占比 |
+|---|---|---|---|---|---|
+| compress pass(分块,head_dim=512/ratio=128) | 192 KB | 131584 | 66.9% | 131712 | 67.0% |
+| compress pass(非分块,head_dim=512/ratio=4/overlap=1) | 192 KB | 137216 | 69.8% | 139264 | 70.8% |
+| spill 溢写(head_dim=512/overlap=0) | 192 KB | 73728 | 37.5% | 73728 | 37.5% |
+| decode token 写 state(head_dim=512/overlap=0) | 192 KB | 20480 | 10.4% | 20480 | 10.4% |
+
+要点:
+
+- **分块路径的约 128KB 断言即容量来源**:`compressor_blocks_weighted_sum` 分块分支末尾 `assert(off <= UB_SIZE)` 在典型 head_dim=512、ratio=128 下合计 131584 B(约 128.5KB ≤ 192KB),与上文「分块列切片 32 float、head_dim=512/ratio=128 时约 128KB ≤ 192KB」一致;host 的 `compCheck` 只做 shape/dtype 一致性校验,容量边界全部由 kernel 侧各段 `assert` 把守;
+- 8 个 `(mergeSize, slice)` 大缓冲(kv/score 乒乓 + kvCalc + scoreCalc + tmp + ape,共 131072 B)占分块布局的 99% 以上,是绝对大头;Dtype 仅影响 `kvOutUb` 两份槽位(bf16/fp16 共 128 B,float 共 256 B);
+- `useTiled` 判据 `(8*mergeSize + 4)*paddedHeadDim*sizeof(float) > UB_SIZE` 把 `kvOutUb` 按 float 上界估算(即上文「8×(mergeSize×paddedHeadDim) + 4×paddedHeadDim 个 float」),对 2B Dtype 偏保守;ratio=128 时 mergeSize=128,判据必然为真,必走分块;
+- 四段串行复用同一 UB,峰值取最大段——ratio=4/overlap=1 时 spill 反超 compress(rowStride=1024,合计 147456 B = 75%),是该配置下的峰值段;norm/RoPE 尾部(`norm.h`/`rope_complex_and_cache.h`)另有独立 UB 布局,容量见对应文档。

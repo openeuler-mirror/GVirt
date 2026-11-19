@@ -91,3 +91,42 @@ Python 接口(cache 形式):`rope_complex_and_cache(rt, n_local_heads, step_dim,
 
 - [tests/kernels/rope_complex.py](../../../tests/kernels/rope_complex.py):非 cache 路径(n_local_heads=64,inverse × interleaved × (rope_dim, q_dim) 组合),与 torch `view_as_complex` 复数乘对比;
 - [tests/kernels/rope_complex_and_cache.py](../../../tests/kernels/rope_complex_and_cache.py):cache 路径(CXA `[remain|rope]` head_dim 512/128 与 MLA rope-only 64,n_local_heads=1),校验 vCache 逐 slot 与参考一致。
+
+### 片上缓冲分配与占用汇总(AIV UB)
+
+[csrc/kernels/rope_complex_and_cache.h](../../../csrc/kernels/rope_complex_and_cache.h) 的 `rope_complex_and_cache` 在 kernel 主体内以 `off` 偏移累进方式运行期排布全部 UB 缓冲,每个槽位按 `VECTOR_MAX_BYTESIZE=256B` 向上对齐,容量由 `assert(off <= UB_SIZE)` 守护。本算子为纯向量核,仅使用 UB,硬件容量基准(910B/dav C220,NpuArch 2201):UB 192KB([csrc/kernels/kernel_macro.h](../../../csrc/kernels/kernel_macro.h) 的 `UB_SIZE`)。dtype 记法:`Dtype` 为 input 模板实参(fp16/bf16,均 2B),UB 布局与 dtype 无关,单占用列。典型配置取 MLA Q-RoPE 的容量上界形状:ropeDim=64、nLocalHeads=64(每 token rope 元素数 64×64=4096)、非 cache 纯计算路径、半分输出(outInterleaved=false)、doRotate=false;cache 路径(nLocalHeads 断言为 1)占用远低,见要点。
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+| --- | --- | --- | --- | --- | --- |
+| `input0`/`input1` | (nLocalHeads, ropeDim) = (64, 64)(非 cache 仅装 rope 区) | Dtype | 2(事件0/1) | `ROUND_UP(ropeDim*nLocalHeads*sizeof(Dtype),256B)` = 8192 B | 16384 |
+| `freqs0`/`freqs1` | ropeDim 个 float | float | 2(事件2/3) | `ROUND_UP(ropeDim*4,256B)` = 256 B | 512 |
+| `out0`/`out1` | (64, 64) | Dtype | 2(事件0/1) | 同 input | 16384 |
+| `vRemain` | (vdim−ropeDim)×nLocalHeads 个 Dtype(cache 模式) | Dtype | 1 | `ROUND_UP(totalVRemainBytes,256B)` | 0(非 cache 不分配) |
+| `inOutFP32` | ropeDim×nLocalHeads 个 float = 4096 | float | 1 | `ROUND_UP(ropeDim*nLocalHeads*4,256B)` = 16384 B | 16384 |
+| `x_even` | 同上 | float | 1 | 同上 | 16384 |
+| `x_odd` | 同上 | float | 1 | 同上 | 16384 |
+| `cos` | 同上 | float | 1 | 同上 | 16384 |
+| `sin` | 同上 | float | 1 | 同上 | 16384 |
+| `x_even_cos` | 同上 | float | 1 | 同上 | 16384 |
+| `x_odd_sin` | 同上 | float | 1 | 同上 | 16384 |
+| `x_even_sin` | 同上 | float | 1 | 同上 | 16384 |
+| `x_odd_cos` | 同上 | float | 1 | 同上 | 16384 |
+| `positionUB` | 256 个 uint64 | uint64 | 1 | `ROUND_UP(256*8,256B)` = 2048 B | 2048 |
+| `slotMappingUB` | 256 个 uint32(cache 模式) | uint32 | 1 | `ROUND_UP(256*4,256B)` = 1024 B | 0(非 cache 不分配) |
+| 交错暂存 `interleavedFP32`(仅 outInterleaved) | ropeDim×nLocalHeads 个 float | float | - | 别名 `x_odd_cos`(rope 数学死区,转换点前已死) | 0(不额外占 UB) |
+| `vgatherIndicesUB`(仅 outInterleaved) | flatGather 时 ropeDim×nLocalHeads、否则 ropeDim 个 uint32 | uint32 | 1 | `ROUND_UP(ropeDim*nLocalHeads*4,256B)`(flatGather)/`ROUND_UP(ropeDim*4,256B)`(逐头) | 0 |
+| `rotateFP32`(仅 doRotate && fullHeadLoad) | vdim×nLocalHeads 个 float | float | 1 | `ROUND_UP(totalHeadFPBytes,256B)` | 0 |
+| **合计** | | | | | **182784** |
+
+**占用汇总**(vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | 占用 | 占比 |
+| --- | --- | --- | --- |
+| UB(每 AIV) | 192 KB | 182784 B | 93.0% |
+
+要点:
+
+- **容量上界由非 cache 的 Q-RoPE 路径决定**:9 个 fp32 工作槽(`inOutFP32`、`x_even`/`x_odd`、`cos`/`sin`、四组乘积)合计 147456 B,占总占用的 80.7%,是绝对大头——复数旋转全程在 fp32 域展开的代价;
+- **上界来源**:ropeDim=64、nLocalHeads=64(每 token 4096 个 rope 元素)时总占用 182784 B(178.5 KiB),正是 [csrc/kernels/kernel_param.h](../../../csrc/kernels/kernel_param.h) 的 `ROPE_COMPLEX_MAX_ELEMENTS_PER_TOKEN=4096`(注释「Conservative BF16 Q RoPE budget for 192 KiB UB (178.5 KiB at ropeDim=64)」)的出处;host 侧把多头 Q 按 `headsPerTile = MAX(1, ROPE_COMPLEX_MAX_ELEMENTS_PER_TOKEN/ropeHeadDim)` 切成不超过上界的 tile([csrc/model.cpp](../../../csrc/model.cpp) 的 `XModel::ForwardAttnMLAV2DsaCp`,关键字 `ROPE_COMPLEX_MAX_ELEMENTS_PER_TOKEN / _c.ropeHeadDim`),保证每 token rope 元素数 ≤ 4096;
+- cache 路径占用远低于上界(nLocalHeads 断言为 1):CXA kv 写(vdim=512、ropeDim=128、outInterleaved=true)14080 B,MLA rope-only pe cache(vdim=ropeDim=64)6912 B;`outInterleaved` 输出的交错暂存别名到 rope 数学死区 `x_odd_cos`、不额外占 UB,额外仅 `vgatherIndicesUB` 一槽——`flatGather`(`ropeDim` 与 256B 行对齐且表装得进剩余 UB)时为 `ropeDim×nLocalHeads` 扁平表(上界配置 64×64 达 16KB、装不下即回退),否则为 `ropeDim` 项相对偏移表(上界配置 256 B);`doRotate && fullHeadLoad` 再加整 head 的 fp32 暂存;
+- 容量守护仅 kernel 断言 `assert(off <= UB_SIZE)`(debug 构建生效),host 无等价校验,上界依赖上述切头约束。

@@ -83,3 +83,37 @@ per-token scale 不占 UB:S 管线直接从 GM 标量地址读(`*(scale_gm + row
 - `pnum_tokens` 非空时 clamp m(`csrc/kernels/msd_merge_dequant.h` 的 `msd_merge_dequant`,关键字 `pnum_tokens_val`),host 当前传 null;
 - n 非 128 整数倍时 `n_pad` 补齐计算,搬运按真实 `n * sizeof(half/float/bfloat16)` 字节;
 - host 侧行数为奇数直接抛错(`csrc/op.cpp` 的 `XliteOpMSDMergeDequant`,关键字 `yMerged.shape[0] % 2`);Python 绑定固定 `start=0, end=numExperts`(`csrc/_C.cpp` 的 `MSDMergeDequant`,关键字 `0, numExperts`),EP 分片范围由模型侧 `XliteOpMSDMergeDequant` 直接调用时传入([csrc/model.cpp](../../../csrc/model.cpp) 的 `XModel::ForwardMoEMSD`,关键字 `XliteOpMSDMergeDequant`)。
+
+### 片上缓冲分配与占用汇总（AIV UB）
+
+`msd_merge_dequant`（`csrc/kernels/msd_merge_dequant.h` 的 `msd_merge_dequant`）为纯向量算子（`__DAV_C220_VEC__`，AIV 独立 kernel），全部片上缓冲在 UB 上以 `__ubuf__` 指针从偏移 0 顺序累进排布，`counts_buf` 起点额外向 32B 对齐；不使用 L1/L0（AIC 级不涉及）。UB 容量基准（`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`）：192KB（4KB×48 bank），每 AIV block 一份。dtype 固定：输入 half、计算 float、输出 bfloat16_t（实例 `msd_merge_dequant_int8_t`）。
+
+典型配置取 `tests/kernels/msd_dequant.py` 的多专家用例 m=8192、n=4096（kN，MoE 中间维）、本地专家数 numExperts=E=3（`n_pad = ROUND_UP(n, VECTOR_MAX_NUM_OF_FP16=128) = 4096`）；单专家最大用例 `[8192, 6144]` 同一布局。占用随 n 线性、与 m/E 几乎无关（E 只影响 32B 级 counts 槽位）。
+
+**AIV UB（每 block 一份，容量 192KB）**
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
+|---|---|---|---|---|---|
+| `low0`/`low1` | `(n_pad,)`=4096 | half | 2（事件0/1） | `n_pad*sizeof(half)` | 16384 |
+| `high0`/`high1` | `(n_pad,)`=4096 | half | 2（事件0/1） | `n_pad*sizeof(half)` | 16384 |
+| `low_fp32_buf` | `(n_pad,)` | float | 1 | `n_pad*sizeof(float)` | 16384 |
+| `merged_fp32` | `(n_pad,)` | float | 1 | `n_pad*sizeof(float)` | 16384 |
+| `bias_buf` | `(n_pad,)` | float | 1（事件2） | `n_pad*sizeof(float)` | 16384 |
+| `out0`/`out1` | `(n_pad,)` | bfloat16_t | 2（事件0/1） | `n_pad*sizeof(bfloat16_t)` | 16384 |
+| `counts_buf` | `(numExperts,)`，32B 对齐槽位 | uint32 | 1 | `ROUND_UP(numExperts*4, 32)` | 32 |
+| **合计** | | | | | **98336** |
+
+per-token scale 不占 UB：S 管线直接从 GM 标量地址读（`tokenScale`）；`low_fp32_buf` 与 `merged_fp32` 相邻是一次 vconv 填两段的前提，布局上成对、不额外占位。
+
+**占用汇总**（各表占用列之和 vs 硬件容量；字节数）：
+
+| 存储级 | 硬件容量 | 占用 | 占比 |
+|---|---|---|---|
+| UB（每 AIV block） | 192 KB | 98336 B | 50.0% |
+
+要点：
+
+- **行布局 24B/元素是 n 上限的容量来源**：4×fp16（low/high 乒乓）+3×fp32（low_fp32/merged/bias）+2×bf16（out 乒乓）共 24B/元素，加 counts 槽位须 ≤192KB——n_pad ≤ 约 8.1K，128 对齐后实际 n ≤ 8064 才安全（n_pad 进位到 8192 时 24×8192=192KB 已容不下 counts 区）；测试注释的「n < ~12288」未随当前布局更新，单专家最大用例 n=6144 对应 147488 B（75.1%）仍在界内；
+- fp32 三缓冲（`low_fp32_buf`/`merged_fp32`/`bias_buf`，共 12B/元素、占 50%）是占用大头，fp16/bf16 输入输出各占 4B/元素；
+- **无显式容量断言、host 侧不校验 n 上限**（`csrc/op.cpp` 的 `XliteOpMSDMergeDequant` 只查 dtype/shape 偶数）：超限直接越界写，当前靠模型侧 kN 尺寸（n ≤ 6144 量级）保证；
+- `bias_buf` 单缓冲每行重载（EVENT_ID2 独立握手）与 `counts_buf`（≤32B，本地专家数 ≤8）均不随 m/E 增长，不影响量级。

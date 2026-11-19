@@ -81,3 +81,33 @@ dtype 分派见 `csrc/op.cpp` 的 `XliteOpTopK`(dtype 分派分支,要求 indice
 ### 流水线同步
 
 MTE2 搬入与 V 计算用计数事件 ID0(数据)/ID1(得分搬入的上一轮释放)配对;`PipeBarrier<PIPE_ALL>` 在工作项切换时确保 UB 状态干净(`XliteTopK::Run` 内 `pipe_barrier(PIPE_ALL)`)。S 管线在循环前读 `queryLensIn`/`cachedLensIn`(`XliteTopK::Run` 内 MTE2→S 的 `set_flag`/`wait_flag` 配对)。
+
+### 片上缓冲分配与占用汇总(AIV UB)
+
+`Init`(`csrc/kernels/topk.h` 的 `XliteTopK::Init`)自偏移 0 起在 UB 上顺序累进排布全部槽位,一律按 fp32 字节数定尺(`pad = ROUND_UP(topK, VECTOR_MAX_NUM_OF_FP32)*4`),bf16 路径在 `scratch` 之后追加 `scoresInTmp`;排序、归并与候选集全程 fp32,GM 得分按 CHUNK_SIZE=2048 分块流式搬入,行长不参与定尺。硬件容量基准(910B/dav C220,NpuArch 2201):UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每个 AIV subblock 各持一份独立 UB、布局相同。dtype 记法:`Dtype` 为 scores 元素类型(fp32/bf16),bf16 经 `scoresInTmp` 中转后 `vconv_bf162f32` 进 `scoresIn`。典型配置:topK=2048(算子唯一支持值)、numBatches=8(测试最大 batch;`queryLensIn`/`cachedLensIn` 是仅有的随 numBatches 缩放的槽位)、maxSeqLen=131072(不影响布局)。两条 dtype 路径同取该配置,占用差异仅来自 bf16 中转槽。
+
+**AIV UB(预算 `UB_SIZE=192KB`,每 subblock 一份)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | fp32 占用(B) | bf16 占用(B) |
+|---|---|---|---|---|---|---|
+| `scoresIn` | 2048 float(一个 chunk 的得分) | float | 1 | `pad` | 8192 | 8192 |
+| `indicesIn` | 2048 uint32(一个 chunk 的恒等索引) | uint32 | 1 | `pad` | 8192 | 8192 |
+| `indices` | 2048 uint32(预留) | uint32 | 1 | `pad` | 8192 | 8192 |
+| `topkBuf[2]` | 8192 float 槽位(2048 值+索引交错对) | float | 2(chunk 乒乓,current 翻转) | `4*pad` | 65536 | 65536 |
+| `scratch[2]` | 4096 float(2048 值+索引交错对) | float | 2(chunk 乒乓,current 翻转) | `2*pad` | 32768 | 32768 |
+| `scoresInTmp` | 2048 Dtype(仅 bf16) | Dtype | 1 | `pad/2` | — | 4096 |
+| `queryLensIn` | 8 uint32 | uint32 | 1 | `ROUND_UP(numBatches*4, UB_BUF_ALIGN_SIZE)` | 32 | 32 |
+| `cachedLensIn` | 8 uint32 | uint32 | 1 | `ROUND_UP(numBatches*4, UB_BUF_ALIGN_SIZE)` | 32 | 32 |
+| **合计** | | | | | **122944** | **127040** |
+
+**占用汇总**(各表占用列之和 vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | fp32 路径占用 | 占比 | bf16 路径占用 | 占比 |
+|---|---|---|---|---|---|
+| UB(每 AIV subblock) | 192 KB | 122944 B | 62.5% | 127040 B | 64.6% |
+
+要点:
+
+- **`topkBuf` 与 `scratch` 是占用大头**:fp32 路径合计 98304 B(占该路径总占用的 80%)——`topkBuf` 槽位取 `4*pad`(逻辑上 2048 值+索引对只需 `2*pad`,槽位留有 2 倍冗余),`scratch` 恰为 vbitsort/vmrgsort4 值+索引交错输出的宽度;
+- 布局由固定 topK=2048 静态定尺,`maxSeqLen` 与行长完全不参与(2048 分块流式),唯一随配置缩放的槽位 `queryLensIn`/`cachedLensIn` 每 batch 仅 4B;
+- 容量来源是 host 侧硬校验而非 kernel 断言:`csrc/op.cpp` 的 `XliteOpTopK` 对 `k != 2048` 直接抛错,UB 占用被钉在 62.5%–64.6%,无越界风险。

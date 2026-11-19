@@ -100,3 +100,117 @@ topkIndices 形状 `[total_tokens, topK]`,按 `topkIndices + topK * queryTaskOff
 - online softmax update:`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxUpdate`
 - RingSync:`csrc/kernels/ring_sync.h`
 - host launch:`csrc/op.cpp` 的 `XliteOpFlashMLAV2`、workspace `csrc/_C.cpp` 的 `MLAV2`(`enableFlashAttention=true` 分支)、路由 `csrc/model.cpp` 的 `ForwardAttnMLAV2`(flash 路由分支)
+
+### 片上缓冲分配与占用汇总(AIC L1/L0A/L0B/L0C、AIV UB)
+
+AIC 侧与 mla_v2 完全共用 `MlaAicHelper` 的 12 个 L1/L0 缓冲(`csrc/kernels/mla_aic_helper.h` 的 `MlaAicHelper::Init`,flash 的 `Init` 传入同一组几何参数,仅 qkStride 换成 tileSizeOfCachedKV,不影响布局):QK 组与 SV 组各自在 L1(`TPosition::A1`)/L0A(`A2`)/L0B(`B2`)/L0C(`CO1`)上从偏移 0 累进 `bufferAddr`,L0 三级物理独立;**QK 组与 SV 组复用同一物理空间**,两相位在核内经 set/wait_flag 严格串行(KV tile 上先 `RunAicQK` 后 `RunAicSV`),各存储级物理占用按两相位取 max;`Init` 用 `zeroGm` 把两份 `aktl1bBuf` 预填零。AIV 侧 UB 由 softmax 函数在每次调用入口自偏移 0 现场排布,tile softmax(`RunAivSoftmaxPingPong`,saveMaxSum=true)与 online update(`RunAivSoftmaxUpdate`)两个布局串行复用同一 UB,占用取 max。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L1 512KB、L0A 64KB、L0B 64KB,L0C 总容量 256KB 为 CO1/CO2 两区之和,mmad 累加(`TPosition::CO1`)可用的 CO1 区为 **128KB**,下文 L0C 占用均按 CO1 128KB 计;AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每个 AIV subblock 各持一份独立 UB、布局相同。
+
+dtype 记法:flash_mla_v2 仅 BF16 单路径(`csrc/kernels/flash_mla_v2_bfloat16_t.cpp`),`Dtype=bfloat16_t`(2B);几何常量(`MlaAicHelper::Init`)为 `qkk0=256/sizeof(Dtype)=128`、`qkn0=dense?MAX_N0:blockSize`、`svn0=256`、`svk0=64`。典型配置:kvLoraRank=512、ropeHeadDim=64、blockSize=128(AIC 缓冲大小只依赖 `XLITE_MAX_M0`/kvLoraRank/ropeHeadDim,与 nHeads 无关);AIV 侧按 tileSizeOfCachedKV=8192(Python 接口默认值,亦为 host 上限内常用档)与 DSA topK=2048 代入,update 的 headSize=kvLoraRank=512;下表 shape 为逻辑形状(L1/L0 内实际按 Nd2Nz/NZ 分形排布)。
+
+**AIC L1(A1,容量 512KB;QK/SV 两相位自偏移 0 复用)**
+
+| 变量 | 相位 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|---|
+| `aqnl1aBuf` | QK | `(XLITE_MAX_M0, kvLoraRank)`=(128,512) | Dtype | 1(事件0) | `XLITE_MAX_M0*kvLoraRank*sizeof(Dtype)` | 131072 |
+| `aqrl1aBuf` | QK | `(XLITE_MAX_M0, ropeHeadDim)`=(128,64) | Dtype | 1(事件0) | `XLITE_MAX_M0*ropeHeadDim*sizeof(Dtype)` | 16384 |
+| `akl1bBuf` | QK | `(qkn0, 4*qkk0)`=(128,512) | Dtype | 2(事件4/5) | `qkn0*4*qkk0*sizeof(Dtype)` | 262144 |
+| `akrl1bBuf` | QK | `(qkn0, ropeHeadDim)`=(128,64) | Dtype | 2(事件2/3) | `qkn0*ropeHeadDim*sizeof(Dtype)` | 32768 |
+| **QK 相位小计** | | | | | | **442368** |
+| `aqkl1aBuf` | SV | `(XLITE_MAX_M0, 4*svk0)`=(128,256) | Dtype | 2(事件0/1) | `XLITE_MAX_M0*4*svk0*sizeof(Dtype)` | 131072 |
+| `aktl1bBuf` | SV | `(svn0, 2*svk0)`=(256,128) | Dtype | 2(事件4/5) | `svn0*2*svk0*sizeof(Dtype)` | 131072 |
+| **SV 相位小计** | | | | | | **262144** |
+| **合计(峰值 = max(两相位))** | | | | | | **442368** |
+
+**AIC L0A(A2,容量 64KB;两相位复用)**
+
+| 变量 | 相位 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|---|
+| `qkl0aBuf` | QK | `(XLITE_MAX_M0, qkk0)`=(128,128) | Dtype | 2(事件0/1) | `XLITE_MAX_M0*qkk0*sizeof(Dtype)` | 65536 |
+| **QK 相位小计** | | | | | | **65536** |
+| `svl0aBuf` | SV | `(XLITE_MAX_M0, svk0)`=(128,64) | Dtype | 2(事件0/1) | `XLITE_MAX_M0*svk0*sizeof(Dtype)` | 32768 |
+| **SV 相位小计** | | | | | | **32768** |
+| **合计(峰值 = max(两相位))** | | | | | | **65536** |
+
+**AIC L0B(B2,容量 64KB;两相位复用)**
+
+| 变量 | 相位 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|---|
+| `qkl0bBuf` | QK | `(MAX_N0, qkk0)`=(128,128) | Dtype | 2(事件0/1) | `MAX_N0*qkk0*sizeof(Dtype)` | 65536 |
+| **QK 相位小计** | | | | | | **65536** |
+| `svl0bBuf` | SV | `(svn0, svk0)`=(256,64) | Dtype | 2(事件0/1) | `svn0*svk0*sizeof(Dtype)` | 32768 |
+| **SV 相位小计** | | | | | | **32768** |
+| **合计(峰值 = max(两相位))** | | | | | | **65536** |
+
+**AIC L0C(CO1 区,容量 128KB,总容量 256KB 含 CO2;两相位复用)**
+
+| 变量 | 相位 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|---|
+| `qkl0cBuf` | QK | `(XLITE_MAX_M0, MAX_N0)`=(128,128) | float | 2(事件0/1) | `XLITE_MAX_M0*MAX_N0*sizeof(float)` | 131072 |
+| **QK 相位小计** | | | | | | **131072** |
+| `svl0cBuf` | SV | `(XLITE_MAX_M0, svn0)`=(128,256) | float | 1(事件0) | `XLITE_MAX_M0*svn0*sizeof(float)` | 131072 |
+| **SV 相位小计** | | | | | | **131072** |
+| **合计(峰值 = max(两相位))** | | | | | | **131072** |
+
+**AIV UB——tile softmax(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`;按 len=MAX(outN, topK)=8192、topK=2048 代入,预算 192KB)**
+
+flash 的 max/sum workspace 非空(saveMaxSum=true),`maxOut`/`sumOut` 各 2 份乒乓槽;swaSegWidth=0、attnSink 为空,相应槽位为 0;topK=0(未启用 DSA)时下表 topK 相关 9 行不分配,布局降为 115712 B。
+
+| 变量 | shape(每份) | dtype | 份数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `in1`/`in2` | `(len,)`=(8192,) | Dtype | 2(事件2/3) | `ROUND_UP(len*sizeof(Dtype),256)` | 32768 |
+| `out1`/`out2` | `(len,)` | Dtype | 2(事件2/3) | `ROUND_UP(len*sizeof(Dtype),256)` | 32768 |
+| `cal` | `(len,)` | float | 1 | `ROUND_UP(len*sizeof(float),256)` | 32768 |
+| `temp` | len/2 归约暂存 | float | 1 | `(DIV_ROUND_UP(len*sizeof(float),256)/2)*256` | 16384 |
+| `maxOut0`/`maxOut1` | 1 个 256B 槽 | float | 2(事件2/3) | `VECTOR_MAX_BYTESIZE` | 512 |
+| `sumOut0`/`sumOut1` | 1 个 256B 槽 | float | 2(事件2/3) | `VECTOR_MAX_BYTESIZE` | 512 |
+| `indices0`/`indices1` | `(topK,)`=(2048,) | int32 | 2(事件0/1) | `ROUND_UP(topK*sizeof(int32_t),256)` | 16384 |
+| `inTopK` | `(topK,)` | Dtype | 1 | `ROUND_UP(topK*sizeof(Dtype),256)` | 4096 |
+| `indicesFp32` | `(topK,)` | float | 1 | `ROUND_UP(topK*sizeof(float),256)` | 8192 |
+| `cmp0` | 2 个 256B repeat | int32 | 1 | `VECTOR_MAX_BYTESIZE*2` | 512 |
+| `cmp1` | 1 个 256B repeat | int32 | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
+| `cmpFp320` | 1 个 256B repeat | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
+| `cmpFp321` | 1 个 256B repeat | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
+| `topkMask0`/`topkMask1` | `(topK/8,)`=(256,) | uint8 | 2 | `ROUND_UP(topK/8,256)` | 512 |
+| `currIndices` | `(topK,)` | int32 | 1 | `ROUND_UP(topK*sizeof(int32_t),256)` | 8192 |
+| **合计** | | | | | **154368** |
+
+**AIV UB——online softmax update(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxUpdate`;headSize=kvLoraRank=512)**
+
+| 变量 | shape(每份) | dtype | 份数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `svPrevUb` | `(headSize,)`=(512,) | Dtype | 2(事件0/1) | `ROUND_UP(headSize*sizeof(Dtype),256)` | 2048 |
+| `svCurrUb` | `(headSize,)` | Dtype | 2(事件0/1) | `ROUND_UP(headSize*sizeof(Dtype),256)` | 2048 |
+| `svOutUb` | `(headSize,)` | Dtype | 2(事件2/3) | `ROUND_UP(headSize*sizeof(Dtype),256)` | 2048 |
+| `maxPrevUb` | 1 个 256B 槽 | float | 2(事件0/1) | `VECTOR_MAX_BYTESIZE` | 512 |
+| `sumPrevUb` | 1 个 256B 槽 | float | 2(事件0/1) | `VECTOR_MAX_BYTESIZE` | 512 |
+| `maxCurrUb` | 1 个 256B 槽 | float | 2(事件0/1) | `VECTOR_MAX_BYTESIZE` | 512 |
+| `sumCurrUb` | 1 个 256B 槽 | float | 2(事件0/1) | `VECTOR_MAX_BYTESIZE` | 512 |
+| `newSumOutUb` | 1 个 256B 槽 | float | 2(事件2/3) | `VECTOR_MAX_BYTESIZE` | 512 |
+| `newMaxOutUb` | 1 个 256B 槽 | float | 2(事件2/3) | `VECTOR_MAX_BYTESIZE` | 512 |
+| `scalePrevUb` | 1 个 256B 槽 | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
+| `scaleCurrUb` | 1 个 256B 槽 | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
+| `tempUb` | 1 个 256B 槽 | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
+| `newSumUb` | 1 个 256B 槽 | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
+| `newMaxUb` | 1 个 256B 槽 | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
+| `sumPrevCalUb` | 1 个 256B 槽 | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
+| `sumCurrCalUb` | 1 个 256B 槽 | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
+| `svPrevFloatUb` | `(headSize,)` | float | 1 | `ROUND_UP(headSize*sizeof(float),256)` | 2048 |
+| `svCurrFloatUb` | `(headSize,)` | float | 1 | `ROUND_UP(headSize*sizeof(float),256)` | 2048 |
+| `svOutFloatUb` | `(headSize,)` | float | 1 | `ROUND_UP(headSize*sizeof(float),256)` | 2048 |
+| **合计** | | | | | **17152** |
+
+**占用汇总**(各存储级按两相位/两布局取峰值 vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | 占用(B) | 占比 |
+|---|---|---|---|
+| L1 | 512 KB | 442368 | 84.4% |
+| L0A | 64 KB | 65536 | 100% |
+| L0B | 64 KB | 65536 | 100% |
+| L0C(CO1) | 128 KB | 131072 | 100% |
+| UB(每 AIV subblock,峰值取 tile softmax 布局) | 192 KB | 154368 | 78.5% |
+
+要点:
+
+- **L0 三级峰值全部顶满(100%)**:BF16 下 `qkk0=128`、`XLITE_MAX_M0=MAX_N0=128` 使 QK 相位 L0A/L0B 各恰 64KB、两相位 L0C(CO1)各恰 128KB——M/N/K 任一维度增大都会先撞 L0;host 侧 `nHeads <= XLITE_MAX_M0` 校验(`csrc/op.cpp` 的 `XliteOpFlashMLAV2`,关键字 `nHeads > XLITE_MAX_M0`)保证单 token 全部头落进一个 M0 tile;
+- AIV UB 峰值在 tile softmax 布局(154368 B,78.5%),大头是随 len 缩放的 in/out/cal/temp 四类(合计 114688 B);online update 布局仅 17152 B,与 tile softmax 串行复用同一 UB,不叠加;
+- 容量来源是 host 校验 `tileSizeOfCachedKV <= MAX_SOFTMAX_PINGPONG_LEN=10496` 与 `topK <= MAX_TOPK_NUM=2048`(`csrc/op.cpp` 的 `XliteOpFlashMLAV2`)。按该上限组合(len=10496、topK=2048)代入 tile softmax 布局为 186624 B ≤ `UB_SIZE`(余 9984 B;旧上限 11776 的同组合实占 204544 B 越界,旧 static_assert 公式漏计 `indicesFp32` 槽位 8192 B 而误判通过——已随上限收紧到 10496 并补全断言公式一并修复);典型 tileSizeOfCachedKV=8192 时余量 42240 B。

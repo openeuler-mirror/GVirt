@@ -62,6 +62,37 @@ host 校验 `xResid`/`yOut` 为 BF16、`pre` 为 FP32(`csrc/op.cpp` 的 `XliteOp
 
 `EVENT_ID0/1+curr` 管理 pre+残差载入与 V 计算的交接(`csrc/kernels/hc_pre.h` 的 `hc_pre`,关键字 `wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr)` 与 `set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr)`),`EVENT_ID2/3+curr` 管理 y 的 bf16 转换与写出(`csrc/kernels/hc_pre.h` 的 `hc_pre`,关键字 `convert_output(outDtypeArr[curr], yCalc` 与 `CopyUbufToGmAligned(yRow`),`EVENT_ID4` 做 V→S 事件往返让标量核安全读取 `preCalc`(`csrc/kernels/hc_pre.h` 的 `hc_pre`,关键字 `set_flag(PIPE_V, PIPE_S, EVENT_ID4)`/`wait_flag(PIPE_V, PIPE_S, EVENT_ID4)`)。收尾 wait 与启动 set 一一对应(`csrc/kernels/hc_pre.h` 的 `hc_pre`,关键字 `wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID3)` 收尾段)。每轮 `curr = 1 - curr` 翻转缓冲。
 
+### 片上缓冲分配与占用汇总(AIV UB)
+
+`hc_pre` 为单 AIV 向量核 kernel,片上缓冲全部在 UB 上:`csrc/kernels/hc_pre.h` 的 `hc_pre`(关键字 `inDtype0` 起的 UB 分配段)自偏移 0 顺序累进排布,IO 槽按 `UB_BUF_ALIGN_SIZE`(32B)、标量 pre 槽按 `VECTOR_MAX_BYTESIZE`(256B)向上取整,末尾 `assert(off <= UB_SIZE)` 防溢出。硬件容量基准(910B/dav C220,NpuArch 2201):UB 取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每个 AIV block 各持一份独立 UB、布局相同。
+
+dtype 记法(模板实参 `Dtype`,仅影响 `xResid`/`yOut`):唯一实例化 `hc_pre_bfloat16_t`(`csrc/kernels/hc_pre_bfloat16_t.cpp`)固定 2B,门控 `pre` 恒为 FP32,故单占用列。典型模型配置取 DeepSeek-V4(`csrc/model.cpp` 的 `XModel::ForwardHcPre` 调用 `_c.hcMult`/`_c.hiddenSize`):hcMult K=4、hidden=4096(dim)、残差/输出 BF16、门控 FP32。
+
+**AIV UB(容量 192KB,每 block 一份)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `inDtype0/1` | `(K, hidden)` = (4, 4096) 残差 | Dtype(bf16) | 2(事件 EVENT_ID0/1,MTE2 载入与 V 计算交接) | `ROUND_UP(K*hidden*sizeof(Dtype),32)` = 32768 B | 65536 |
+| `outDtype0/1` | `(hidden,)` = (4096,) y 行 | Dtype(bf16) | 2(事件 EVENT_ID2/3,V 转换与 MTE3 写出交接) | `ROUND_UP(hidden*sizeof(Dtype),32)` = 8192 B | 16384 |
+| `preStage0/1` | K 个 float(pre 门载入) | float | 2(随 EVENT_ID0/1 载入组) | `ROUND_UP(K*sizeof(float),256)` = 256 B | 512 |
+| `preCalc` | K 个 float(ub2ub 中转,标量核读取) | float | 1 | `ROUND_UP(K*sizeof(float),256)` = 256 B | 256 |
+| `xFp32` | `(K, hidden)` 残差 fp32 副本 | float | 1 | `ROUND_UP(K*hidden*sizeof(float),32)` = 65536 B | 65536 |
+| `yCalc` | `(hidden,)` fp32 累加器 | float | 1 | `ROUND_UP(hidden*sizeof(float),32)` = 16384 B | 16384 |
+| **合计** | | | | | **164608** |
+
+**占用汇总**(各表占用列之和 vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | 占用(B) | 占比 |
+|---|---|---|---|
+| UB(每 AIV block) | 192 KB | 164608 | 83.7% |
+
+要点:
+
+- UB 是唯一使用的片上存储级,典型配置下占 83.7%(余量 32000 B),是本算子的实际上限来源;K=4、BF16 下总占用 ≈ `40*hidden + 768`(B),`assert(off <= UB_SIZE)` 把 hidden 卡在约 4896 以内——host 侧无对应校验,靠模型配置(hidden=4096)保证;
+- `xFp32`(65536 B)与 `inDtype0/1` 双缓冲(合计 65536 B)并列大头,各占 UB 占用的近 40%,合计近八成——都是 `[K, hidden]` 整块残差的 fp32/bf16 形态,单 token 全流程不切块是占用高的原因;
+- `preStage`/`preCalc` 的 K=16B 数据各按 `VECTOR_MAX_BYTESIZE` 取整占 256B 槽,合计仅 768 B,是标量核 ub2ub 中转的小代价;
+- 容量来源是 kernel 内的 `assert(off <= UB_SIZE)`(`csrc/kernels/hc_pre.h` 的 `hc_pre`);`hidden` 是唯一显著影响占用的运行期参数(本算子对 K 无显式断言,DeepSeek-V4 固定 K=4)。
+
 ## 关键代码位置
 
 - 模板入口:`csrc/kernels/hc_pre.h` 的 `hc_pre` 模板函数

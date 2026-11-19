@@ -57,3 +57,32 @@ add_bias 每行复用同一 bias 向量，因此 bias 只搬运/转换一次；�
 
 - bias 拷贝长度与 x 行拷贝长度均向上取整到 32B；尾部 padding 只存在于 UB；
 - 输出路径按是否 32B 对齐选择 `DataCopy` 或 `DataCopyPad`，避免非对齐 yNumel 时写越界。
+
+### 片上缓冲分配与占用汇总（AIV UB）
+
+`KernelAddBias::Init`（`csrc/kernels/add_bias.h` 的 `KernelAddBias::Init`）经 Ascend C 的 `TPipe::InitBuffer` 统一分配全部 UB：输入队列 `queInX` 与输出队列 `queOutZ` 各双缓冲（BUFFER_NUM=2），bias 常驻的 `yBuf` 与非 float 路径的三个 fp32 辅助缓冲 `yFp32Buf`/`xFp32Buf`/`zFp32Buf` 单份（VECCALC 位置），框架按 `yNumel*sizeof(T)` 申请每个槽位。硬件容量基准（910B/dav C220，NpuArch 2201）：UB 192KB（`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`）；无 L1/L0A/L0B/L0C 占用。dtype 记法：T 为 x/y/z 元素类型，实例化 fp16/bf16（2B）与 float（4B）两档——非 float 路径多出三份 fp32 辅助缓冲，占用差异由此而来，下表给两列。典型配置：测试基准每行 yNumel=HIDDEN_SIZE=7168（`tests/kernels/add_bias.py`，每次处理元素数 7168），单行整体处理、行内不分块。
+
+**AIV UB（容量 192KB）**
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | fp16/bf16 占用（B） | float 占用（B） |
+|---|---|---|---|---|---|---|
+| `queInX` | `yNumel` 个 T | T | 2（队列双缓冲 BUFFER_NUM=2） | `yNumel*sizeof(T)` | 28672 | 57344 |
+| `queOutZ` | `yNumel` 个 T | T | 2（队列双缓冲） | `yNumel*sizeof(T)` | 28672 | 57344 |
+| `yBuf` | `yNumel` 个 T | T | 1（bias 常驻） | `yNumel*sizeof(T)` | 14336 | 28672 |
+| `yFp32Buf` | `yNumel` 个 float | float | 1（bias 升精度常驻） | `yNumel*sizeof(float)` | 28672 | — |
+| `xFp32Buf` | `yNumel` 个 float | float | 1 | `yNumel*sizeof(float)` | 28672 | — |
+| `zFp32Buf` | `yNumel` 个 float | float | 1 | `yNumel*sizeof(float)` | 28672 | — |
+| **合计** | | | | | **157696** | **143360** |
+
+**占用汇总**（vs 硬件容量）：
+
+| 存储级 | 硬件容量 | fp16/bf16 占用 | 占比 | float 占用 | 占比 |
+|---|---|---|---|---|---|
+| UB | 192 KB | 157696 B | 80.2% | 143360 B | 72.9% |
+
+要点：
+
+- **半精度路径反而更耗 UB**：fp16/bf16 多出的三份 fp32 辅助缓冲（共 86016 B）超过 dtype 缩省的部分，157696 B > float 路径的 143360 B——升精度计算的代价体现在缓冲而非指令；
+- 名义总需求为 22×yNumel（fp16/bf16）与 20×yNumel（float）字节，yNumel ≤ 8936/9830 才放得下 192KB——容量无 assert、无 host 校验，约束是隐式的「单行可放入队列 buffer」（单行整体处理、行内不分块）；
+- fp16/bf16 路径的占用大头是三份 fp32 辅助缓冲（86016 B，占 54.5%），float 路径的大头是四个队列槽位（114688 B，占 80%）；
+- bias 与行数据拷入长度均按 `ROUND_UP(yNumel*sizeof(T), 32)` 取整（32B 块），尾部 padding 只在 UB 内（见上文边界处理）；框架对槽位另有内部对齐，未计入名义大小。

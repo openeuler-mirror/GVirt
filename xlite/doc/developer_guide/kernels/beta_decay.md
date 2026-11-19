@@ -89,6 +89,40 @@ fp32 直接在计算缓冲上搬运;fp16/bf16 先搬入 conv 缓冲再 `vconv_f1
 - bsz × seqlen 不是 block_num 整数倍时轮转条件自然跳过空闲核;
 - 每行元素数(num_v_heads)须 ≤ 向量一次 repeat 能覆盖的范围(calcRepeat 由 num 派生,16 头场景远在限内)。
 
+### 片上缓冲分配与占用汇总(AIV UB)
+
+`BetaDecay::Init`(`csrc/kernels/beta_decay.h` 的 `BetaDecay::Init`)为纯 AIV 算子,片上缓冲只有 UB:自偏移 0 手工累加排布,非 fp32 路径先放 4 个原始 dtype 中转缓冲(conv_b/conv_a/conv_A_log/conv_dt_bias),随后是 7 个 fp32 计算缓冲(b_buf/a_buf/A_log_buf/dt_bias_buf/beta_buf/g_buf/ones_buf),每个槽位按 `DIV_ROUND_UP(num_v_heads*sizeof, 256)*256` 字节做 256B 粒度对齐。硬件容量基准(910B/dav C220,NpuArch 2201):UB 192KB(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`);无 L1/L0A/L0B/L0C 占用。dtype 记法:Dtype 为 b/a/A_log/dt_bias 元素类型,实例化 fp16/bf16(2B,多 4 个 conv 中转槽位)与 fp32(4B,GM 直接搬入 fp32 计算缓冲)两档,下表给两列;`beta_decay_native_*` 变体(按真实 dtype 读 fp32 的 A_log/dt_bias,见下章)复用同一布局。典型配置:num_v_heads=16(RWKV 类模型 v head 数,每次处理元素数即 16)。
+
+**AIV UB(容量 192KB)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | fp16/bf16 占用(B) | fp32 占用(B) |
+|---|---|---|---|---|---|---|
+| `conv_b` | `num_v_heads` 个 Dtype | Dtype | 1(事件 ID0;兼输出回转) | `DIV_ROUND_UP(num_v_heads*sizeof(Dtype), 256)*256` | 256 | — |
+| `conv_a` | `num_v_heads` 个 Dtype | Dtype | 1(事件 ID0;兼输出回转) | 同上 | 256 | — |
+| `conv_A_log` | `num_v_heads` 个 Dtype | Dtype | 1(循环外一次) | 同上 | 256 | — |
+| `conv_dt_bias` | `num_v_heads` 个 Dtype | Dtype | 1(循环外一次) | 同上 | 256 | — |
+| `b_buf` | `num_v_heads` 个 float | float | 1(事件 ID0) | `DIV_ROUND_UP(num_v_heads*4, 256)*256` | 256 | 256 |
+| `a_buf` | `num_v_heads` 个 float | float | 1(事件 ID0) | 同上 | 256 | 256 |
+| `A_log_buf` | `num_v_heads` 个 float | float | 1(常驻) | 同上 | 256 | 256 |
+| `dt_bias_buf` | `num_v_heads` 个 float | float | 1(常驻) | 同上 | 256 | 256 |
+| `beta_buf` | `num_v_heads` 个 float | float | 1(保留占位,当前未用) | 同上 | 256 | 256 |
+| `g_buf` | `num_v_heads` 个 float | float | 1(保留占位,当前未用) | 同上 | 256 | 256 |
+| `ones_buf` | `num_v_heads` 个 float | float | 1(常量 1) | 同上 | 256 | 256 |
+| **合计** | | | | | **2816** | **1792** |
+
+**占用汇总**(vs 硬件容量):
+
+| 存储级 | 硬件容量 | fp16/bf16 占用 | 占比 | fp32 占用 | 占比 |
+|---|---|---|---|---|---|
+| UB | 192 KB | 2816 B | 1.4% | 1792 B | 0.9% |
+
+要点:
+
+- 占用可忽略(16 头时 2816/1792 B,占比 ≤1.4%),UB 从不是本算子的瓶颈;全部槽位按 256B 粒度对齐,16 头时每槽恰 256B——槽位数量(fp16/bf16 共 11 个、fp32 共 7 个)而非行宽主导占用,num_v_heads 再小也是每槽 256 B;
+- **`beta_buf`/`g_buf` 为保留占位**:Init 分配但当前计算路径未使用——Beta/Decay 的结果分别经 b_buf→conv_b、a_buf→conv_a 舍回原 dtype 后写 GM(见上文关键计算步骤),两槽位属冗余布局;
+- fp16/bf16 路径比 fp32 多 4 个 conv 中转槽位(共 1024 B);fp32 及 native 变体读 fp32 的 A_log/dt_bias 时经 `CopyGmToUbufAligned` 直达 fp32 缓冲,conv 槽位仍分配但闲置;
+- 无 assert/host 容量校验;`num_v_heads` 的实际上限来自向量 repeat 覆盖范围(`calcRepeat` 由 `num` 派生,见上文边界处理),远在 UB 约束之前就绑定。
+
 ## FP32 native gate 变体
 
 当 activation 为 BF16/FP16 且 g 输出为 FP32 时，host 选择 `beta_decay_native_*`。

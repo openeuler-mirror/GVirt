@@ -77,3 +77,32 @@ host 校验 `input.dtype == INT8 && shape 为 2D && shape[1] % 2 == 0`(`csrc/op.
 
 - k 非 256 整数倍时计算侧 pad 到 k_pad(向量指令粒度),搬运/写出按真实 `k` / `k/2` 字节;
 - 每行产出 2 行输出,GM 写地址按 `k_half = k/2` 字节行距计算,天然对齐到字节边界。
+
+### 片上缓冲分配与占用汇总(AIV UB)
+
+`unpack_activation`(`csrc/kernels/unpack_activation.h`)入口处从 UB 偏移 0 一次性排布全部缓冲:3 个 int8 输入/掩码缓冲与 3 个 fp16 工作区按 `k_pad = ROUND_UP(k, VECTOR_MAX_NUM_OF_INT8)` 定长,4 个 INT4-packed 输出缓冲按 `kh_pad = ROUND_UP(k/2, VECTOR_MAX_NUM_OF_INT8)` 定长,`assert(off <= UB_SIZE)` 是唯一的容量断言。dtype 记法:模板实参(`UNPACK_ACTIVATION_FUNC_DEFINE` 的 `dtype`,实例 `int8_t`)只决定入口符号,内部固定 int8→half 双通路,UB 布局单一,单占用列。硬件容量基准(910B/dav C220):UB 192KB(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`)。典型模型配置:MSD W4A8 管线的 hiddenSize 量级,取 k=6144(测试最大列 [100, 6144]),k_pad=6144、kh_pad=3072。
+
+**AIV UB(容量 192KB,每 block 一份)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `in_buf_0`/`in_buf_1` | k_pad | int8_t | 2(事件 EVENT_ID0/1,MTE2↔V) | `k_pad` B | 12288 |
+| `low_and_buf` | k_pad | int8_t | 1 | `k_pad` B | 6144 |
+| `work_fp16` | k_pad | half | 1 | `k_pad*sizeof(half)` B | 12288 |
+| `vand_mask_buf` | k_pad | half(int16 视图) | 1 | `k_pad*sizeof(half)` B | 12288 |
+| `fp16_buf` | k_pad | half | 1 | `k_pad*sizeof(half)` B | 12288 |
+| `out_low_0`/`out_low_1` | kh_pad | int8_t(INT4-packed) | 2(事件 EVENT_ID0/1,V↔MTE3) | `kh_pad` B | 6144 |
+| `out_high_0`/`out_high_1` | kh_pad | int8_t(INT4-packed) | 2(与 `out_low` 同 eid) | `kh_pad` B | 6144 |
+| **合计** | | | | | **67584** |
+
+**占用汇总**(字节数):
+
+| 存储级 | 硬件容量 | 占用 | 占比 |
+|---|---|---|---|
+| UB(每 block) | 192 KB | 67584 B | 34.4% |
+
+要点:
+
+- 布局对 k 定长,总占用 = 9×k_pad + 4×kh_pad;`assert(off <= UB_SIZE)` 给出整行输入的硬上界 k=17664(此时占用 194816 B,99.1% 顶满),MSD 典型 hiddenSize(≤8K)余量充足;
+- 三个 fp16 工作区(`work_fp16`/`vand_mask_buf`/`fp16_buf`,合计 36864 B)占 54.5%,是占用大头——int8→fp16 的逐元素展开(1B→2B)使 fp16 侧缓冲天然双倍;
+- 输入/输出各两份乒乓(in 缓冲 MTE2↔V、out 缓冲 V↔MTE3,共用 EVENT_ID0/1 两条 eid),循环前 4 条 `set_flag` 预置使首拍不阻塞;断言即容量来源,host 侧无 UB 相关校验。

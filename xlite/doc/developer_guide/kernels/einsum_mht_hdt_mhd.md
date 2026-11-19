@@ -71,3 +71,54 @@ tile 遍历顺序由 `GetMNBlockIdx` 按 host 传入的 swizzle(方向 Zn/Nz + �
 ### 测试参考
 
 [tests/kernels/einsum_mht_mhd.py](../../../tests/kernels/einsum_mht_mhd.py):fp16/bf16 × weight_nz {False, True} × (m,h,t,d) ∈ {(3,4,192,512), (5230,4,512,128), (963,8,512,128), ...},`hdt` 用 `htd.transpose(-1,-2).contiguous()` 生成,与 `torch.einsum("mht,htd->mhd")` 对比。
+
+### 片上缓冲分配与占用汇总(AIC L1/L0A/L0B/L0C)
+
+`Matmul::Init`(`csrc/kernels/matmul.h` 的 `Matmul::Init`)按 tile 形状静态排布:L1 上 `l1aBuf`(`TPosition::A1`)与 `l1bBuf`(`TPosition::B1`)同处 512KB 物理存储、`bufferAddr` 连续累进,各持两份乒乓(bias/deqScale 的 `l1BiasBuf`/`l1DeqScaleBuf` 与 `l1bBuf` 区段衔接,本算子 `hasBias=hasDeqScale=false` 不占槽位);L0A/L0B/L0C 物理独立、各自从偏移 0 重新起排。host 侧 launch 固定传 `MATMUL_M0_N0_K0_DEFAULT_VALUE`(=(uint64_t)-1,`csrc/kernels/kernel_macro.h` 的 `MATMUL_M0_N0_K0_DEFAULT_VALUE`,调用见 `csrc/op.cpp` 的 `XliteOpEinsumMhtHdtMhd`),kernel 内解析为 `m0=128、n0=256、k0=512*BYTE_BITS/dtypeBits`,并派生 `kDtileSize=2*k0`(A 的 K 方向预取窗)与 `kQtileSize=k0/4`(L1→L0 下搬粒度)。本算子 `KERNEL_TYPE_AIC_ONLY`,无 AIV/UB。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置):L0A 64KB、L0B 64KB、L1 512KB,L0C 总容量 256KB(`l0_c_size=262144`)为 CO1/CO2 两区之和,mmad 累加缓冲(`TPosition::CO1`)可用的 CO1 区为 **128KB**,下文 L0C 占用均按 CO1 128KB 计。
+
+dtype 记法:`Dtype` 为 mht/hdt/mhd 三张量的元素类型,`MatDtype` 为 mmad 累加/偏置类型(实例化 `Matmul<Dtype, float, Dtype>`,见 `csrc/kernels/einsum_mht_hdt_mhd.h` 的 `EINSUM_MHT_HDT_MHD_FUNC_DEFINE`);fp16 与 bf16 均为 2B、dtypeBits=16,即 **k0=256**(`kDtileSize=512`、`kQtileSize=64`),两条路径占用相同,下表只给单占用列。缓冲大小只依赖 m0/n0/k0/dtype,与运行期 (m,h,t,d) 及 weight_nz/transpose 无关,占用列对任意形状成立;典型配置取测试形状 (m,h,t,d)=(5230,4,512,128)(`tests/kernels/einsum_mht_mhd.py`,MLA 输出吸收类调用,t=512、d=128)。
+
+**AIC L1(A1/B1,容量 512KB)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `l1aBuf` | `(128, 512)`(m0 × kDtileSize,K 方向双倍预取) | Dtype | 2(事件0/1) | `m0*kDtileSize*dtypeBits/BYTE_BITS` | 262144 |
+| `l1bBuf` | `(256, 256)`(n0 × k0) | Dtype | 2(事件2/3) | `n0*k0*dtypeBits/BYTE_BITS` | 262144 |
+| **合计** | | | | | **524288** |
+
+**AIC L0A(A2,容量 64KB)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `l0aBuf` | `(128, 64)`(m0 × kQtileSize) | Dtype | 2(事件0/1) | `m0*kQtileSize*dtypeBits/BYTE_BITS` | 32768 |
+| **合计** | | | | | **32768** |
+
+**AIC L0B(B2,容量 64KB)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `l0bBuf` | `(256, 64)`(n0 × kQtileSize) | Dtype | 2(事件0/1) | `n0*kQtileSize*dtypeBits/BYTE_BITS` | 65536 |
+| **合计** | | | | | **65536** |
+
+**AIC L0C(CO1 区,容量 128KB;总容量 256KB 含 CO2)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `l0cBuf` | `(128, 256)`(m0 × n0) | float(MatDtype) | 1(事件0) | `m0*n0*sizeof(MatDtype)` | 131072 |
+| **合计** | | | | | **131072** |
+
+**占用汇总**(各表占用列之和 vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | 占用 | 占比 |
+|---|---|---|---|
+| L1 | 512 KB | 524288 B | 100% |
+| L0A | 64 KB | 32768 B | 50.0% |
+| L0B | 64 KB | 65536 B | 100% |
+| L0C(CO1) | 128 KB | 131072 B | 100% |
+
+要点:
+
+- **L1 恰好占满 512KB,L0B 与 L0C(CO1)同步顶满**:默认 tile 形状 (m0,n0,k0)=(128,256,256) 正是按 910B 各级容量反推的上限组合,host 固定传 `MATMUL_M0_N0_K0_DEFAULT_VALUE` 是排布成立的前提——kernel 侧无运行期断言,传入更大的 m0/n0/k0 会直接越过 L1/L0 容量(`Matmul::Init` 仅在 `hasDeqScale`/`hasBias` 时把 n0 收到 256 以保护 C2 的 fixpipe/bias 小缓冲,本算子两者均关);
+- `l1aBuf` 与 `l1bBuf` 各占 L1 一半:每份 128×512(`kDtileSize=2*k0` 的 K 方向预取窗)与 256×256,单份各 128KB,是 L1 占用的绝对大头;
+- L0A 只用一半:`kQtileSize=k0/4=64` 让 L0A 单份仅 16KB,一份 `l1aBuf` 预取窗服务 8 次(kIdx8)L0A 下搬、一份 `l1bBuf` 服务 4 次(kIdx4)L0B 下搬,是 L1 预取与 L0 计算粒度解耦的关键;
+- L0C 按 CO1 128KB 计:单份 m0×n0×4B=131072 恰好占满,K 方向按 `kQtileSize=64` 分段累加(`CalMmad` 的 kIdx==0 初始化),累加器无需超过一个输出 tile;`l0cBuf`/`l0bBuf` 等槽位大小与 htd 变体(transpose=1)完全一致,两变体只有 B 的装载/下搬分支不同。

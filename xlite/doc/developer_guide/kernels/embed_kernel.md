@@ -58,3 +58,27 @@ Python 接口:`embed(rt, weight, in_, out, start, end)`(`XliteOpEmbed`,见 `csrc
 ### 测试参考
 
 [tests/kernels/embed.py](../../../tests/kernels/embed.py):BATCH=64/512、VOCAB=32000、DIM=4096,fp16/bf16(64 行走小批量串行路径,512 行走 ping-pong 流水路径);多卡时与 `F.embedding` + 掩码置零 + `all_reduce` 的参考实现对比,单卡直接对比。msprof 逐 kernel 计时见 [tests/perf/embed.py](../../../tests/perf/embed.py)。
+
+### 片上缓冲分配与占用汇总(AIV UB)
+
+`embed_kernel` 模板(`csrc/kernels/embed_kernel.h` 的 `embed_kernel`)占 UB 头部三块、各 `dim` 个元素:`zero_ub_addr` 在偏移 0、`stage_ub_addr[2]` 在偏移 `dim * 2` / `dim * 4` 字节(ping-pong 双暂存;小批量路径只复用 `stage_ub_addr[0]`)。硬件容量基准(910B/dav C220,NpuArch 2201):AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每个 AIV block 各持一份独立 UB、布局相同。dtype 记法:模板参数 `Dtype` 为 fp16/bf16(均 2B),两条路径布局完全相同,占用单列。典型配置:dim=4096(embedding 维度即 hiddenSize,测试 `tests/kernels/embed.py` 取 DIM=4096、BATCH=64/512、VOCAB=32000,fp16/bf16 同取),占用 = `6*dim` B。
+
+**AIV UB(预算 `UB_SIZE=192KB`)**
+
+| 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `zero_ub_addr` | `dim` | Dtype(fp16/bf16,2B) | 1 | `dim*2`(即 `dim*sizeof(Dtype)`) | 8192 |
+| `stage_ub_addr[2]` | `dim` | Dtype(fp16/bf16,2B) | 2(事件0/1,大批量 ping-pong 流水) | `dim*2` | 16384 |
+| **合计** | | | | | **24576** |
+
+**占用汇总**(占用 vs 硬件容量;字节数):
+
+| 存储级 | 硬件容量 | 占用 | 占比 |
+|---|---|---|---|
+| UB | 192 KB | 24576 B | 12.5% |
+
+要点:
+
+- **占用极小且线性于 dim**:3×dim 个 2B 元素(dim=4096 时 24576 B、12.5%),远低于 192KB 预算;容量约束为 3×dim 元素 ≤ `EMBED_UB_BUDGET`(`csrc/kernels/kernel_param.h`,当前架构下 = `UB_SIZE` 192KB),host 侧(`csrc/op.cpp` 的 `XliteOpEmbed`)与 kernel 内 assert 共用同一常量、不会漂移(assert 在 NDEBUG 下被编译掉,host 检查是唯一守卫),并与 `dim % 16 == 0` 一并强制;
+- `zero_ub_addr` 全零行仅 `tp_size > 1` 时由 `vector_dup` 预填充一次,之后区间外 token 直接整行写出(见上文「UB 内存布局」);
+- 按每核行数二选一(`PIPE_MIN_ROWS_PER_CORE=4`):小批量(每核 < 4 行,典型 decode batch)沿用逐行 `pipe_barrier(PIPE_ALL)` 串行、只用单个暂存;大批量(prefill / 大 decode batch)走 MTE2/MTE3 ping-pong 事件流水(EVENT_ID0/1),第 `i` 行的读入与第 `i-1` 行的写出重叠(见上文「数据流」)。

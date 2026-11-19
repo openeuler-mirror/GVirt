@@ -75,3 +75,29 @@ UB 偏移手工累加分配（`csrc/kernels/muls.h` 的 `muls` 模板函数，�
 - 搬运用 `CopyGmToUbufAligned`/`CopyUbufToGmAligned`（按字节数 32B/2B/1B 对齐自适应选择 DMA 原语），支持 calcNum 非 32B 整数倍的场景，写回长度为精确的 `calcNum * sizeof(Dtype)` 字节；
 - host 侧校验 `calcOffset < shape1`（越界抛错）；`calcNum` 超出 `shape1 - calcOffset` 时**静默 clamp** 到行尾（不报错）；`calcNum == 0` 或 `> MAX_MULS_CALC_NUM = 16320` 抛错（`csrc/op.cpp` 的 `XliteOpMuls`，关键字 `calcOffset` / `MAX_MULS_CALC_NUM` 校验段）；
 - calcNum 上限 16320 = 255 repeat × 64 fp32，即单行切片需一次性放入 UB 计算缓冲（无行内二次分块）。
+
+### 片上缓冲分配与占用汇总（AIV UB）
+
+`muls`（`csrc/kernels/muls.h` 的 `muls` 模板函数）为纯 AIV 算子，片上缓冲只有 UB：函数体内自偏移 0 手工累加 `off` 排布 5 个槽位，依次为输入乒乓 in1/in2、fp32 计算缓冲 calc、输出乒乓 out1/out2，`len = ROUND_UP(calcNum*sizeof(Dtype), VECTOR_MAX_BYTESIZE=256)`，布局随运行期每行切片 calcNum 缩放。硬件容量基准（910B/dav C220，NpuArch 2201）：UB 192KB（`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`）；无 L1/L0A/L0B/L0C 占用。dtype 记法：Dtype 为 input/output 元素类型，host 仅提供 fp16/bf16（均 2B），占用与 dtype 无关，下表单占用列（模板保留的 float 分支未实例化）。典型配置取上限 calcNum=MAX_MULS_CALC_NUM=16320（`csrc/kernels/kernel_param.h` 的 `MAX_MULS_CALC_NUM`，host 校验上界，即单行切片的最大处理能力；模型路径 DSA indexer 的 nope/权重切片实际远小于此）。
+
+**AIV UB（容量 192KB）**
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | calcNum=16320 占用（B） |
+|---|---|---|---|---|---|
+| `in`（in1/in2） | `calcNum` 个 Dtype | Dtype | 2（MTE2↔V，事件 ID0/1） | `len` | 65536 |
+| `calc` | `calcNum` 个 float | float | 1（V 内顺序复用） | `ROUND_UP(calcNum*sizeof(float), 256)` | 65280 |
+| `out`（out1/out2） | `calcNum` 个 Dtype | Dtype | 2（V↔MTE3，事件 ID0/1） | `len` | 65536 |
+| **合计** | | | | | **196352** |
+
+**占用汇总**（vs 硬件容量）：
+
+| 存储级 | 硬件容量 | 占用（B） | 占比 |
+|---|---|---|---|
+| UB | 192 KB | 196352 | 99.9% |
+
+要点：
+
+- **上限配置把 UB 用到 99.9%**：196352 B 对 192KB 仅余 256 B；`MAX_MULS_CALC_NUM=16320` 由 repeat 上限决定（255 repeat × 64 fp32=16320，见上文向量计算步骤），该点 UB 布局恰好收敛到近满——host 侧 `calcNum > MAX_MULS_CALC_NUM` 抛错（`csrc/op.cpp` 的 `XliteOpMuls`），「单行切片需一次性放入 UB 计算缓冲（无行内二次分块）」即指此约束；
+- in/out 各 65536 B、calc 65280 B，近似三等分，布局无冗余；占用随 calcNum 按 256B 粒度线性缩放，模型路径典型 calcNum=64（nopeDim）时合计仅 1280 B；
+- fp16/bf16 同为 2B，占用与 dtype 无关；`Dtype=float` 分支的 off 布局逻辑保留但未实例化（host 与实例化文件均只有 fp16/bf16，见上文支持的数据类型）；
+- kernel 侧无 assert，容量边界完全由 host 的 16320 上界把守。

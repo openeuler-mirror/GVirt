@@ -80,3 +80,29 @@ GM(fp16 行块) --MTE2--> UB(inUbBuf) --V: vconv--> UB(tmpUbBuf) --V: vmuls(scal
 - 列尾块：`nSize = nActual - nOffset`（最后一块可能小于 nTile），`nSizePad = ROUND_UP(nSize, 128)` 用于 repeat 计算，搬运与写回均按精确字节数 `nSize * sizeof(dtype)` 走 `*_align_b16` 原语，支持非 32B 对齐的 n；
 - UB 内 padding 部分为无效数据，不会被写出；
 - pnum_tokens 动态 token 数：只处理前 min(*pnum_tokens, m) 行。
+
+### 片上缓冲分配与占用汇总（AIV UB）
+
+本算子为纯向量（AIV）算子，只使用 UB 一级片上缓冲，无 L1/L0A/L0B/L0C 占用。`csrc/kernels/dequant.h` 的 `Dequant::Init` 手工排布：UB 偏移 0 起按 `inUbBuf[0] → inUbBuf[1] → tmpUbBuf[0] → tmpUbBuf[1] → outUbBuf[0] → outUbBuf[1]` 顺序累进，以 `nPad = ROUND_UP(DEQUANT_N_TILE=12288, VECTOR_MAX_BYTESIZE/sizeof(dtype)=128) = 12288` 为每份宽度，三对乒乓缓冲共用事件族 `EVENT_ID0 + eventId`（`eventId` 每行组翻转）。与 quant 家族不同，该布局是**编译期固定**的：`DEQUANT_N_TILE` 为常量，占用与运行期 m/n 无关——任意 n 只影响各槽位的使用宽度（`colChunk ≤ nTile`），不改变分配总量。硬件容量基准（910B/dav C220，NpuArch 2201）：UB 预算取 `kernel_macro.h` 的 `UB_SIZE=192KB`（4KB×48 bank），每个 AIV subblock 各持一份独立 UB。dtype 记法：模板实参 `dtype` 唯一实例化为 `float16_t`（2B，inUbBuf），`tmpUbBuf` 为 float32（4B），`outUbBuf` 固定 `bfloat16_t`（2B），单条 dtype 路径无需分列。
+
+**AIV UB（预算 `UB_SIZE=192KB`）**
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
+|---|---|---|---|---|---|
+| `inUbBuf` | `(12288,)` | float16 | 2（事件0/1，eventId） | `nPad*sizeof(dtype)` | 49152 |
+| `tmpUbBuf` | `(12288,)` | float32 | 2（事件0/1，eventId） | `nPad*sizeof(float32_t)` | 98304 |
+| `outUbBuf` | `(12288,)` | bfloat16 | 2（事件0/1，eventId） | `nPad*sizeof(bfloat16_t)` | 49152 |
+| **合计** | | | | `16*nPad` | **196608** |
+
+**占用汇总**：
+
+| 存储级 | 硬件容量 | 占用 | 占比 |
+|---|---|---|---|
+| UB（每 AIV subblock） | 192 KB | 196608 B | 100% |
+
+要点：
+
+- **UB 是唯一也是恰好顶满的一级**：每套乒乓 in（fp16，2B）+ tmp（fp32，4B）+ out（bf16，2B）= 8B/元素，两套共 16B/元素 × `nPad=12288` = 196608 B，恰等于 `UB_SIZE`——这正是 `csrc/kernels/dequant.h` 的 `DEQUANT_N_TILE=12288` 的取值来源（其注释「exactly fill the 192KB UB」），也是该常量的硬上限约束：调大即溢出，且无运行期 `assert` 与 host 容量校验兜底；
+- `tmpUbBuf`（fp32 中转双缓冲，98304 B）独占 50%，是绝对大头；两份 2B 缓冲（inUbBuf/outUbBuf）各占 25%；
+- 行 scale 由 Scalar 流水直接从 GM 读入 `vmuls` 立即数（`scaleValue` 标量），不占 UB 槽位——上文「+4 字节」为近似口径，精确合计即 `16*nPad` = 196608 B；
+- 占用与 m/n 无关，n 的实际约束只有 `RunTile` 的 2D DMA 契约（列宽与行间 gap 须 32B 可表达），与 UB 容量无关。

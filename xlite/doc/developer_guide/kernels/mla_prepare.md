@@ -88,6 +88,80 @@ RoPE 细节(子函数见 `csrc/kernels/rope_complex_and_cache.h` 的 `rope_compl
 
 SFA-C8 的 Q 阶段复用 `norm`，KV 阶段在同一核内完成 RMSNorm、RoPE 和量化。每个任务处理一个 token，输入及输出暂存区使用双缓冲，计算当前 token 时预取下一条输入。KV Norm 先舍入为 BF16，再调用与独立写缓存入口共用的 `mla_cache_c8_quant`；PE 使用 FP32 旋转后转换为 BF16。scale 经 S→V 同步后，由 V→MTE3 保证按相同 slot 写出 INT8 K、BF16 PE 和 FP32 scale，全部 MTE3 完成后才复用相应缓冲；`slot=-1` 不写缓存，但仍保留请求的 Norm 输出。C8 通过末尾可选参数 `k_scale_cache` 传入独立 scale 缓存。
 
+### 片上缓冲分配与占用汇总(AIV UB)
+
+mla_prepare 为纯 AIV 融合 kernel,自身不做缓冲排布,片上存储全部来自子函数:每个子函数在入口自 UB 偏移 0 顺序累进 `__ubuf__` 指针并在尾部 `assert(off <= UB_SIZE)` 收口;浮点路径三个阶段(两次 `norm`、一次 `rope_complex_and_cache`)在同一核上**串行复用同一 UB**,任一时刻占用即当前阶段布局大小,峰值取最大阶段;C8 路径(`csrc/kernels/mla_prepare_c8.h` 的 `mla_prepare_c8`)的 Q 阶段复用 `norm`,KV/RoPE/量化阶段为自有布局,与 Q 阶段串行。硬件容量:AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每核一份。
+
+dtype 记法:`Dtype∈{float16_t, bfloat16_t}`(两条实例化路径 `csrc/kernels/mla_prepare_float16_t.cpp` / `mla_prepare_bfloat16_t.cpp`),均为 2B,**UB 布局与 dtype 无关**,占用单列。典型配置取测试 `tests/kernels/mla_prepare.py` 的 `test_cases`:qLoraRank=2048、kvLoraRank=512、ropeHeadDim=64、token_num=80、blockSize=128;C8 路径同值(latentDim=kvLoraRank=512、ropeDim=64,`groupSize=128、groupNum=4`)。
+
+**阶段 1:q_lora 段 RMSNorm(`csrc/kernels/norm.h` 的 `norm`,norm_dim=qLoraRank=2048;浮点/C8 两路径共用)**
+
+| 变量 | shape(每份) | dtype | 份数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `in0`/`in1` | `(norm_dim,)`=(2048,) | Dtype | 2(事件0/1) | `ROUND_UP(norm_dim*sizeof(Dtype),32)` | 8192 |
+| `out0`/`out1` | `(norm_dim,)` | Dtype | 2(事件0/1) | `ROUND_UP(norm_dim*sizeof(Dtype),32)` | 8192 |
+| `calc0`/`calc1` | `(norm_dim,)` | float | 各 1 | `ROUND_UP(norm_dim*sizeof(float),32)` | 16384 |
+| `weight_calc`/`bias_calc` | `(norm_dim,)` | float | 各 1 | `ROUND_UP(norm_dim*sizeof(float),32)` | 16384 |
+| **合计** | | | | | **49152** |
+
+**阶段 2:kv_lora 段 RMSNorm + 写 kCache(同 `norm`,norm_dim=kvLoraRank=512)**
+
+| 变量 | shape(每份) | dtype | 份数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `in0`/`in1` | `(512,)` | Dtype | 2(事件0/1) | `ROUND_UP(norm_dim*sizeof(Dtype),32)` | 2048 |
+| `out0`/`out1` | `(512,)` | Dtype | 2(事件0/1) | `ROUND_UP(norm_dim*sizeof(Dtype),32)` | 2048 |
+| `calc0`/`calc1` | `(512,)` | float | 各 1 | `ROUND_UP(norm_dim*sizeof(float),32)` | 4096 |
+| `weight_calc`/`bias_calc` | `(512,)` | float | 各 1 | `ROUND_UP(norm_dim*sizeof(float),32)` | 4096 |
+| **合计** | | | | | **12288** |
+
+**阶段 3:pe 段 RoPE + 写 peCache(`csrc/kernels/rope_complex_and_cache.h` 的 `rope_complex_and_cache`,ropeDim=64、nLocalHeads=1)**
+
+`vdim==ropeDim` 时 `vRemain` 槽为 0 不占空间;`outInterleaved`/`doRotate` 槽位仅 CXA 等调用方启用,mla_prepare 均传 false,不分配。
+
+| 变量 | shape(每份) | dtype | 份数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `input0`/`input1` | `(vdim,)`=(64,) | Dtype | 2(事件0/1) | `ROUND_UP(vdim*sizeof(Dtype),256)` | 512 |
+| `freqs0`/`freqs1` | `(ropeDim,)`=(64,) | float | 2(事件2/3) | `ROUND_UP(ropeDim*sizeof(float),256)` | 512 |
+| `out0`/`out1` | `(vdim,)` | Dtype | 2(事件0/1) | `ROUND_UP(vdim*sizeof(Dtype),256)` | 512 |
+| `inOutFP32` | `(ropeDim,)` | float | 1 | `ROUND_UP(ropeDim*sizeof(float),256)` | 256 |
+| `x_even`/`x_odd`/`cos`/`sin`/`x_even_cos`/`x_odd_sin`/`x_even_sin`/`x_odd_cos` | `(ropeDim,)` | float | 各 1 | `ROUND_UP(ropeDim*sizeof(float),256)` | 2048 |
+| `positionUB` | 256 个 uint64(`maxCnt`) | uint64 | 1 | `ROUND_UP(maxCnt*sizeof(uint64_t),256)` | 2048 |
+| `slotMappingUB` | 256 个 uint32 | uint32 | 1 | `ROUND_UP(maxCnt*sizeof(uint32_t),256)` | 1024 |
+| **合计** | | | | | **6912** |
+
+**C8 路径阶段 2:KV RMSNorm + RoPE + 分组量化(`csrc/kernels/mla_prepare_c8.h` 的 `mla_prepare_c8`,latentDim=512、ropeDim=64;Q 阶段布局同阶段 1)**
+
+| 变量 | shape(每份) | dtype | 份数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `inputs0`/`inputs1` | `(latentDim+ropeDim,)`=(576,) | Dtype | 2(事件2/3) | `ROUND_UP((latentDim+ropeDim)*sizeof(Dtype),256)` | 2560 |
+| `normalized0`/`normalized1` | `(latentDim,)`=(512,) | Dtype | 2 | `ROUND_UP(latentDim*sizeof(Dtype),256)` | 2048 |
+| `packed0`/`packed1` | 656 B 混合行(INT8 latent|BF16 PE|FP32 scale) | int8 视图 | 2(事件4/5) | `ROUND_UP(latentDim+ropeDim*sizeof(Dtype)+groupNum*sizeof(float),256)` | 1536 |
+| `trig0`/`trig1` | `(ropeDim,)` | float | 2(事件2/3) | `ROUND_UP(ropeDim*sizeof(float),256)` | 512 |
+| `x` | `(latentDim,)`(兼放 RoPE fp32 行) | float | 1 | `MAX(latentDim*sizeof(float), ROUND_UP(ropeDim*sizeof(float),256))` | 2048 |
+| `tmp` | `(latentDim,)` | float | 1 | `latentDim*sizeof(float)` | 2048 |
+| `weight` | `(latentDim,)` | float | 1 | `latentDim*sizeof(float)` | 2048 |
+| `bias` | `(latentDim,)` | float | 1 | `latentDim*sizeof(float)` | 2048 |
+| `rope[8]` | `(ropeDim,)` | float | 8 | `ROUND_UP(ropeDim*sizeof(float),256)` | 2048 |
+| `amaxBuf` | 1 个 256B repeat | float | 1 | `VECTOR_REPEAT_BYTESIZE` | 256 |
+| `factorBuf` | 1 个 256B repeat | float | 1 | `VECTOR_REPEAT_BYTESIZE` | 256 |
+| `halfValues` | `(groupSize,)`=(128,) | half | 1 | `groupSize*sizeof(half)` | 256 |
+| **合计** | | | | | **17664** |
+
+**占用汇总**(各阶段布局串行复用同一 UB,峰值取最大阶段;字节数):
+
+| 阶段布局 | 硬件容量 | 占用(B) | 占比 |
+|---|---|---|---|
+| 阶段 1:q_lora norm(浮点/C8 共用,峰值) | UB 192 KB | 49152 | 25.0% |
+| 阶段 2:kv_lora norm(浮点) | | 12288 | 6.25% |
+| 阶段 3:RoPE(浮点) | | 6912 | 3.5% |
+| C8 阶段 2:KV+RoPE+量化 | | 17664 | 9.0% |
+
+要点:
+
+- 峰值在阶段 1:q_lora 段 2048 维的 norm 每 norm_dim 元素占 24 B(4 条 Dtype 缓冲 8 B + 4 条 fp32 缓冲 16 B),共 49152 B,仅占 UB 25%——大头是 `calc0`/`calc1`/`weight_calc`/`bias_calc` 四条 fp32 行(32768 B,占该布局 67%);
+- 其余阶段(kv norm 12288 B、RoPE 6912 B、C8 量化 17664 B)与阶段 1 串行复用同一 UB,均远未顶满,远小于单算子 norm/mla_cache_c8 独立 launch 时的预算压力;
+- 容量来源:`csrc/kernels/norm.h` 的 `norm` 与 `csrc/kernels/mla_prepare_c8.h` 的 `mla_prepare_c8` 尾部的 `assert(off <= UB_SIZE)`;host 侧 SFA-C8 校验(`csrc/op.cpp` 的 `XliteOpMlaPrepare`,关键字 `unsupported SFA-C8 configuration`)要求 `kvLoraRank%128==0` 且 `ropeHeadDim*2` 按 32B 对齐,C8 布局中 `x`/`tmp`/`weight`/`bias` 四条 fp32 行(每条 latentDim×4 B)随 latentDim 线性增长,是「C8 Prepare 受 UB 容量限制」的具体来源。
+
 ## 关键代码位置
 
 - 融合主体:`csrc/kernels/mla_prepare.h` 的 `mla_prepare` 模板函数

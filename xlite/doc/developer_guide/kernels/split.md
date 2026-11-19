@@ -57,3 +57,27 @@ host 侧不做 dtype 分派；测试覆盖 float16/bfloat16/float32/int32/int8�
 - `numPackets == 0 || nOutputs == 0 || totalSize == 0` 直接返回（`csrc/kernels/split.cpp` 的 `split_kernel`，关键字 `if (numPackets == 0 || nOutputs == 0 || totalSize == 0)` 早返回段）；
 - 超过 8 个输出时 host 侧回退为逐包逐段 `aclrtMemcpyAsync`（`csrc/op.cpp` 的 `XliteOpSplit`，关键字 `Fallback for the rare > maxOutputs case` 段）；
 - Python 侧校验：`outputs.size() == sizes.size()`、`totalSize * numPackets == in.bytes`、每个 `outputs[j].bytes >= sizes[j] * numPackets`（防止越界写设备内存，`csrc/_C.cpp` 的 `Split` wrapper，关键字 `outputs count` / `input bytes` / `numPackets*sizes` 校验段，测试 `tests/kernels/split.py` 的 undersized output 拒绝用例段 专门验证 undersized output 被拒绝）；`split_col` 额外校验各输出 dtype/前导维一致且列宽之和等于输入列宽（`csrc/op.cpp` 的 `XliteOpSplitCol`，关键字 `XliteOpSplitCol: outputs must share dtype` / `sum(outputs last dim)` 校验段）。
+
+### 片上缓冲分配与占用汇总（AIV UB）
+
+`split_kernel`（`csrc/kernels/split.cpp` 的 `split_kernel`）把 UB 静态均分为两半作乒乓 staging：`dataBuf[0]` 在偏移 0、`dataBuf[1]` 在偏移 `halfBuf = UB_SIZE / PINGPONG`；每个子段固定从所在半区偏移 0 起排（MTE3 读 UB 源要求 32B block 对齐）。硬件容量基准（910B/dav C220，NpuArch 2201）：AIV UB 预算取 `UB_SIZE=192KB`（`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`，4KB×48 bank），各 AIV block 各持一份独立 UB、布局相同。dtype 记法：kernel 按 `__ubuf__ uint8_t` 字节搬运，任意 dtype 只影响字节总数、不影响缓冲布局，占用单列。典型配置：MoE packedRecv 解包镜像（bf16、hidden=7168，最大输出段 14336 B/包；hoist 量化时 int8 段 7168 B/包，fp16/bf16 同取）——子段按输出/包边界切分，单段上限 `segBufSize = halfBuf`，占用不随配置变化。
+
+**AIV UB（预算 `UB_SIZE=192KB`）**
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用(B) |
+|---|---|---|---|---|---|
+| `dataBuf[curr]` | 单个子段，上限 `segBufSize` 字节 | uint8 | 2（事件0/1） | `UB_SIZE / PINGPONG` | 196608 |
+| **合计** | | | | | **196608** |
+
+**占用汇总**（占用 vs 硬件容量；字节数）：
+
+| 存储级 | 硬件容量 | 占用 | 占比 |
+|---|---|---|---|
+| UB | 192 KB | 196608 B | 100% |
+
+要点：
+
+- **UB 静态均分两半、恰好占满 192KB**：槽位由 `UB_SIZE / PINGPONG` 编译期固定，占比恒 100%，与输出个数、段宽、dtype 均无关；
+- 单个子段上限 `segBufSize = 98304 B`（半个 UB），`take` 的钳位只在单个输出段超过半 UB 时触发（源仍连续、直接再切，见上文「子段分解与乒乓搬运」）；
+- 无 kernel 侧容量断言；容量相关的 host 侧控制只有按 `numPackets*totalSize` 缩放 block 数（`CopyKernelBlockNum`，tilePerCore≈2MB）、超过 8 个输出回退 `aclrtMemcpyAsync` 与 Python 侧 `outputs[j].bytes >= sizes[j]*numPackets` 防越界校验（见上文「边界处理与 host 侧校验」）；
+- 乒乓以 `EVENT_ID0/1` 区分两个半区，读当前段与写上一段重叠（见上文「流水线同步」）。

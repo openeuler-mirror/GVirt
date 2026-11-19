@@ -58,3 +58,44 @@ UB 布局只保留单份 `in`/`out`（各 MAX_SUB_CONTEXT_SIZE）+ FP32 `calc`/`
 ### 复用扩展（本入口未启用）
 
 `RunAivSoftmaxPingPong` 的模板参数还支持 hasScale/scale（先乘缩放）、saveMaxSum/maxBuf/sumBuf（输出行 max/sum 供 online softmax 合并）、topK/topkIndices（稀疏 attention：按命中位图 `vgather` 收集分数、softmax 后标量 scatter 回原位置，`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxPingPong`，关键字 `vgather` / `topkIndices` 扩展段）；另为 cxa 算子新增 winSize/winCalcLen/compressRatio/attnSink/swaSegWidth 等 SWA/compress/attn_sink 扩展参数；同头文件的 `RunAivSoftmaxUpdate`（`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxUpdate`）实现 flash attention 的跨 KV 块在线 softmax 合并。这些路径由 attention/mla 相关 kernel 使用。
+
+### 片上缓冲分配与占用汇总（AIV UB）
+
+两个入口均无常驻 `Init` 排布——`RunAivSoftmaxPingPong` 与 `RunAivSoftmaxLong`（`csrc/kernels/softmax_attn_aiv.h`）在函数入口按运行期行长现场构建一次性 UB 布局（常规路径 `len = outN`；长行路径输入/输出/计算槽按 `MAX_SUB_CONTEXT_SIZE` 定宽，`max`/`sum` 随子块数缩放），launch 内所有行共用。硬件容量基准（910B/dav C220，NpuArch 2201）：UB 预算取 `UB_SIZE=192KB`（`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`，4KB×48 bank），单 block launch，每个 AIV subblock 各持一份独立 UB、布局相同。dtype 记法：`Dtype` 为 x 元素类型（fp16/bf16，均 2B），UB 布局与 dtype 无关，单占用列。本算子入口仅走基础路径（`saveMaxSum=false`、`topK=0`、`attnSink=nullptr`），maxOut/sumOut/indices/inTopK/cmp/topkMask/sink 等扩展槽全部为 0 尺寸、不占槽位。典型配置：常规路径取 n=13952（m=1，测试常规路径最大 128 对齐行）；长行路径取 n=2064512（m=1，头注释行长上界，`totalSubBlockNum=127`）。
+
+**AIV UB——常规路径 `RunAivSoftmaxPingPong`（预算 `UB_SIZE=192KB`，n=13952）**
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
+|---|---|---|---|---|---|
+| `in[2]` | 13952 Dtype | Dtype | 2（V↔MTE2 事件 ID2+curr） | `ROUND_UP(len*sizeof(Dtype), VECTOR_MAX_BYTESIZE)` | 55808 |
+| `out[2]` | 13952 Dtype | Dtype | 2（事件 ID0 写出、ID2+curr 归还） | `ROUND_UP(len*sizeof(Dtype), VECTOR_MAX_BYTESIZE)` | 55808 |
+| `cal` | 13952 float | float | 1 | `ROUND_UP(len*sizeof(float), VECTOR_MAX_BYTESIZE)` | 55808 |
+| `temp` | 6976 float（109 个 256B 块） | float | 1 | `(DIV_ROUND_UP(len*4, 256)/2)*256` | 27904 |
+| **合计** | | | | | **195328** |
+
+**AIV UB——长行路径 `RunAivSoftmaxLong`（预算 `UB_SIZE=192KB`，n=2064512，`MAX_SUB_CONTEXT_SIZE=16256`，子块数 127）**
+
+| 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
+|---|---|---|---|---|---|
+| `in` | 16256 Dtype | Dtype | 1 | `MAX_SUB_CONTEXT_SIZE*sizeof(Dtype)` | 32512 |
+| `out` | 16256 Dtype | Dtype | 1 | `MAX_SUB_CONTEXT_SIZE*sizeof(Dtype)` | 32512 |
+| `calc` | 16256 float | float | 1 | `MAX_SUB_CONTEXT_SIZE*sizeof(float)` | 65024 |
+| `calcDst` | 256 float（4 个 256B 块） | float | 1 | 子块数>65：`DIV_ROUND_UP(254,64)*256`；≤65：`127*256` | 1024 |
+| `max` | 128 个 256B 块（每子块 max 槽 + totalMax） | float | 1 | `(totalSubBlockNum+1)*VECTOR_MAX_BYTESIZE` | 32768 |
+| `sum` | 128 个 256B 块（每子块 sum 槽 + totalSum） | float | 1 | `(totalSubBlockNum+1)*VECTOR_MAX_BYTESIZE` | 32768 |
+| `sink` | 64 float（无条件预留，仅 attnSink 复用方写入） | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
+| **合计** | | | | | **196864** |
+
+**占用汇总**（各表占用列之和 vs 硬件容量；字节数）：
+
+| 存储级 | 硬件容量 | 占用 | 占比 |
+|---|---|---|---|
+| UB（常规路径，n=13952） | 192 KB | 195328 B | 99.3% |
+| UB（长行路径，n=2064512） | 192 KB | 196864 B | 100.1% |
+
+要点：
+
+- **常规路径贴满 UB**：`in/out` 四个 Dtype 行缓冲合计 111616 B 是大头；本入口无扩展槽时布局的行长极限为 n=14016（恰 196608 B 顶满 192KB），典型配置 n=13952 已达 99.3%，更长行必须切 `softmax_long`；
+- **容量来源是头文件 `static_assert`**：`csrc/kernels/softmax_attn_aiv.h` 的 `static_assert` 块按 `MAX_SOFTMAX_PINGPONG_LEN=10496` 且计入全部 topK/saveMaxSum/sink 扩展槽验算（SWA+topK 绑定场景 195072 B、无 SWA 满配 186880 B，均 ≤ `UB_SIZE`，前者余 1536 B）作保；本入口扩展槽全空，故实际行长可放宽到 14016（恰占满 196608 B）；
+- **长行路径在 127 子块的行长上界处标称越界 256 B**：`RunAivSoftmaxLong` 上方头注释的容量公式未计入无条件预留的 `sink` 槽——按该公式 127 子块恰 196608 B 顶满，含 `sink` 后布局达 196864 B；本入口 `attnSink=null` 不写 `sink`，实际访问不越界，但启用 attnSink 的复用方在该极端行长下写 `sink` 会越过 UB 标称边界；
+- `temp`（常规）/`calcDst`（长行）是 `ReduceMaxV2`/`ReduceSumV2` 的部分和暂存，按 repeat 数约减半定宽。
