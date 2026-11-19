@@ -75,6 +75,9 @@ vllm serve path/to/Qwen3-32B --tensor-parallel-size 8 --additional-config='{"xli
 
 编译构建、容器镜像、源码安装、代码检查等开发相关内容，请参考 [开发指南](doc/developer_guide/contributing.md)
 
+无 NPU 环境下在 CANN 模拟器上构建并运行 kernel 测试，请参考
+[模拟器指南](doc/developer_guide/simulator.md) 和 `tests/run_sim.sh`。
+
 ## 环境变量
 
 xlite使用的环境变量及其配置方法，请参考 [环境变量](doc/user_guide/ENVIRONMENT_VARIABLES.md)

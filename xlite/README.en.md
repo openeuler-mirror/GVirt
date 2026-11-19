@@ -74,6 +74,10 @@ vllm serve path/to/Qwen3-32B --tensor-parallel-size 8 --additional-config='{"xli
 
 For build and compilation, container images, source installation, code checks and other development-related content, please refer to [Development Guide](doc/developer_guide/contributing.md)
 
+To build xlite and run kernel tests on the CANN simulator without an NPU, see
+[Running kernels on the simulator](doc/developer_guide/simulator.md) and
+`tests/run_sim.sh`.
+
 ## Directory Structure
 
 ```text
