@@ -221,13 +221,32 @@ def run_benchmark(model_type: str = "moe", report_subdir: Path | None = None) ->
         if should_disable_xccl():
             env["XLITE_DISABLE_XCCL"] = "True"
 
-        # 执行基准测试脚本
-        result = subprocess.run(
-            ["bash", "online_server_compare.sh", model_type], cwd=E2E_DIR, env=env, capture_output=True, text=True
-        )
+        # 执行基准测试脚本: 实时流式输出到终端并落盘
+        # online_server_compare.sh 耗时长 (3 服务 × N 场景), 需实时看到
+        # 服务启动/就绪/场景进度等运行时打印, 故不 capture, 改为逐行流式输出.
+        online_log = report_subdir / "online_server_compare.log"
+        log_info(f"在线压测日志: {online_log}")
+        with (
+            open(online_log, "w", encoding="utf-8") as logf,
+            subprocess.Popen(
+                ["bash", "online_server_compare.sh", model_type],
+                cwd=E2E_DIR,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                bufsize=1,
+            ) as proc,
+        ):
+            assert proc.stdout is not None  # stdout=PIPE guarantees non-None
+            for line in proc.stdout:
+                print(line, end="", flush=True)
+                logf.write(line)
+                logf.flush()
+            returncode = proc.wait()
 
-        if result.returncode != 0:
-            log_error(f"基准测试执行失败: {result.stderr}")
+        if returncode != 0:
+            log_error(f"基准测试执行失败 (返回码 {returncode})，详见: {online_log}")
             return None
 
         log_success("基准测试执行完成!")
@@ -1371,9 +1390,9 @@ def _collect_online_failures(report_dir: Path) -> list[str]:
     """
     failures: list[str] = []
 
-    # 1. 服务未就绪: server_<model>_input<in>_output<out>_<service>.log
+    # 1. 服务未就绪: server_<model>_<service>.log（服务外提后每服务一个日志, 不再按场景分）。
     #    未含就绪关键字即判失败; 若同时含 OOM, 标注为 OOM 以便直接定位根因。
-    for server_log in sorted(report_dir.glob("server_*_input*_output*_*.log")):
+    for server_log in sorted(report_dir.glob("server_*_*.log")):
         try:
             content = server_log.read_text(encoding="utf-8", errors="replace")
         except Exception:
