@@ -6,9 +6,9 @@
  * along the column dim by ConcatCol/ForwardHcPre). GLM-5.3 has no hc_head
  * parameter, so the head is a plain unweighted mean over the hcMult streams:
  *
- *   y[m, j] = (1 / hcMult) * 危_{h=0}^{hcMult-1} x[m, h*hidden + j]
+ *   y[m, j] = (1 / hcMult) * Σ_{h=0}^{hcMult-1} x[m, h*hidden + j]
  *
- * This is the unweighted counterpart of hc_pre (y = 危_h pre[h] * x[m,h,*]).
+ * This is the unweighted counterpart of hc_pre (y = Σ_h pre[h] * x[m,h,*]).
  * Accumulation is done in fp32 (matching PyTorch's bf16 .mean() which upcasts),
  * then cast back to Dtype; the per-stream scale 1/hcMult is folded into the
  * vaxpy accumulator so no separate vmuls pass is needed. invHcMult is passed as
@@ -59,7 +59,7 @@ __aicore__ inline void hc_mean_collapse(__gm__ Dtype *xResid, __gm__ Dtype *yOut
     off += yDtypeLen;
     __ubuf__ float *xFp32 = reinterpret_cast<__ubuf__ float *>(off);  // [hcMult, hidden] as fp32
     off += residFp32Len;
-    __ubuf__ float *yCalc = reinterpret_cast<__ubuf__ float *>(off);  // accumulator 危_h x[h]
+    __ubuf__ float *yCalc = reinterpret_cast<__ubuf__ float *>(off);  // accumulator Σ_h x[h]
     off += mergeFp32Len;
     assert(off <= UB_SIZE);
 
@@ -87,7 +87,7 @@ __aicore__ inline void hc_mean_collapse(__gm__ Dtype *xResid, __gm__ Dtype *yOut
         }
         pipe_barrier(PIPE_V);
 
-        // V: yCalc = 0, then yCalc = 危_h invHcMult * xFp32[h]  ==  mean over hcMult streams.
+        // V: yCalc = 0, then yCalc = Σ_h invHcMult * xFp32[h]  ==  mean over hcMult streams.
         vector_dup(yCalc, 0.0f, vecRep, 1, 1, 8, 0);
         pipe_barrier(PIPE_V);
         for (uint32_t h = 0; h < hcMult; h++) {

@@ -18,7 +18,7 @@ indexerCache[mainSlot/kpool 池槽] = out                # 分页写入, 池槽�
 
 **spill kernel**(每条保留行一个程序,共 `numReqs * cap` 个程序):把当前 batch 的每个 token 的 k/gate 行(两个 FP32 行)追加写入该请求的 tail ring 绝对槽 `physical*tailStrideT + (pos % cap)*2*headDim`(`physical = tailBlockTable[req]`),即 ring 的**最新 `cap` 个有效行**被逐条覆写。
 
-两个 kernel 同 stream 顺序执行:compress 先读历史 ring 行、spill 后覆写它们,host 的下发顺序保证历史行在被读取前不被破坏。模型路径由 `csrc/model.cpp` 的 `XModel::ForwardAttnIndexerKpool` 在 `indexKpoolCompress && indexKpool > 1` 时调用,tail ring 与分页 indexer cache 分别为层 cache 元组的第 4/3 项。
+两个 kernel 同 stream 顺序执行:compress 先读历史 ring 行、spill 后覆写它们,host 的下发顺序保证历史行在被读取前不被破坏。模型路径在阶段 2 的 adapter 中于 `indexKpoolCompress && indexKpool > 1` 时调用,tail ring 与分页 indexer cache 分别为层 cache 元组的第 4/3 项。
 
 ## 输入输出参数
 
@@ -26,9 +26,21 @@ Python 绑定(`xlite/_C.pyi` 的 `kpool_tail_compress_and_spill`):
 
 ```python
 kpool_tail_compress_and_spill(
-    rt, tail_cache, indexer_cache, k, gate, ape, positions, query_start_loc,
-    lens, cached_lens, slot_mapping, tail_block_table,
-    head_dim, kpool, main_block_size,
+    rt,
+    tail_cache,
+    indexer_cache,
+    k,
+    gate,
+    ape,
+    positions,
+    query_start_loc,
+    lens,
+    cached_lens,
+    slot_mapping,
+    tail_block_table,
+    head_dim,
+    kpool,
+    main_block_size,
 )
 ```
 
@@ -36,7 +48,7 @@ host 侧派生参数(`csrc/op.cpp` 的 `XliteOpKpoolTailCompressAndSpill`):`numT
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
-| tailCache | 输入+原位输出 | `[tailBlocks, cap, 2*headDim]` | fp32 | 请求 tail ring 的分页池视图,每行一个池槽的 `[k | gate]` 两段行主序;允许 dim-0 页 padding(`stride[0] >= cap*2*headDim`,现网页 40 行),dim-0 stride 以 `tailStrideT` 传入 kernel。compress 读历史行,spill 原位覆写当前 batch 的最新行(本 batch 内已存在的行同样被 spill 重写,值不变) |
+| tailCache | 输入+原位输出 | `[tailBlocks, cap, 2*headDim]` | fp32 | 请求 tail ring 的分页池视图,每行一个池槽的 `[k / gate]` 两段行主序;允许 dim-0 页 padding(`stride[0] >= cap*2*headDim`,现网页面 40 行),dim-0 stride 以 `tailStrideT` 传入 kernel。compress 读历史行,spill 原位覆写当前 batch 的最新行(本 batch 内已存在的行同样被 spill 重写,值不变) |
 | indexerCache | 输出 | `[idxBlocks, indexerBlockSize, 1, headDim]` | bf16 / fp16 / fp32 | 分页 indexer cache(mainSlot/kpool 池槽粒度);允许 dim-0 页 padding(`stride[0] >= indexerBlockSize*headDim`),dim-0 stride 以 `idxStrideT` 传入 kernel;dtype 仅决定 store 宽度 |
 | k | 输入 | `[numTokens, headDim]` | fp32 | 当前 batch token 的 k 投影(上游 `wk(x) -> k_norm`,端到端 fp32);行距 `kStrideT` 取 `k.shape[1]` |
 | gate | 输入 | `[numTokens, headDim]` | fp32 | 当前 batch token 的 kpool compress gate 投影(`x.float() @ W_f32`);行距 `gateStrideT` 取 `gate.shape[1]` |
@@ -119,10 +131,49 @@ FP32 契约(对齐原生实现 `sparse_attn_indexer_kpool.py`):**k/gate/ape/tail
 
 compress 读 ring 的历史行、spill 覆写同一批 ring 行,二者通过同 stream 顺序下发实现"先读后写"(`csrc/op.cpp` 的 `XliteOpKpoolTailCompressAndSpill`,compress launch 在前、spill launch 在后):同 stream 上的 kernel 串行执行,spill 不会在 compress 仍在读取时覆盖历史行。两 kernel 之间无显式同步标志。
 
+### 片上缓冲分配与占用汇总(AIV UB)
+
+两个 kernel 各自拥有独立的每 block UB,顺序 launch,占用**不叠加**。典型配置取 GLM-5.3-Flash 的 `headDim=128, kpool=4`;`headDim` 必须为 64 的倍数且 ≤256,`kpool` ≤8。
+
+**compress kernel(KpoolTailCompress,AIV UB 容量 192KB,每 block 一份)**
+
+| 缓冲 | 内容 | shape(每份) | dtype | 乒乓个数 | 单份大小(字节) | BF16/FP16 占用(B) | FP32 占用(B) |
+|---|---|---|---|---|---|---|---|
+| `apeF` | 每池槽位的加性权重 | `[kpool, headDim]` | float | 1 | `ROUND_UP(kpool*headDim*4, 256)` | 2048 | 2048 |
+| `kF` | 池窗口 k 工作区 | `[kpool, headDim]` | float | 1 | `ROUND_UP(kpool*headDim*4, 256)` | 2048 | 2048 |
+| `gF` | 池窗口 gate/softmax 工作区 | `[kpool, headDim]` | float | 1 | `ROUND_UP(kpool*headDim*4, 256)` | 2048 | 2048 |
+| `maxF` | 逐维 softmax 最大值 | `[headDim]` | float | 1 | `ROUND_UP(headDim*4, 256)` | 512 | 512 |
+| `sumF` | 逐维 softmax 分母 | `[headDim]` | float | 1 | `ROUND_UP(headDim*4, 256)` | 512 | 512 |
+| `accF` | 加权和/最终输出 | `[headDim]` | float | 1 | `ROUND_UP(headDim*4, 256)` | 512 | 512 |
+| `tmpF` | `kF*gF` 乘积累加暂存 | `[headDim]` | float | 1 | `ROUND_UP(headDim*4, 256)` | 512 | 512 |
+| `gTmpD` | 降宽 store 暂存 | `[headDim]` | Dtype | 1 | `ROUND_UP(headDim*sizeof(Dtype), 256)` | 256 | 512 |
+| **合计** | | | | | | **8448** | **8704** |
+
+**spill kernel(KpoolTailSpill,AIV UB 容量 192KB,每 block 一份)**
+
+| 缓冲 | 内容 | shape(每份) | dtype | 乒乓个数 | 单份大小(字节) | 占用(B) |
+|---|---|---|---|---|---|---|
+| `rowF` | 单条 k 或 gate 行 | `[headDim]` | float | 1 | `ROUND_UP(headDim*4, 256)` | 512 |
+| **合计** | | | | | | **512** |
+
+**占用汇总**(字节数):
+
+| kernel | 存储级 | 硬件容量 | BF16/FP16 占用 | 占比 | FP32 占用 | 占比 |
+|---|---|---|---|---|---|---|
+| compress | UB(每 block) | 192 KB | 8448 B | 4.30% | 8704 B | 4.43% |
+| spill | UB(每 block) | 192 KB | 512 B | 0.26% | 512 B | 0.26% |
+
+要点:
+
+- `apeF`/`kF`/`gF` 各 2048 B(`kpool*headDim*4`),是 compress 的主要占用;四个 `headDim` 行缓冲各 512 B;
+- BF16/FP16 与 FP32 的唯一差异是 `gTmpD`(256 B vs 512 B),因为 `k/gate/ape/tailCache` 恒为 FP32,只有 `indexerCache` 的 store 宽度随 dtype 改变;
+- spill 只复用一条 `rowF`,占用固定 512 B;两个 kernel 串行执行,各自的 UB 上限由 `assert(off <= UB_SIZE)` 守护;
+- host 侧以 `headDim <= KPOOL_TAIL_MAX_HEAD_DIM=256`、`kpool <= KPOOL_TAIL_MAX_KPOOL=8` 约束该布局的定长上界。
+
 ## 关键代码位置
 
 - `csrc/kernels/kpool_tail_compress.h` 的 `KpoolTailCompress` — compress 模板类(`ProcessOneToken` / `GatherWindow` / `CompressAndStore` 为核心三步)
 - `csrc/kernels/kpool_tail_compress.h` 的 `KpoolTailSpill` — spill 模板类(`ProcessOneRow` 为核心)
 - `csrc/kernels/kpool_tail_compress.h` 的 `KPOOL_TAIL_COMPRESS_FUNC_DEFINE` / `KPOOL_TAIL_SPILL_FUNC_DEFINE` — 两个 kernel 的导出宏
 - `csrc/op.cpp` 的 `XliteOpKpoolTailCompressAndSpill` — host 封装:全部 fail-closed 校验、dtype 分派与两段 launch
-- `csrc/model.cpp` 的 `XModel::ForwardAttnIndexerKpool` — 模型路径调用点(k/gate 的 fp32 投影来源与本算子的衔接)
+- 阶段 2 adapter 的模型路径 — k/gate 的 fp32 投影来源与本算子的衔接

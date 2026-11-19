@@ -3138,6 +3138,9 @@ void XliteOpRecurrentGatedDeltaRuleKdaPaged(
         !matrixMatches(beta, vHeads) || !matrixMatches(gate, kHeads * kDim)) {
         throw std::runtime_error("KDA paged recurrent: activation shape/stride mismatch");
     }
+    if (gate.dtype != query.dtype) {
+        throw std::runtime_error("KDA paged recurrent: gate dtype must match activation dtype");
+    }
     if (aLog.dtype != FP32 || aLog.shape.size() != 1 || aLog.numel != kHeads ||
         dtBias.dtype != FP32 || dtBias.shape.size() != 1 || dtBias.numel != kHeads * kDim) {
         throw std::runtime_error("KDA paged recurrent: A_log/dt_bias must be fp32 [Hk]/[Hk*K]");
@@ -3913,6 +3916,9 @@ void XliteOpRecurrentGatedDeltaRuleKdaPrefillPaged(XRuntime &rt, XTensor &query,
         !matrixMatches(beta, vHeads) || !matrixMatches(gate, kHeads * kDim)) {
         throw std::runtime_error("KDA paged recurrent: activation shape/stride mismatch");
     }
+    if (gate.dtype != query.dtype) {
+        throw std::runtime_error("KDA paged recurrent: gate dtype must match activation dtype");
+    }
     if (aLog.dtype != FP32 || aLog.shape.size() != 1 || aLog.numel != kHeads ||
         dtBias.dtype != FP32 || dtBias.shape.size() != 1 || dtBias.numel != kHeads * kDim) {
         throw std::runtime_error("KDA paged recurrent: A_log/dt_bias must be fp32 [Hk]/[Hk*K]");
@@ -3945,7 +3951,7 @@ void XliteOpRecurrentGatedDeltaRuleKdaPrefillPaged(XRuntime &rt, XTensor &query,
            state.dtype == FP32 ? 1u : 0u, scale, lowerBound, normEps, starts.ptr, initial.ptr,
            tokens);
 }
-// HcMeanCollapse: y[m,hidden] = (1/hcMult) * 危_{h} x[m, h*hidden + j]. Weight-free mean over
+// HcMeanCollapse: y[m,hidden] = (1/hcMult) * Σ_{h} x[m, h*hidden + j]. Weight-free mean over
 // the hcMult MHC streams (GLM-5.3 head has no hc_head param). invHcMult is host-computed and
 // passed as float (CCE forbids uint->float cast inside aicore). Accumulation is fp32 inside the
 // kernel (mirrors PyTorch bf16 .mean() upcast), so only bf16/f16 hidden-state dtypes are wired.
@@ -4031,6 +4037,9 @@ void XliteOpKpoolTailCompressAndSpill(XRuntime &rt, XTensor &tailCache, XTensor 
     // Host mirrors of the kernel's silent early-returns.
     if (headDim > KPOOL_TAIL_MAX_HEAD_DIM || kpool > KPOOL_TAIL_MAX_KPOOL) {
         throw std::runtime_error(std::string(__func__) + ": headDim/kpool exceed kernel budget");
+    }
+    if (headDim % 64 != 0) {
+        throw std::runtime_error(std::string(__func__) + ": headDim must be a multiple of 64");
     }
     // Ring must hold one compress window; pooled slots stay integral.
     if (cap < kpool || mainBlockSize % kpool != 0) {

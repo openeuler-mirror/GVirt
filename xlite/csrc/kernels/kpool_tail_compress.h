@@ -126,7 +126,9 @@ public:
         while (remain > 0) {
             int rep = remain > VECTOR_MAX_REPEAT ? VECTOR_MAX_REPEAT : remain;
             if constexpr (std::is_same<Dtype, float16_t>::value) {
-                vconv_f322f16(dst + done, src + done, rep, 1, 1, 4, 8);
+                // Use the round-to-nearest variant, matching BF16 and the other FP16
+                // output paths (muls/softmax). The truncating variant is not used here.
+                vconv_f322f16r(dst + done, src + done, rep, 1, 1, 4, 8);
             } else {
                 vconv_f322bf16r(dst + done, src + done, rep, 1, 1, 4, 8);
             }
@@ -153,7 +155,7 @@ public:
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
     }
 
-    __aicore__ inline void GatherWindow(uint32_t ti, int32_t pos, int32_t reqStart, int32_t seqLen,
+    __aicore__ inline void GatherWindow(int32_t pos, int32_t reqStart, int32_t seqLen,
                                         int32_t prevEnd, uint32_t reqId)
     {
         int32_t physical = tailBlockTable[reqId];
@@ -197,7 +199,7 @@ public:
 
     // Softmax(gate + ape) over the pool axis (per-dim) + weighted sum of k.
     // Expects kF/gF already gathered ([kpool, headDim] FP32 each) and apeF loaded.
-    __aicore__ inline void CompressAndStore(uint32_t pi, int64_t slot)
+    __aicore__ inline void CompressAndStore(int64_t slot)
     {
         for (uint32_t p = 0; p < kpool; ++p) {
             vadd(gF + p * headDim, gF + p * headDim, apeF + p * headDim, headRepeat, 1, 1, 1, 8, 8,
@@ -287,8 +289,8 @@ public:
         int32_t seqLen = cachedLens[reqId] + queryLen;
         int32_t reqStart = seqLen - queryLen;
 
-        GatherWindow(ti, pos, reqStart, seqLen, queryStart, reqId);
-        CompressAndStore(ti, slot);
+        GatherWindow(pos, reqStart, seqLen, queryStart, reqId);
+        CompressAndStore(slot);
     }
 
     __aicore__ inline void Process()
@@ -385,7 +387,6 @@ public:
 
         headBytesF = headDim * sizeof(float);
         headBlocksF = DIV_ROUND_UP(headBytesF, 32);
-        headRepeat = DIV_ROUND_UP(headDim, VECTOR_MAX_NUM_OF_FP32);
 
         uint64_t off = 0;
         rowF = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
@@ -480,7 +481,6 @@ private:
     uint32_t tailStrideT;
     uint32_t headBytesF;
     uint32_t headBlocksF;
-    int headRepeat;
 };
 
 #define KPOOL_TAIL_COMPRESS_FUNC_DEFINE(dtype)                                                     \

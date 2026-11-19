@@ -1,3 +1,5 @@
+import sys
+
 import torch
 import torch_npu  # noqa: F401
 
@@ -125,6 +127,7 @@ def run_scenario_a(dtype, pitched=False):
     comp_ref, tail_ref = torch_ref_a(tail0)
     idx_c = make_pitched_indexer(dtype) if pitched else torch.zeros(NB_IDX, IBS, 1, D, dtype=dtype)
     tail_c = make_pitched_tail() if pitched else tail0.clone()
+    torch.npu.synchronize()
     kpool_tail_compress_and_spill(
         rt,
         tail_c,
@@ -189,6 +192,7 @@ def run_scenario_b(dtype):
     compB_ref, tailB_ref = torch_ref_b()
     idx_c = torch.zeros(NB_IDX, IBS, 1, D, dtype=dtype)
     tail_c = tail0_b.clone()
+    torch.npu.synchronize()
     kpool_tail_compress_and_spill(
         rt,
         tail_c,
@@ -217,10 +221,96 @@ def run_scenario_b(dtype):
     return ok
 
 
+def run_head_dim_256(dtype):
+    dim, cap, pool, seq = 256, 4, 4, 9
+    pos = torch.arange(seq, dtype=torch.int64, device=DEV)
+    q_start = torch.tensor([0, seq], dtype=torch.int32, device=DEV)
+    lens = torch.tensor([seq], dtype=torch.int32, device=DEV)
+    cached = torch.zeros(1, dtype=torch.int32, device=DEV)
+    k = torch.randn(seq, dim, dtype=torch.float32, device=DEV)
+    gate = torch.randn(seq, dim, dtype=torch.float32, device=DEV)
+    ape256 = torch.randn(pool, dim, dtype=torch.float32, device=DEV)
+    tail = torch.zeros(1, cap, 2 * dim, dtype=torch.float32, device=DEV)
+    idx = torch.zeros(NB_IDX, IBS, 1, dim, dtype=dtype, device=DEV)
+    main_slot = pos.to(torch.int32)
+    idx_slot = torch.where(
+        (pos + 1) % pool == 0,
+        main_slot // pool,
+        torch.tensor(-1, dtype=torch.int32, device=DEV),
+    )
+    tail_slot = pos.to(torch.int32) % cap
+    tail_block = torch.zeros(1, 1, dtype=torch.int32, device=DEV)
+
+    comp, tail_ref = {}, tail.clone()
+    for p in range(seq):
+        slot = int(idx_slot[p])
+        if slot < 0 or (p + 1) % pool:
+            continue
+        pk = torch.zeros(pool, dim, dtype=torch.float32, device=DEV)
+        pg = torch.zeros(pool, dim, dtype=torch.float32, device=DEV)
+        for j in range(pool):
+            pp = p - (pool - 1 - j)
+            if pp >= 0:
+                pk[j], pg[j] = k[pp], gate[pp]
+        comp[slot] = (torch.softmax(pg + ape256, dim=0) * pk).sum(0)
+    for off in range(cap):
+        row = seq - 1 - off
+        tail_ref[0, int(tail_slot[row])] = torch.cat([k[row], gate[row]])
+
+    torch.npu.synchronize()
+    kpool_tail_compress_and_spill(
+        rt,
+        tail,
+        idx,
+        k,
+        gate,
+        ape256,
+        pos,
+        q_start,
+        lens,
+        cached,
+        main_slot,
+        tail_block,
+        dim,
+        pool,
+        MAIN_BS,
+    )
+    return check(f"S3A-D256/{dtype}", idx, tail, comp, tail_ref, dtype)
+
+
+def check_head_dim_reject():
+    try:
+        kpool_tail_compress_and_spill(
+            rt,
+            tail_cache0.clone(),
+            indexer_cache0.clone(),
+            k32,
+            gate32,
+            ape,
+            positions64,
+            query_start_loc,
+            seq_lens_t,
+            cached_lens_t,
+            main_slot,
+            tail_block_table,
+            96,
+            POOL,
+            MAIN_BS,
+        )
+    except RuntimeError as exc:
+        assert "multiple of 64" in str(exc), str(exc)
+        print("PASS kpool headDim alignment rejection", flush=True)
+        return True
+    raise AssertionError("kpool accepted non-64-multiple headDim")
+
+
 if __name__ == "__main__":
     ok = True
-    for dtype in [torch.bfloat16, torch.float32]:
+    for dtype in [torch.bfloat16, torch.float16, torch.float32]:
         ok &= run_scenario_a(dtype)
         ok &= run_scenario_a(dtype, pitched=True)
         ok &= run_scenario_b(dtype)
+        ok &= run_head_dim_256(dtype)
+    ok &= check_head_dim_reject()
     print(f"S3 RESULT: {'PASS' if ok else 'FAIL'}")
+    sys.exit(0 if ok else 1)

@@ -30,7 +30,7 @@ def torch_ref_refactored(
     decay = lower_bound * torch.sigmoid(
         a_log_cpu.float().exp()[:, None] * (g1_b.to(dtype).float() + dt_bias_cpu.float())
     )  # [kh, kd]
-    old = old * decay.exp()[:, None, :]
+    old = old * decay.exp().repeat_interleave(vh // kh, dim=0)[:, None, :]
     beta = torch.sigmoid(beta_b.to(dtype).float())[:, None]  # [vh, 1]
     kk = l2norm(k_b.to(dtype).float()).repeat_interleave(vh // kh, dim=0)  # [vh, kd]
     qq = (l2norm(q_b.to(dtype).float()) * scale).repeat_interleave(vh // kh, dim=0)
@@ -156,21 +156,25 @@ def check_case(rt, dtype, state_dtype, batch, kh, vh, kd, vd, lower_bound, scale
 
 def _kda_token_step(cur, k_cpu, q_cpu, v_cpu, beta_b, g1_b, a_log_cpu, dt_bias_cpu, lower_bound, scale, dtype):
     # Same fp32 in-kernel math as torch_ref_refactored, but stepping an explicit
-    # running state (kh == vh in this KDA contract, so per-head arrays broadcast 1:1).
+    # running state. KDA supports vHeads = repeat * kHeads; expand q/k/decay by
+    # the group factor before broadcasting against the vHead state.
+    kh, vh = k_cpu.shape[-2], cur.shape[0]
+    repeat = vh // kh
     decay = lower_bound * torch.sigmoid(
         a_log_cpu.float().exp()[:, None] * (g1_b.to(dtype).float() + dt_bias_cpu.float())
     )  # [kh, kd]
+    decay = decay.repeat_interleave(repeat, dim=0)
     cur = cur * decay.exp()[:, None, :]
     beta = torch.sigmoid(beta_b.to(dtype).float())[:, None]  # [vh, 1]
-    kk = l2norm(k_cpu.to(dtype).float())  # [vh, kd]
-    qq = l2norm(q_cpu.to(dtype).float()) * scale
+    kk = l2norm(k_cpu.to(dtype).float()).repeat_interleave(repeat, dim=0)  # [vh, kd]
+    qq = (l2norm(q_cpu.to(dtype).float()) * scale).repeat_interleave(repeat, dim=0)
     delta = (v_cpu.to(dtype).float() - (cur * kk[:, None, :]).sum(-1)) * beta
     cur = cur + delta[:, :, None] * kk[:, None, :]
     out = (cur * qq[:, None, :]).sum(-1)
     return out, cur
 
 
-def check_prefill_case(rt, dtype, state_dtype, seg_lens, kh, vh, kd, vd, lower_bound, scale):
+def check_prefill_case(rt, dtype, state_dtype, seg_lens, kh, vh, kd, vd, lower_bound, scale, null_page=False):
     tokens = sum(seg_lens)
     pages, offset = len(seg_lens) + 4, 32
     logical = vh * vd * kd
@@ -190,6 +194,8 @@ def check_prefill_case(rt, dtype, state_dtype, seg_lens, kh, vh, kd, vd, lower_b
         torch.float32: (1e-4, 2e-6),
     }[state_dtype]
     order = list(range(2, len(seg_lens) + 2))
+    if null_page:
+        order[0] = 0
     indices = torch.tensor(order, dtype=torch.int32, device="npu")
     starts = torch.tensor([0] + list(torch.cumsum(torch.tensor(seg_lens), 0)), dtype=torch.int32, device="npu")
     # Alternate fresh (initial=0: zero start, page overwritten at commit) and
@@ -216,6 +222,9 @@ def check_prefill_case(rt, dtype, state_dtype, seg_lens, kh, vh, kd, vd, lower_b
         page = order[r]
         if seg == 0:
             continue  # empty segment leaves the page untouched
+        if page <= 0:
+            t += seg  # null page: output stays zero and state is untouched
+            continue
         cur = torch.zeros(vh, vd, kd) if initial[r] == 0 else ref_state[page].float().clone()
         for _ in range(seg):
             out_ref, cur = _kda_token_step(
@@ -265,6 +274,62 @@ def check_prefill_case(rt, dtype, state_dtype, seg_lens, kh, vh, kd, vd, lower_b
     )
 
 
+def check_gate_dtype_reject(rt):
+    dev = "npu"
+    batch, kh, vh, kd, vd = 1, 2, 2, 64, 64
+    q = torch.randn(batch, kh * kd, dtype=torch.bfloat16, device=dev)
+    k = torch.randn(batch, kh * kd, dtype=torch.bfloat16, device=dev)
+    v = torch.randn(batch, vh * vd, dtype=torch.bfloat16, device=dev)
+    beta = torch.randn(batch, vh, dtype=torch.bfloat16, device=dev)
+    gate = torch.randn(batch, kh * kd, dtype=torch.float16, device=dev)
+    a_log = torch.zeros(kh, dtype=torch.float32, device=dev)
+    dt_bias = torch.zeros(kh * kd, dtype=torch.float32, device=dev)
+    state = torch.zeros(4, vh, vd, kd, dtype=torch.float32, device=dev)
+    out = torch.empty(batch, vh * vd, dtype=torch.bfloat16, device=dev)
+    indices = torch.tensor([2], dtype=torch.int32, device=dev)
+    starts = torch.tensor([0, 1], dtype=torch.int32, device=dev)
+    initial = torch.tensor([1], dtype=torch.int32, device=dev)
+    scale = 1.0 / math.sqrt(kd)
+    for fn, args in (
+        (
+            recurrent_gated_delta_rule_kda_paged,
+            (rt, q, k, v, beta, gate, a_log, dt_bias, state, out, indices, kh, vh, kd, vd, scale, 0.5, NORM_EPS),
+        ),
+        (
+            recurrent_gated_delta_rule_kda_prefill_paged,
+            (
+                rt,
+                q,
+                k,
+                v,
+                beta,
+                gate,
+                a_log,
+                dt_bias,
+                state,
+                out,
+                indices,
+                starts,
+                initial,
+                kh,
+                vh,
+                kd,
+                vd,
+                scale,
+                0.5,
+                NORM_EPS,
+            ),
+        ),
+    ):
+        try:
+            fn(*args)
+        except RuntimeError as exc:
+            assert "gate dtype" in str(exc), str(exc)
+        else:
+            raise AssertionError(f"{fn.__name__}: gate dtype mismatch was not rejected")
+    print("PASS KDA gate dtype rejection", flush=True)
+
+
 def run(device):
     torch.npu.set_device(device)
     torch.manual_seed(73)
@@ -272,6 +337,8 @@ def run(device):
     # GLM-5.3-Flash KDA: kh == vh (same head count), kd == vd == head_dim.
     cases = [(3, 2, 2, kd, 64 if kd % 32 else 128) for kd in range(16, 129, 16)]
     cases += [(1, 16, 16, 128, 128), (4, 16, 16, 128, 128)]
+    # Grouped vHeads > kHeads: kernel maps kh = h / (vHeads / kHeads).
+    cases += [(3, 2, 4, 64, 64), (2, 4, 8, 64, 128)]
     bounds = [(-5.0, None), (0.5, 1.0 / math.sqrt(128))]
     for lower_bound, scale in bounds:
         eff_scale = scale if scale is not None else 1.0
@@ -287,6 +354,9 @@ def run(device):
             for state_dtype in dict.fromkeys((dtype, torch.float32)):
                 check_prefill_case(rt, dtype, state_dtype, [3, 1, 5, 2], 2, 2, 64, 64, lower_bound, eff_scale)
         check_prefill_case(rt, torch.bfloat16, torch.float32, [4, 0, 2], 2, 2, 64, 64, 0.5, eff_scale)
+        check_prefill_case(rt, torch.bfloat16, torch.float32, [3, 1, 5, 2], 2, 4, 64, 128, 0.5, eff_scale)
+        check_prefill_case(rt, torch.bfloat16, torch.float32, [2, 3], 2, 2, 64, 64, 0.5, eff_scale, null_page=True)
+    check_gate_dtype_reject(rt)
     print("PASS KDA safe-gate paged recurrent: all cases", flush=True)
 
 

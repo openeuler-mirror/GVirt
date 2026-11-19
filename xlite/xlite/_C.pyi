@@ -4769,7 +4769,7 @@ def recurrent_gated_delta_rule_kda_paged(
     KDA safe-gate variant of :func:`recurrent_gated_delta_rule_paged`: the gate is per-K-head
     (``gate`` is [B, Hk*K], not [B, Hv]) and beta/decay are computed inside the kernel
     from the safe-gate parameters ``a_log`` [Hk] / ``dt_bias`` [Hk*K] (both FP32) with
-    ``lower_bound`` clamping and ``norm_eps`` RMS normalization; ``beta`` is the [B, Hv]
+    ``lower_bound`` clamping and ``norm_eps`` L2 normalization; ``beta`` is the [B, Hv]
     beta input. Q/K are [B, Hk*K], value/out [B, Hv*V]. Activations are contiguous
     FP32/FP16/BF16; state has the same dtype or FP32. Hk must divide Hv, K is a multiple
     of 16 up to 128, V is a multiple of 64 up to 128. Page metadata follows the same
@@ -4806,7 +4806,7 @@ def recurrent_gated_delta_rule_kda_prefill_paged(
     value/out [T, Hv*V], beta [T, Hv], starts INT32[B+1], initial INT32[B], only the final
     state is committed to the page) with the KDA per-K-head raw gate: ``gate`` [T, Hk*K] and
     beta/decay derived in-kernel from FP32 ``a_log`` [Hk] / ``dt_bias`` [Hk*K] with
-    ``lower_bound`` clamping and ``norm_eps`` RMS normalization. Token recurrence is
+    ``lower_bound`` clamping and ``norm_eps`` L2 normalization. Token recurrence is
     sequential within each state tile (not FLA chunked WY). The binding synchronizes.
     """
     ...
@@ -4844,7 +4844,7 @@ def kpool_tail_compress_and_spill(
     Two launches over one binding. Compress: for each current-step token, the pooled
     write slot ``mainSlot/kpool`` in the paged indexer cache is filled from the request's
     tail ring (``tail_cache`` [blocks, cap, 2*head_dim] FP32, each row one pool slot's
-    ``[k | gate]`` pair) using the per-kpool-position mean weights ``ape`` [kpool, head_dim]
+    ``[k | gate]`` pair) using the FP32 additive bias ``ape`` [kpool, head_dim] before softmax
     (FP32). Spill: the new tail tokens' ``k``/``gate`` (both FP32, [tokens, head_dim]) are
     appended to each request's ring row. ``k``/``gate`` are the fused FP32 projections for
     the current tokens; metadata tensors follow the family convention (positions INT64,
