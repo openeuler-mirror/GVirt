@@ -14,31 +14,38 @@ MODEL_TYPE=${1:-moe}
 RESUME_DIR_ARG=${2:-}
 
 # 定义模型配置
+# 格式: <served_name>|<model_path>|<n_layers>
+#   n_layers（可省略，默认 0=全量加载）: >0 时用 load_format=dummy 只跑前 n_layers 层，
+#   经 online_api_server.sh 的 N_LAYERS/LF 环境变量注入。
 declare -A MODELS
 MODELS[moe]="Qwen3-30B-A3B-Instruct-2507|/mnt/nvme0n1/models/Qwen3-30B-A3B-Instruct-2507"
 MODELS[moe_quant]="Qwen3-30B-A3B-Instruct-2507-w8a8|/mnt/nvme0n1/models/Qwen3-30B-A3B-Instruct-2507-w8a8"
 MODELS[moe_quant_a3]="GLM-5.2-w8a8|/mnt/nvme0n1/models/GLM-5.2-w8a8/"
+# glm5_2_dummy: GLM-5.2-w8a8 的 dummy 快速冒烟变体，跑在 910B3(A2) 上、复用 DEFAULT 6 场景（tp=8），
+# dummy 加载只跑前 10 层（N_LAYERS=10）；served_name 加 -dummy 后缀避免与全量混淆
+MODELS[glm5_2_dummy]="GLM-5.2-w8a8-dummy|/mnt/nvme0n1/models/GLM-5.2-w8a8/|10"
 
 # 确定要测试的模型列表
 declare -a TEST_MODELS
 if [ "${MODEL_TYPE}" = "all" ]; then
-    TEST_MODELS=("moe" "moe_quant" "moe_quant_a3")
+    TEST_MODELS=("moe" "moe_quant" "moe_quant_a3" "glm5_2_dummy")
 elif [ "${MODEL_TYPE}" = "moe_mix" ]; then
     TEST_MODELS=("moe" "moe_quant")
 elif [ "${MODEL_TYPE}" = "quant" ]; then
     TEST_MODELS=("moe_quant" "moe_quant_a3")
-elif [ "${MODEL_TYPE}" = "moe" ] || [ "${MODEL_TYPE}" = "moe_quant" ] || [ "${MODEL_TYPE}" = "moe_quant_a3" ]; then
+elif [ "${MODEL_TYPE}" = "moe" ] || [ "${MODEL_TYPE}" = "moe_quant" ] || [ "${MODEL_TYPE}" = "moe_quant_a3" ] || [ "${MODEL_TYPE}" = "glm5_2_dummy" ]; then
     TEST_MODELS=("${MODEL_TYPE}")
 else
-    echo "错误：无效的模型类型 '${MODEL_TYPE}'，请使用 'moe'、'moe_quant'、'moe_quant_a3'、'moe_mix'、'quant' 或 'all'"
+    echo "错误：无效的模型类型 '${MODEL_TYPE}'，请使用 'moe'、'moe_quant'、'moe_quant_a3'、'glm5_2_dummy'、'moe_mix'、'quant' 或 'all'"
     echo "用法：$0 [model_type] [output_dir]"
     echo "  model_type（可选，默认 moe）："
     echo "  moe          - 测试 Qwen3-30B-A3B-Instruct-2507 模型（默认）"
     echo "  moe_quant    - 测试 Qwen3-30B-A3B-Instruct-2507-w8a8 模型"
-    echo "  moe_quant_a3 - 测试 GLM-5.2-w8a8 模型"
+    echo "  moe_quant_a3 - 测试 GLM-5.2-w8a8 模型（全量加载）"
+    echo "  glm5_2_dummy - 测试 GLM-5.2-w8a8 模型（dummy 加载，只跑前 10 层）"
     echo "  moe_mix      - 测试 moe + moe_quant（量化前后对比）"
-    echo "  quant        - 测试所有量化模型"
-    echo "  all          - 测试所有模型"
+    echo "  quant        - 测试所有量化模型（moe_quant + moe_quant_a3，不含 glm5_2_dummy）"
+    echo "  all          - 测试所有模型（含 glm5_2_dummy）"
     echo "  output_dir（可选）：主输出目录；传入已存在且非空的目录即进入断点续测模式"
     exit 1
 fi
@@ -496,13 +503,15 @@ declare -A MODEL_SCENARIO_COUNT
 MODEL_SCENARIO_COUNT[moe]=6
 MODEL_SCENARIO_COUNT[moe_quant]=6
 MODEL_SCENARIO_COUNT[moe_quant_a3]=3
+MODEL_SCENARIO_COUNT[glm5_2_dummy]=6
 
 # 用于存储每个模型的场景测试结果
 declare -A MODEL_TEST_RESULTS
 
 # 遍历所有要测试的模型
 for model_type in "${TEST_MODELS[@]}"; do
-    IFS='|' read -r TEST_MODEL TEST_MODEL_PATH <<< "${MODELS[$model_type]}"
+    IFS='|' read -r TEST_MODEL TEST_MODEL_PATH TEST_N_LAYERS <<< "${MODELS[$model_type]}"
+    TEST_N_LAYERS=${TEST_N_LAYERS:-0}
 
     # 获取当前模型需要测试的场景数量
     MODEL_SCENARIO_LIMIT=${MODEL_SCENARIO_COUNT[$model_type]}
@@ -512,6 +521,18 @@ for model_type in "${TEST_MODELS[@]}"; do
         for k in "${!SCENARIOS_A3[@]}"; do SCENARIOS[$k]="${SCENARIOS_A3[$k]}"; done
     else
         for k in "${!SCENARIOS_DEFAULT[@]}"; do SCENARIOS[$k]="${SCENARIOS_DEFAULT[$k]}"; done
+    fi
+
+    # dummy 分层加载: 经 online_api_server.sh 的 N_LAYERS/LF 环境变量注入。
+    # 在本模型循环内 export, 循环末尾恢复, 避免污染后续模型。
+    SAVED_N_LAYERS="${N_LAYERS:-}"
+    SAVED_LF="${LF:-}"
+    if [ "${TEST_N_LAYERS}" -gt 0 ]; then
+        export N_LAYERS="${TEST_N_LAYERS}"
+        export LF="dummy"
+        echo "[dummy] ${TEST_MODEL}: 只跑前 ${TEST_N_LAYERS} 层"
+    else
+        unset N_LAYERS LF
     fi
 
     echo "======================================"
@@ -557,7 +578,7 @@ for model_type in "${TEST_MODELS[@]}"; do
         scenario_duration_formatted=$(format_duration ${scenario_duration})
 
         # 处理场景数据（捕获错误）
-        # moe_quant_a3 运行于 Ascend910(A3)，其余默认 910B3(A2)
+        # moe_quant_a3 运行于 Ascend910(A3)，其余（含 glm5_2_dummy）默认 910B3(A2)
         # 此循环位于脚本顶层而非函数内，不可使用 local（set -u 下会因 unbound variable 退出）
         device_type="910B3(A2)"
         if [ "${model_type}" = "moe_quant_a3" ]; then
@@ -575,6 +596,18 @@ for model_type in "${TEST_MODELS[@]}"; do
     echo -e "\n======================================"
     echo "模型 ${TEST_MODEL} 的测试场景全部执行完成！"
     echo "======================================"
+
+    # 恢复 dummy 分层加载相关环境变量, 避免污染下一个模型
+    if [ -n "${SAVED_N_LAYERS}" ]; then
+        export N_LAYERS="${SAVED_N_LAYERS}"
+    else
+        unset N_LAYERS
+    fi
+    if [ -n "${SAVED_LF}" ]; then
+        export LF="${SAVED_LF}"
+    else
+        unset LF
+    fi
 done
 
 # 计算和显示总耗时

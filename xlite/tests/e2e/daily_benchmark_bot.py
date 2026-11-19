@@ -2074,7 +2074,7 @@ def main():
     parser.add_argument(
         "--model",
         default="moe",
-        choices=["moe", "moe_quant", "moe_quant_a3", "moe_mix", "quant", "all"],
+        choices=["moe", "moe_quant", "moe_quant_a3", "glm5_2_dummy", "moe_mix", "quant", "all"],
         help="测试模型类型 (default: moe)",
     )
     parser.add_argument("--skip-pull", action="store_true", help="跳过代码拉取")
