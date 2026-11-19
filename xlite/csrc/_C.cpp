@@ -1464,6 +1464,16 @@ size_t _CModel::GetTensorPoolSize(int dbg)
     return _model->GetTensorPoolSize(dbg);
 }
 
+static void DsaCpMaterializeNzShard(const uint8_t *src, uint8_t *dst, size_t outer,
+                                    size_t shardBytes, size_t sourceStride)
+{
+    CHECK_ACL(aclrtSynchronizeDevice());
+    for (size_t i = 0; i < outer; ++i) {
+        CHECK_ACL(aclrtMemcpy(dst + i * shardBytes, shardBytes, src + i * sourceStride, shardBytes,
+                              ACL_MEMCPY_DEVICE_TO_DEVICE));
+    }
+}
+
 void _CModel::PrepareDsaCpDecodeWeights(const XModelConfig &c, uint32_t tpRank, uint32_t layer)
 {
     at::NoGradGuard noGrad;
@@ -1477,7 +1487,11 @@ void _CModel::PrepareDsaCpDecodeWeights(const XModelConfig &c, uint32_t tpRank, 
         shape[dim] /= c.defTpSize;
         if (!nz) {
             // Only a non-contiguous ND column slice needs a local copy.
-            auto shard = weight.narrow(dim, tpRank * shape[dim], shape[dim]).contiguous();
+            auto shard =
+                weight
+                    .narrow(static_cast<int64_t>(dim), static_cast<int64_t>(tpRank * shape[dim]),
+                            static_cast<int64_t>(shape[dim]))
+                    .contiguous();
             InitXTensor(out, shard, DBG_LOC);
             dsaCpDecodeWeightStorage.push_back(std::move(shard));
             return;
@@ -1511,14 +1525,10 @@ void _CModel::PrepareDsaCpDecodeWeights(const XModelConfig &c, uint32_t tpRank, 
         }
         // Non-transposed NZ QB slices row blocks inside each column block.
         // Materialize only this rank's blocks, keeping their NZ byte layout.
-        auto shard = at::empty({int64_t(outer * shardLen * inner)}, weight.options());
+        auto shard = at::empty({static_cast<int64_t>(outer * shardLen * inner)}, weight.options());
         auto *dst = static_cast<uint8_t *>(TensorPtr(shard));
-        CHECK_ACL(aclrtSynchronizeDevice());
         const size_t sourceStride = storageShape[storageDim] * inner * weight.element_size();
-        for (size_t i = 0; i < outer; ++i) {
-            CHECK_ACL(aclrtMemcpy(dst + i * shardBytes, shardBytes, src + i * sourceStride,
-                                  shardBytes, ACL_MEMCPY_DEVICE_TO_DEVICE));
-        }
+        DsaCpMaterializeNzShard(src, dst, outer, shardBytes, sourceStride);
         out.Init(shape, source.dtype, dst);
         dsaCpDecodeWeightStorage.push_back(std::move(shard));
     };

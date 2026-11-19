@@ -306,7 +306,7 @@ private:
     void ForwardAttnMLAV2DsaCp(XRuntime &rt, uint32_t layer,
                                std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
                                XTensor &hiddenState);
-    bool RunDsaCp(const XRuntime &rt) const;
+    [[nodiscard]] bool RunDsaCp(const XRuntime &rt) const;
     void ForwardAttnMLAV2DsaCpOutput(XRuntime &rt, uint32_t layer, XTensor &localOutput,
                                      size_t shardLen);
     void ForwardParallelEmbed(XRuntime &rt, XTensor &input, XTensor &embed, XTensor &output);

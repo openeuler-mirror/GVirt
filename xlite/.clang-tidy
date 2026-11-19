@@ -8,6 +8,7 @@ Checks: >
   -bugprone-signed-char-misuse,
   -bugprone-branch-clone,
   -bugprone-implicit-widening-of-multiplication-result,
+  -bugprone-lambda-function-name,
   -bugprone-throwing-static-initialization,
   cert-*,
   -cert-dcl03-c,
