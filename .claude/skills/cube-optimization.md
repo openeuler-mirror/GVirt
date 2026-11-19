@@ -1,0 +1,1 @@
+../../.agents/skills/cube-optimization/SKILL.md
