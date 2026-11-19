@@ -1096,12 +1096,8 @@ class Qwen3_5(nn.Module):
         if self.args.tie_word_embeddings:
             self.lm_head.weight.data = self.embed_tokens.weight.data
 
-        # CopyGmToL1 DataCopyParams strides are uint16_t: n - n0 > 65535 overflows,
-        # so large-vocab lm_head (e.g. 248320) must stay ND for the head matmul.
-        head_nz = self.xlite_weight_nz and self.args.vocab_size <= 65536
         if self.xlite_weight_nz:
-            if head_nz:
-                self.lm_head.weight.data = matrix_nd2nz(self.lm_head.weight)
+            self.lm_head.weight.data = matrix_nd2nz(self.lm_head.weight)
             for layer_id, layer in enumerate(self.layers):
                 if layer.is_full_attention:
                     # q/k/v stay ND until packed as [Q|K|V|Gate] in init_xlite_model.
