@@ -594,7 +594,8 @@ def generate_offline_report(
                 # 无基线数据等 error: 无 row_changes, 用 comparison 自身的场景字段渲染
                 detail_lines.append(f"{scenario_idx}. in={input_len} out={output_len} bs={bs}")
                 detail_lines.append(f"  ⚠️  {comparison['error']}")
-            else:
+            elif row_changes:
+                # 基线有显著变化行: 每行一个场景标题 + 表头 + 数据行
                 for row in row_changes:
                     service = row["service"]
                     concurrency = row["concurrency"]
@@ -613,11 +614,16 @@ def generate_offline_report(
                     total_rows_with_change += 1
                     cells = _render_metric_cells(changes, offline_metrics_order, _format_offline_change_value)
                     detail_lines.append(f"  | {service} bs={concurrency} | {' | '.join(cells)} |")
+            else:
+                # 基线无变化且无 error: 仍打场景标题, 让下面的前一天子块有归属
+                detail_lines.append(f"{scenario_idx}. in={input_len} out={output_len} bs={bs}")
 
             # 前一天对比明细 (信息性)
             if prev_day.get("date"):
                 prev_day_date_label = prev_day["date"]
-            detail_lines.append(f"  ↳ 与前一天({prev_day.get('date', 'unknown')})对比:")
+            # date 可能为 None (无前一天目录), 用 `or` 兜底避免渲染出 "(None)"
+            prev_day_label = prev_day.get("date") or "unknown"
+            detail_lines.append(f"  ↳ 与前一天({prev_day_label})对比:")
             if prev_day.get("error"):
                 detail_lines.append(f"    ⚠️  {prev_day['error']}")
             elif prev_day_rows:
@@ -992,8 +998,9 @@ def generate_model_report(
 
             if comparison.get("error"):
                 detail_lines.append(f"  ⚠️  {comparison['error']}")
-            else:
-                # 基线对比明细: 每行 | 并发 | 服务 | <指标单元格> |
+            elif row_changes:
+                # 基线对比明细: 仅当基线有显著变化行时才打表头与数据行，
+                # 避免基线无变化时打出空表头后再接前一天子块。
                 detail_lines.append(online_table_header)
                 detail_lines.append(online_table_sep)
                 for row in row_changes:
@@ -1003,11 +1010,14 @@ def generate_model_report(
                     total_rows_with_change += 1
                     cells = _render_metric_cells(changes, online_metrics_order, _format_change_value)
                     detail_lines.append(f"  | {row['concurrency']} | {row['service']} | {' | '.join(cells)} |")
+            # 基线无变化且无 error 时不输出基线区块, 直接进前一天子块
 
             # 前一天对比明细 (信息性): 有数据时列出变化行, 缺失/无变化时给一行提示
             if prev_day.get("date"):
                 prev_day_date_label = prev_day["date"]
-            detail_lines.append(f"  ↳ 与前一天({prev_day.get('date', 'unknown')})对比:")
+            # date 可能为 None (无前一天目录), 用 `or` 兜底避免渲染出 "(None)"
+            prev_day_label = prev_day.get("date") or "unknown"
+            detail_lines.append(f"  ↳ 与前一天({prev_day_label})对比:")
             if prev_day.get("error"):
                 detail_lines.append(f"    ⚠️  {prev_day['error']}")
             elif prev_day_rows:
