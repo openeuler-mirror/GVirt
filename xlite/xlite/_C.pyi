@@ -3506,6 +3506,7 @@ def mla_v2(
     topk_indices: torch.Tensor,
     *,
     top_k: int = 0,
+    topk_stride: int = 0,
     nz: bool = False,
     enable_flash_attention: bool = False,
     tile_size_of_cached_kv: int = 8192,
@@ -3565,14 +3566,19 @@ def mla_v2(
         batch (int): Batch size.
         scale (float): Attention scaling factor.
         topk_indices (torch.Tensor): Top-k indices tensor for sparse attention, shape
-            ``[total_query_tokens, top_k]`` int32, one row per query token
-            (``[batch, top_k]`` in decode); may be empty when ``top_k == 0``.
-        top_k (int): Number of top-k indices; 0 disables sparse attention in
-            paged mode. In dense mode this is the dense cache length
-            (``index_topk``) and must be > 0. In paged mode with ``top_k > 0``,
-            ``max_seq_len`` (block-table width narrowed by the lens) must not
-            exceed 10496 (``MAX_SOFTMAX_PINGPONG_LEN``) and ``top_k`` must be
-            <= 2048 (``MAX_TOPK_NUM``).
+            ``[total_query_tokens, topk_stride]`` int32, one row per query token
+            (``[batch, topk_stride]`` in decode); may be empty when ``top_k == 0``.
+            The row pitch may exceed the logical ``top_k`` (GLM5 packTail uses
+            2176-column rows that store 2051 meaningful slots).
+        top_k (int): Logical number of selected top-k slots; 0 disables sparse
+            attention in paged mode. In dense mode this is the dense cache
+            length (``index_topk``) and must be > 0. In paged mode with
+            ``top_k > 0``, ``max_seq_len`` (block-table width narrowed by the
+            lens) must not exceed 10496 (``MAX_SOFTMAX_PINGPONG_LEN``), and the
+            effective row stride must be <= 2176 (``MAX_TOPK_RUN_NUM``) and a
+            multiple of 128.
+        topk_stride (int): Physical topk row pitch. ``0`` falls back to
+            ``top_k``; may be larger than ``top_k`` for padded rows.
         nz (bool): Deprecated: ignored (nz is auto-detected); will be removed.
         enable_flash_attention (bool): Whether to use the flash MLA v2 kernel
             (ignored when ``dense=True``).
@@ -3858,9 +3864,11 @@ def cxa(
         compress_ratio (int): Compression ratio; ``0`` disables the compressed
             segment (pure sliding-window attention).
         index_topk (int): Number of top-k compressed indices per query row;
-            ``0`` disables the compress sparse path. In dense mode this is the
-            dense cache length (``max_seq_len``) and must be > 0; the compress
-            segment is then attended causally without top-k masking.
+            ``0`` disables the compress sparse path; when sparse top-k masking
+            is active a non-zero value must be a multiple of 128. In dense mode
+            this is the dense cache length (``max_seq_len``) and must be > 0;
+            the compress segment is then attended causally without top-k
+            masking.
         topk_indices (torch.Tensor): Top-k compressed-token indices, shape
             (total_query_tokens, index_topk), dtype int32, in compress-relative
             coordinates (compressed token ``j`` -> ``j``). ``-1`` marks a
@@ -3983,7 +3991,11 @@ def indexer_topk(
             Sparse rows (``p0 >= top_k``) hold the real top-k (all indices in
             ``[0, p0]``); dense rows (``p0 < top_k``) hold the default template
             ``0..top_k-1``, whose first ``p0 + 1`` entries are always valid
-            positions — consumers must ignore entries ``> p0``.
+            positions — consumers must ignore entries ``> p0``. With
+            ``pack_tail=1`` the width is ``out_stride`` instead: the first
+            ``top_k * compress_ratio`` lanes expand each selected pool to token
+            indices, the next ``compress_ratio - 1`` lanes are the causal tail,
+            and the remaining 128-slot padding is ``-1``.
         query_start_loc (torch.Tensor): Prefix-sum prompt lengths, shape ``[batch(+1)]``,
             int32 device.
         lens (torch.Tensor): Current token lengths, shape ``[batch]``, int32 device.
@@ -4023,6 +4035,14 @@ def indexer_topk(
             ``PrepareAttn``); values above the kernel's build-time maximum
             (24) are rejected, and both partitioning modes produce identical
             results for any valid tile.
+        pack_tail (int): Expand each selected compressed pool into
+            ``compress_ratio`` token lanes and append the PKI causal tail.
+            Requires ``compress_ratio >= 2``; the logical row width is
+            ``top_k * compress_ratio + compress_ratio - 1``.
+        out_stride (int): Output row pitch in int32 lanes when
+            ``pack_tail=1``; it must equal the logical width rounded up to
+            128 lanes, and ``topk_indices.shape[1]`` must match. ``0`` is
+            derived by the binding.
 
     Returns:
         None: ``topk_indices`` is written in place. The binding synchronizes.

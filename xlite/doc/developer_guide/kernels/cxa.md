@@ -44,7 +44,7 @@ Python 签名见 `xlite/_C.pyi` 的 `def cxa(...)`,kernel 侧入口见 `csrc/ker
 | scale | 输入 | 标量 | - | softmax 缩放因子(`1 / sqrt(head_dim)`) |
 | window_size | 输入 | 标量 | - | 滑窗宽度(SWA 段语义宽度) |
 | compress_ratio | 输入 | 标量 | - | 压缩比;`0` 表示禁用压缩段(纯滑窗) |
-| index_topk | 输入 | 标量 | - | 每行 top-k 压缩索引数;`0` 表示禁用 topk 稀疏路径;dense 模式下即 dense cache 长度 `maxSeqLen`(host 要求 > 0) |
+| index_topk | 输入 | 标量 | - | 每行 top-k 压缩索引数;`0` 表示禁用 topk 稀疏路径;sparse 路径非零时必须为 `TOPK_RUN_ALIGN=128` 的倍数(softmax mask 按满 128 槽块处理);dense 模式下即 dense cache 长度 `maxSeqLen`(host 要求 > 0) |
 | topk_indices | 输入 | [totalQ, indexTopK] | int32 | 压缩段 top-k 索引(IndexerTopK 输出);`-1` 表示 mask 掉的位置;dense 模式忽略(可为空) |
 | dense | 输入 | 标量 | - | 压缩 cache 布局:`false` 分页,`true` 连续 |
 | enable_flash_attention | 输入 | 标量 | bool | 置 `True` 时 host 路由到 flash_cxa(在线 softmax,见 [flash_cxa.md](flash_cxa.md));本算子恒为 `False` |
@@ -63,7 +63,7 @@ Python 签名见 `xlite/_C.pyi` 的 `def cxa(...)`,kernel 侧入口见 `csrc/ker
 
 调度类型为 `KERNEL_TYPE_MIX_AIC_1_2`(`csrc/kernels/cxa.h` 的 `CXA::Init`(关键字 `KERNEL_TYPE_MIX_AIC_1_2`)):1 个 AIC(cube 核)配 2 个 AIV(vector 核)混合调度,AIC 负责 QK/SV 两个 cube GEMM,AIV 负责 softmax;AIC 与 AIV 之间用 `ffts_cross_core_sync` / `wait_flag_dev`(inner-group 同步,flag 0 = AIC→AIV 的 QK 完成,flag 1 = AIV→AIC 的 softmax 完成)做跨核握手。
 
-host 侧约束(`csrc/op.cpp` 的 `XliteOpCXA`(关键字 `dense=True requires` 约束)):dense 模式要求 `compressRatio > 0` 且 `indexTopK > 0`(dense cache 长度);`windowSize > 0` 时要求 `swaSegWidth = windowSize + XLITE_MAX_M0 + K_BLOCK_SIZE_2B ≤ MAX_SWA_SEG_WIDTH(4096)`(关键字 `swaSegWidth > MAX_SWA_SEG_WIDTH`):topK>0 路径的 PingPong softmax 需要宽 `topK + swaSegWidth` 的 `inTopK` 缓冲(见 softmax.md 的 UB 预算)。topK>0 的行宽合同 `outN = swaSegWidth + 逐行压缩宽 ≤ MAX_SOFTMAX_PINGPONG_LEN(10496)` 由 Python 层保证(`tests/kernels/cxa.py` 的 max_row 检查,超界路由 flash),host 无法校验(逐行、依赖 lens);topK==0 行走行宽容忍的 `RunAivSoftmaxLong`。host launch 末尾把 `rt._attnZeroBuffer.ptr` 作为 `zeroGm` 传给 kernel(`CXA_FUNC_DEFINE` 签名最后一参),`CxaAicHelper::Init` 用它把两份 L1B ping-pong 缓冲预填零,避免上一 tile 残留 K 数据导致 mmad NaN(与 attention 同源 nan bug 修复)。
+host 侧约束(`csrc/op.cpp` 的 `XliteOpCXA`(关键字 `dense=True requires` 约束)):dense 模式要求 `compressRatio > 0` 且 `indexTopK > 0`(dense cache 长度);sparse 路径非零 `indexTopK` 必须为 `TOPK_RUN_ALIGN=128` 的倍数(关键字 `indexTopK % TOPK_RUN_ALIGN`);`windowSize > 0` 时要求 `swaSegWidth = windowSize + XLITE_MAX_M0 + K_BLOCK_SIZE_2B ≤ MAX_SWA_SEG_WIDTH(4096)`(关键字 `swaSegWidth > MAX_SWA_SEG_WIDTH`):topK>0 路径的 PingPong softmax 需要宽 `topK + swaSegWidth` 的 `inTopK` 缓冲(见 softmax.md 的 UB 预算)。topK>0 的行宽合同 `outN = swaSegWidth + 逐行压缩宽 ≤ MAX_SOFTMAX_PINGPONG_LEN(10496)` 由 Python 层保证(`tests/kernels/cxa.py` 的 max_row 检查,超界路由 flash),host 无法校验(逐行、依赖 lens);topK==0 行走行宽容忍的 `RunAivSoftmaxLong`。host launch 末尾把 `rt._attnZeroBuffer.ptr` 作为 `zeroGm` 传给 kernel(`CXA_FUNC_DEFINE` 签名最后一参),`CxaAicHelper::Init` 用它把两份 L1B ping-pong 缓冲预填零,避免上一 tile 残留 K 数据导致 mmad NaN(与 attention 同源 nan bug 修复)。
 
 ## 实现原理
 

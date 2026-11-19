@@ -44,7 +44,8 @@ flash_mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, sv, max, sum
 | qAbsorb | 输入 | `[total_tokens, nHeads, kvLoraRank]` | BF16 | host 已做 WUK 吸收的 Q latent |
 | qr | 输入 | `[total_tokens, nHeads, ropeHeadDim]` | BF16 | Q 的 RoPE 部分 |
 | kCache / peCache | 输入 | paged: `[numBlocks, blockSize, kvLoraRank]`;dense: `[batch, capacity, kvLoraRank]` / `[..., ropeHeadDim]` | BF16 | latent K / RoPE K cache |
-| topkIndices | 输入(可选) | `[total_tokens, topK]` | INT32 | DSA top-k token 下标(升序);host 限制 `topK ≤ MAX_TOPK_RUN_NUM=2056`(`csrc/op.cpp` 的 `XliteOpFlashMLAV2`,关键字 `MAX_TOPK_RUN_NUM`;语义见下文「all-miss tile 的 zeroSum 防御」末段) |
+| topkIndices | 输入(可选) | `[total_tokens, topkStride]` | INT32 | DSA top-k token 下标(升序);逻辑宽度为 topK,行距为 topkStride。host 限制 `topkStride ≤ MAX_TOPK_RUN_NUM=2176` 且为 128 的倍数(`csrc/op.cpp` 的 `XliteOpFlashMLAV2`,关键字 `MAX_TOPK_RUN_NUM`/`TOPK_RUN_ALIGN`;语义见下文「all-miss tile 的 zeroSum 防御」末段) |
+| topkStride | 标量 | - | uint32 | topkIndices 物理行距;GLM5 packTail 为 2176(逻辑 topK=2051)。`0` 回退到 `topK`;host 要求 `topkStride ≥ topK` |
 | qk | workspace | `[aicNum * XLITE_MAX_M0 * 2, tileSizeOfCachedKV]` | BF16 | 当前 KV tile 的 QK 分数,按核双缓冲 |
 | sv | workspace | `[aicNum * XLITE_MAX_M0 * 2, kvLoraRank]` | BF16 | 当前 tile 的 softmax·kCache 部分和 |
 | max / sum | workspace | `[aivNum * XLITE_MAX_M0 * 2]` | FP32 | 当前 tile 局部 max / Σexp |
@@ -90,15 +91,15 @@ topkIndices 形状 `[total_tokens, topK]`,按 `topkIndices + topK * queryTaskOff
 
 ### all-miss tile 的 zeroSum 防御
 
-**问题**：长序列 decode 下,某个 KV tile 内的所有 token 都未入选 topk(该 tile 的 QK score 经 top-k mask 后恒为 -inf),`RunAivSoftmaxPingPong` 对该 tile 输出的局部 `currSum=0`。`RunAivSoftmaxUpdate` 在线合并时 `newSum = sumPrev*scalePrev + sumCurr*scaleCurr` 也可能为 0,Step 10 归一化 `vdiv(svOut, svOut, newSum)` 变成 0/0=NaN,NaN 随 output/lastSum 写回并污染同一 query 后续所有 tile 的合并链,最终表现为长序列输出乱码(P0)。
+**问题**:长序列 decode 下,某个 KV tile 内的所有 token 都未入选 topk(该 tile 的 QK score 经 top-k mask 后恒为 -inf),`RunAivSoftmaxPingPong` 对该 tile 输出的局部 `currSum=0`。`RunAivSoftmaxUpdate` 在线合并时 `newSum = sumPrev*scalePrev + sumCurr*scaleCurr` 也可能为 0,Step 10 归一化 `vdiv(svOut, svOut, newSum)` 变成 0/0=NaN,NaN 随 output/lastSum 写回并污染同一 query 后续所有 tile 的合并链,最终表现为长序列输出乱码(P0)。
 
-**判定条件**：`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxUpdate`(调用点:`csrc/kernels/flash_mla_v2.h` 的 `RunAiv`,关键字 `RunAivSoftmaxUpdate`)。Step 10 中 `newSum` 经 `vbrcb` 广播到 `newSumOutUb` 后,以标量读出首元素 `newSumScalar`,判定 `zeroSum = (newSumScalar == 0.0f) || (newSumScalar != newSumScalar)`——newSum 为 0 或 NaN(自反比较不成立)均视为 all-miss。
+**判定条件**:`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxUpdate`(调用点:`csrc/kernels/flash_mla_v2.h` 的 `RunAiv`,关键字 `RunAivSoftmaxUpdate`)。Step 10 中 `newSum` 经 `vbrcb` 广播到 `newSumOutUb` 后,以标量读出首元素 `newSumScalar`,判定 `zeroSum = (newSumScalar == 0.0f) || (newSumScalar != newSumScalar)`——newSum 为 0 或 NaN(自反比较不成立)均视为 all-miss。
 
-**修复**：`zeroSum` 命中时跳过 `vdiv`,`vector_dup` 将 `svOutFloatUb` 与 `newSumOutUb` 直接置 0 再走正常写回——output 清零、`lastSum=0`、`lastMax` 保留,下一个命中 topk 的 tile 从干净的 `lastSum=0` 重新起步,不再继承 NaN(任何后续 tile 一旦有 token 入选 topk,newSum 即非 0,归一化恢复正常)。
+**修复**:`zeroSum` 命中时跳过 `vdiv`,`vector_dup` 将 `svOutFloatUb` 与 `newSumOutUb` 直接置 0 再走正常写回——output 清零、`lastSum=0`、`lastMax` 保留,下一个命中 topk 的 tile 从干净的 `lastSum=0` 重新起步,不再继承 NaN(任何后续 tile 一旦有 token 入选 topk,newSum 即非 0,归一化恢复正常)。
 
 **同步链**:`newSumOutUb` 在 PIPE_V 上写入,标量读 `newSumScalar` 在 PIPE_S 上执行,跨 pipe 读必须显式同步——写读两侧用 `set_flag/wait_flag(PIPE_V, PIPE_S, EVENT_ID6)` 与 `set_flag/wait_flag(PIPE_S, PIPE_V, EVENT_ID6)` 夹住(见 `csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxUpdate`,函数头注释 `EVENT_ID6: V<->S sync around the newSum scalar read`);漏掉该链时标量读可能取到旧值,zeroSum 判定失真。
 
-**topk 缓冲上限**:`csrc/kernels/softmax_attn_aiv.h` 顶部的 UB 预算 static_assert 全部改按 `MAX_TOPK_RUN_NUM` 校验(原为 `MAX_TOPK_NUM`)。两者语义不同(`csrc/kernels/kernel_param.h`):`MAX_TOPK_NUM=2048` 是 DSA 常驻 topk 缓冲的编译期上限;运行期 topk 行宽可超出——GLM5 kpool 路径把 PKI causal tail 打包进 topk 缓冲的 `[topK, topK+kpool-1)` 列(如 2048+3=2051),故运行期上限放宽为 `MAX_TOPK_RUN_NUM = MAX_TOPK_NUM + 8 = 2056`,aiv softmax 的 UB workspace 按运行期 topK 缩放,host 校验同步改为 `topK > MAX_TOPK_RUN_NUM` 抛错(`csrc/op.cpp` 的 `XliteOpFlashMLAV2`)。
+**topk 缓冲上限**:`MAX_TOPK_NUM=2048` 仍是编译期 topk 槽上限,`csrc/kernels/softmax_attn_aiv.h` 顶部的 UB 预算 `static_assert` 仍按它计算;运行期 topk 行宽可超出——GLM-5.3 kpool 路径把 PKI causal tail 打包进 topk 缓冲的 `[topK, topK+kpool-1)` 列(逻辑行宽 2048+3=2051),再按 `TOPK_RUN_ALIGN=128` 补齐到 `MAX_TOPK_RUN_NUM=2176`(`csrc/kernels/kernel_param.h`),padding 为 -1。host 的 `XliteOpFlashMLAV2`/`XliteOpMLAV2` 用 `topkStride > MAX_TOPK_RUN_NUM` 拒绝越界行距,并要求非零 `topkStride` 为 128 的倍数(`csrc/op.cpp`,关键字 `TOPK_RUN_ALIGN`);同时用 host `SoftmaxPingPongUbNeed(max(len, topkStride), topkStride)` 按实际行距校验 UB。逻辑 `topK` 只决定 `calcLen > topK` 时是否走 sparse。kernel 内 topk mask cache 按 `MAX_TOPK_RUN_NUM` 取上限,mask workspace 按 2048 槽粒度 `ROUND_UP(topkStride, 2048)` 分配;由于 topkStride 恒为 128 的倍数,vgather/scatter 的每个 128 槽 mask block 都是满块,不再需要 partial-tail 寄存器 clamp。编译期 static_assert 只覆盖基线 `MAX_TOPK_NUM` 形状,放宽后的运行期形状由 host 契约检查兜底。
 
 ### 跨核 RingSync
 
@@ -117,7 +118,7 @@ topkIndices 形状 `[total_tokens, topK]`,按 `topkIndices + topK * queryTaskOff
 
 AIC 侧与 mla_v2 完全共用 `MlaAicHelper` 的 12 个 L1/L0 缓冲(`csrc/kernels/mla_aic_helper.h` 的 `MlaAicHelper::Init`,flash 的 `Init` 传入同一组几何参数,仅 qkStride 换成 tileSizeOfCachedKV,不影响布局):QK 组与 SV 组各自在 L1(`TPosition::A1`)/L0A(`A2`)/L0B(`B2`)/L0C(`CO1`)上从偏移 0 累进 `bufferAddr`,L0 三级物理独立;**QK 组与 SV 组复用同一物理空间**,两相位在核内经 set/wait_flag 严格串行(KV tile 上先 `RunAicQK` 后 `RunAicSV`),各存储级物理占用按两相位取 max;`Init` 用 `zeroGm` 把两份 `aktl1bBuf` 预填零。AIV 侧 UB 由 softmax 函数在每次调用入口自偏移 0 现场排布,tile softmax(`RunAivSoftmaxPingPong`,saveMaxSum=true)与 online update(`RunAivSoftmaxUpdate`)两个布局串行复用同一 UB,占用取 max。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L1 512KB、L0A 64KB、L0B 64KB,L0C 总容量 128KB（`l0_c_size=131072`，16 bank × 8KB），Mmad 累加缓冲即 `TPosition::CO1` 且占满整个 L0C;AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每个 AIV subblock 各持一份独立 UB、布局相同。
 
-dtype 记法:flash_mla_v2 仅 BF16 单路径(`csrc/kernels/flash_mla_v2_bfloat16_t.cpp`),`Dtype=bfloat16_t`(2B);几何常量(`MlaAicHelper::Init`)为 `qkk0=256/sizeof(Dtype)=128`、`qkn0=dense?MAX_N0:blockSize`、`svn0=256`、`svk0=64`。典型配置:kvLoraRank=512、ropeHeadDim=64、blockSize=128(AIC 缓冲大小只依赖 `XLITE_MAX_M0`/kvLoraRank/ropeHeadDim,与 nHeads 无关);AIV 侧按 tileSizeOfCachedKV=8192(Python 接口默认值,亦为 host 上限内常用档)与 DSA topK=2048 代入,update 的 headSize=kvLoraRank=512;下表 shape 为逻辑形状(L1/L0 内实际按 Nd2Nz/NZ 分形排布)。
+dtype 记法:flash_mla_v2 仅 BF16 单路径(`csrc/kernels/flash_mla_v2_bfloat16_t.cpp`),`Dtype=bfloat16_t`(2B);几何常量(`MlaAicHelper::Init`)为 `qkk0=256/sizeof(Dtype)=128`、`qkn0=dense?MAX_N0:blockSize`、`svn0=256`、`svk0=64`。典型配置:kvLoraRank=512、ropeHeadDim=64、blockSize=128(AIC 缓冲大小只依赖 `XLITE_MAX_M0`/kvLoraRank/ropeHeadDim,与 nHeads 无关);AIV 侧按 tileSizeOfCachedKV=8192(Python 接口默认值,亦为 host 上限内常用档)与 DSA topK=2048 代入(运行期上限 `MAX_TOPK_RUN_NUM=2176` 的最坏情况见末尾要点),update 的 headSize=kvLoraRank=512;下表 shape 为逻辑形状(L1/L0 内实际按 Nd2Nz/NZ 分形排布)。
 
 **AIC L1(A1,容量 512KB;QK/SV 两相位自偏移 0 复用)**
 
@@ -182,7 +183,7 @@ flash 的 max/sum workspace 非空(saveMaxSum=true),`maxOut`/`sumOut` 各 2 份�
 | `cmp1` | 1 个 256B repeat | int32 | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
 | `cmpFp320` | 1 个 256B repeat | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
 | `cmpFp321` | 1 个 256B repeat | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
-| `topkMask0`/`topkMask1` | `(topK/8,)`=(256,) | uint8 | 2 | `ROUND_UP(topK/8,256)` | 512 |
+| `topkMask0`/`topkMask1` | `(ROUND_UP(topK,2048)/8,)`=(256,) | uint8 | 2 | `ROUND_UP(topK,2048)/8` B | 512 |
 | `currIndices` | `(topK,)` | int32 | 1 | `ROUND_UP(topK*sizeof(int32_t),256)` | 8192 |
 | **合计** | | | | | **154368** |
 
@@ -225,4 +226,4 @@ flash 的 max/sum workspace 非空(saveMaxSum=true),`maxOut`/`sumOut` 各 2 份�
 
 - **L0 三级峰值全部顶满(100%)**:BF16 下 `qkk0=128`、`XLITE_MAX_M0=MAX_N0=128` 使 QK 相位 L0A/L0B 各恰 64KB、两相位 L0C(CO1)各恰 128KB——M/N/K 任一维度增大都会先撞 L0;host 侧 `nHeads <= XLITE_MAX_M0` 校验(`csrc/op.cpp` 的 `XliteOpFlashMLAV2`,关键字 `nHeads > XLITE_MAX_M0`)保证单 token 全部头落进一个 M0 tile;
 - AIV UB 峰值在 tile softmax 布局(154368 B,78.5%),大头是随 len 缩放的 in/out/cal/temp 四类(合计 114688 B);online update 布局仅 17152 B,与 tile softmax 串行复用同一 UB,不叠加;
-- 容量来源是 host 校验 `tileSizeOfCachedKV <= MAX_SOFTMAX_PINGPONG_LEN=10496` 与 `topK <= MAX_TOPK_NUM=2048`(`csrc/op.cpp` 的 `XliteOpFlashMLAV2`)。按该上限组合(len=10496、topK=2048)代入 tile softmax 布局为 186624 B ≤ `UB_SIZE`(余 9984 B;旧上限 11776 的同组合实占 204544 B 越界,旧 static_assert 公式漏计 `indicesFp32` 槽位 8192 B 而误判通过——已随上限收紧到 10496 并补全断言公式一并修复);典型 tileSizeOfCachedKV=8192 时余量 42240 B。
+- 容量来源是 host 校验 `tileSizeOfCachedKV <= MAX_SOFTMAX_PINGPONG_LEN=10496` 与 `topkStride <= MAX_TOPK_RUN_NUM=2176`(`csrc/op.cpp` 的 `XliteOpFlashMLAV2`/`XliteOpMLAV2`),并用 `SoftmaxPingPongUbNeed(max(len, topkStride), topkStride)` 按运行期形状复核。按上限组合(len=10496、topkStride=2048)代入 tile softmax 布局为 186624 B ≤ `UB_SIZE`(余 9984 B;旧上限 11776 的同组合实占 204544 B 越界,旧 static_assert 公式漏计 `indicesFp32` 槽位 8192 B 而误判通过——已随上限收紧到 10496 并补全断言公式一并修复);kpool 行距补齐到 topkStride=2176 时 `topkMask0`/`topkMask1` 各 512 B,同组合峰值为 189696 B,仍余 6912 B;典型 tileSizeOfCachedKV=8192 时余量 42240 B。
