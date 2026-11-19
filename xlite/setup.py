@@ -183,10 +183,15 @@ else:  # pragma: no cover
 
 class CMakeBuild(build_ext):
     def build_extension(self, ext):
-        build_temp = Path(self.build_temp or (ROOT_DIR / "cmake_build")).resolve()
-        build_temp.mkdir(parents=True, exist_ok=True)
-
         is_editable = self.inplace or any(x in sys.argv for x in ("develop", "editable_wheel"))
+        # Editable builds may reuse a stable cmake tree across runs (XLITE_BUILD_TEMP,
+        # e.g. ~/.cache/xlite/build) so pip install -e . stays incremental; wheel
+        # builds always get a fresh tree.
+        reuse_tree = os.environ.get("XLITE_BUILD_TEMP") if is_editable else None
+        build_temp = Path(
+            os.path.expanduser(reuse_tree) if reuse_tree else (self.build_temp or (ROOT_DIR / "cmake_build"))
+        ).resolve()
+        build_temp.mkdir(parents=True, exist_ok=True)
         install_prefix = Path(self.build_lib).resolve()
         print(
             f"CMakeBuild: Building in {'editable' if is_editable else 'standard'} mode; installing to {install_prefix}"
@@ -214,7 +219,7 @@ class CMakeBuild(build_ext):
         # Numbered -j (not bare) so sub-makes get a jobserver instead of unbounded MAKEFLAGS,
         # which they run verbatim and fail with EMFILE on shared hosts.
         max_jobs = os.environ.get("MAX_JOBS") or os.environ.get("CMAKE_BUILD_PARALLEL_LEVEL")
-        build_cmd = ["cmake", "--build", str(build_temp), "-j", max_jobs or str(min(os.cpu_count() or 4, 64))]
+        build_cmd = ["cmake", "--build", str(build_temp), "-j", max_jobs or str(min(os.cpu_count() or 4, 128))]
         install_cmd = ["cmake", "--install", str(build_temp)]
 
         # Wheel (non-editable) builds must never ship debug code. Debug is driven purely by the XLITE_DEBUG_ON env var.
