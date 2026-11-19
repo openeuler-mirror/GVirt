@@ -334,5 +334,5 @@ uint8_t PickIndexerKvSplit(const std::vector<uint32_t> &cachedLens,
             }
         }
     }
-    return sparseTiles < blockNum ? 1 : 0;
+    return sparseTiles < blockNum / 2 ? 1 : 0;
 }
