@@ -27,7 +27,6 @@ using namespace AscendC;
 
 #define BLOCK_SIZE 32
 #define VECTOR_MAX_REPEAT 255
-#define VECTOR_MAX_BYTESIZE 256      // The maximum byte size of one repeat in vector
 #define VECTOR_REPEAT_BYTESIZE 256   // Size per Vector repeat, in bytes; i.e., VECTOR_MAX_BYTESIZE
 #define VECTOR_MAX_NUM_OF_FP32 64    // The maximum num of float32 dtype in one vector repeat
 #define VECTOR_MAX_NUM_OF_FP16 128   // The maximum num of float16 dtype in one vector repeat
@@ -36,19 +35,16 @@ using namespace AscendC;
 #define VECTOR_MAX_NUM_OF_INT8 256   // The maximum num of int8 dtype in one vector repeat
 #define AIC_CACHE_LINE_SIZE 512
 #define MATMUL_M0_N0_K0_DEFAULT_VALUE ((uint64_t)(-1))
-#define UB_BUF_ALIGN_SIZE 32  // The align size of UB buffer address; i.e., BLOCK_SIZE
 #if __NPU_ARCH__ != 3510
 // the following is architecture specific (NpuArch 2201)
-#define UB_SIZE 196608     // 192KB, total size of unified buffer (UB), = UB_BANK_SIZE * UB_BANK_NUM
-#define UB_BANK_SIZE 4096  // 4KB, size per UB bank
-#define UB_BANK_NUM 48     // The number of UB banks, = UB_BANKGROUP_UNUM * UB_BANKGROUP_BATCH
-#define UB_BANKGROUP_UNUM 16         // The number of unique UB bank groups
-#define UB_BANKGROUP_BATCH 3         // The number of UB bank group batches
+#define UB_BANK_SIZE 4096     // 4KB, size per UB bank
+#define UB_BANK_NUM 48        // The number of UB banks, = UB_BANKGROUP_UNUM * UB_BANKGROUP_BATCH
+#define UB_BANKGROUP_UNUM 16  // The number of unique UB bank groups
+#define UB_BANKGROUP_BATCH 3  // The number of UB bank group batches
 #define UB_BANKGROUP_ROW_SIZE 512    // 512B, UB_BUF_ALIGN_SIZE * UB_BANK_GROUP_NUM
 #define UB_BANKGROUP_SIZE 65536      // 64KB, UB_BANK_SIZE * UB_BANK_GROUP_NUM
 #define UB_BANK_CONFLICT_OFFSET 256  // recommended offset trick in bytes to avoid UB bank conflict
 #else                                // NpuArch 3510
-#define UB_SIZE 262144               // 256 KB
 #define UB_BANK_SIZE 16384           // 16 KB
 #define UB_BANK_NUM 16
 #define UB_BANKGROUP_UNUM 8

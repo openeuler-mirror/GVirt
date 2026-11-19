@@ -32,11 +32,16 @@ enum class NormKind {
 // hardware
 #define UB_BLOCK_SIZE 32  // unified buffer block size in bytes
 // embed UB budget in bytes: [zero template | ping | pong] staging, dim elements
-// each. Equals UB_SIZE (192KB, kernel_macro.h) for the C220 arch embed_kernel
-// targets; defined here (not in kernel_macro.h) because host op.cpp cannot
-// include the device-only kernel_macro.h — kernel and host enforce this one
-// shared constant instead of two hand-kept copies.
+// each. Equals the in-file UB_SIZE (192KB) for the C220 arch embed_kernel
+// targets; defined here as a shared constant for host op.cpp and the kernel.
 #define EMBED_UB_BUDGET 196608
+#define VECTOR_MAX_BYTESIZE 256  // The maximum byte size of one repeat in vector
+#define UB_BUF_ALIGN_SIZE 32     // The align size of UB buffer address; i.e., BLOCK_SIZE
+#if __NPU_ARCH__ != 3510
+#define UB_SIZE 196608  // 192KB, total size of unified buffer (UB), = UB_BANK_SIZE * UB_BANK_NUM
+#else
+#define UB_SIZE 262144  // 256 KB
+#endif
 // performance tuning
 #define GM_UB_BURST_SIZE 16384  // 16KB, recommended burst size for GM <--> UB copy bandwidth-wise
 // gather_sparse_kv_cache tiling (top-k slots per chunk task, rotating buffer count)
@@ -88,6 +93,10 @@ enum class NormKind {
 // topK + swaSegWidth elements and must stay within the budget above.
 #define MAX_SWA_SEG_WIDTH 4096
 #define MSD_MERGE_DEQUANT_MAX_N 8064
+
+// kpool tail
+#define KPOOL_TAIL_MAX_HEAD_DIM 256  // kpool_tail input caps
+#define KPOOL_TAIL_MAX_KPOOL 8
 
 // muls
 #define MAX_MULS_CALC_NUM 16320

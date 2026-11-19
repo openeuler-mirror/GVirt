@@ -45,6 +45,7 @@ message(STATUS "CMAKE_INSTALL_PATH: ${CMAKE_INSTALL_PATH}")
 file(GLOB KERNEL_FILES_COMMON
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_prefill_paged_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/recurrent_gated_delta_rule_prefill_paged_float.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/recurrent_gated_delta_rule_kda_prefill_paged_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/beta_decay_native_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_bias_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/group_matmul_float.cpp
@@ -84,9 +85,11 @@ file(GLOB KERNEL_FILES_COMMON
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_paged_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/beta_decay_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/recurrent_gated_delta_rule_paged_float.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/recurrent_gated_delta_rule_kda_paged_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/msd_merge_dequant_int8_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/hc_act_float.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/compressor_float.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/kpool_tail_compress_float.cpp
 )
 
 # Bench kernels live one-per-TU - see csrc/kernels/microbench.h
@@ -102,6 +105,7 @@ list(APPEND KERNEL_FILES_COMMON ${BENCH_KERNEL_FILES_COMMON})
 file(GLOB KERNEL_FILES_BF16
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/beta_decay_native_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/recurrent_gated_delta_rule_prefill_paged_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/recurrent_gated_delta_rule_kda_prefill_paged_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_prefill_paged_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/silu_gate_mul_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_bfloat16_t.cpp
@@ -139,6 +143,8 @@ file(GLOB KERNEL_FILES_BF16
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/beta_decay_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/sigmoid_gate_mul_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/recurrent_gated_delta_rule_paged_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/recurrent_gated_delta_rule_kda_paged_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/hc_mean_collapse_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/transpose_1_2_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/indexer_topk_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/einsum_mht_hdt_mhd_bfloat16_t.cpp
@@ -150,12 +156,14 @@ file(GLOB KERNEL_FILES_BF16
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/hc_post_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/hc_pre_bfloat16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/compressor_bfloat16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/kpool_tail_compress_bfloat16_t.cpp
 )
 
 # xlite_kernels_f16_${RUN_MODE}
 file(GLOB KERNEL_FILES_F16
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/beta_decay_native_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/recurrent_gated_delta_rule_prefill_paged_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/recurrent_gated_delta_rule_kda_prefill_paged_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/conv1d_and_silu_prefill_paged_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/silu_gate_mul_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/add_bias_float16_t.cpp
@@ -178,12 +186,15 @@ file(GLOB KERNEL_FILES_F16
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/beta_decay_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/sigmoid_gate_mul_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/recurrent_gated_delta_rule_paged_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/recurrent_gated_delta_rule_kda_paged_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/hc_mean_collapse_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/transpose_1_2_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/indexer_topk_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/einsum_mht_hdt_mhd_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/einsum_mht_htd_mhd_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/indexer_prepare_float16_t.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/compressor_float16_t.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/kpool_tail_compress_float16_t.cpp
 )
 
 if(EXISTS ${ASCEND_CANN_PACKAGE_PATH}/compiler/tikcpp/ascendc_kernel_cmake)

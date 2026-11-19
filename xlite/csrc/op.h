@@ -299,6 +299,17 @@ void XliteOpRecurrentGatedDeltaRulePaged(XRuntime &rt, XTensor &query, XTensor &
                                          uint32_t vHeads, uint32_t kDim, uint32_t vDim,
                                          XTensor *cachedLens = nullptr, uint32_t stateBlockSize = 0,
                                          bool aligned = false);
+// GLM-5.3-Flash KDA single-token decode: raw beta/gate sigmoid'd in-kernel,
+// per-k decay, q/k L2-normed in-kernel. Raw inputs: beta [T, Hv], gate [T, Hk*K];
+// aLog [Hk] / dtBias [Hk*K] are fp32 parameters.
+void XliteOpRecurrentGatedDeltaRuleKdaPaged(XRuntime &rt, XTensor &query, XTensor &key,
+                                            XTensor &value, XTensor &beta, XTensor &gate,
+                                            XTensor &aLog, XTensor &dtBias, XTensor &state,
+                                            XTensor &out, XTensor *stateIndices, uint32_t batch,
+                                            uint32_t kHeads, uint32_t vHeads, uint32_t kDim,
+                                            uint32_t vDim, float scale, float lowerBound,
+                                            float normEps, XTensor *cachedLens = nullptr,
+                                            uint32_t stateBlockSize = 0, bool aligned = false);
 void XliteOpEinsumMhtHdtMhd(XRuntime &rt, XTensor &mht, XTensor &hdt, XTensor &mhd, uint32_t m,
                             uint32_t h, uint32_t t, uint32_t d, bool weightNZ, int T = -1,
                             int D = -1);
@@ -341,4 +352,36 @@ void XliteOpRecurrentGatedDeltaRulePrefillPaged(XRuntime &rt, XTensor &query, XT
                                                 XTensor &state, XTensor &out, XTensor &indices,
                                                 XTensor &starts, XTensor &initial, uint32_t kHeads,
                                                 uint32_t vHeads, uint32_t kDim, uint32_t vDim);
+// KDA safe-gate prefill: same in-kernel contracts as the decode variant.
+void XliteOpRecurrentGatedDeltaRuleKdaPrefillPaged(XRuntime &rt, XTensor &query, XTensor &key,
+                                                   XTensor &value, XTensor &beta, XTensor &gate,
+                                                   XTensor &aLog, XTensor &dtBias, XTensor &state,
+                                                   XTensor &out, XTensor &indices, XTensor &starts,
+                                                   XTensor &initial, uint32_t kHeads,
+                                                   uint32_t vHeads, uint32_t kDim, uint32_t vDim,
+                                                   float scale, float lowerBound, float normEps);
+// GLM5 head: weight-free mean collapse over hcMult streams. input: [m, hcMult*hidden] -> output:
+// [m, hidden].
+void XliteOpHcMeanCollapse(XRuntime &rt, XTensor &input, XTensor &output, uint32_t m,
+                           uint32_t hcMult, uint32_t hidden);
+// GLM5 kpool tail compress + spill (native semantics full chain). Compress: for
+// each pool-completing token, gather the kpool raw k/gate window (current batch from
+// the k/gate inputs, older rows from the request-owned fp32 tail ring) and write
+// softmax(gate+ape)-weighted k into the paged indexer cache. Spill: seed the last
+// <= cap batch rows per request into the tail ring. Per-token/request bookkeeping is
+// derived inside the kernels from standard metadata: pooled write slot = mainSlot/kpool
+// (mainSlot from `slotMapping`, the main-KV token slot table); spill slot =
+// tailBlockTable[req]*cap + pos%cap; seqLen = cachedLens[req] + queryLen.
+// tailCache: [tailBlocks, cap, 2*headDim] FP32 (row-major [k | gate] per pool
+// slot, matching the runner's paged tail pool view); indexerCache: [idxBlocks,
+// indexerBlockSize, 1, headDim] Dtype; k/gate: [numTokens, headDim] Dtype; ape:
+// [kpool, headDim] FP32; positions INT64 [numTokens]; slotMapping/tailBlockTable/
+// queryStartLoc/lens/cachedLens INT32 (queryStartLoc[r] = request r's start, lens[r]
+// its query length -same convention as indexer_topk/compressor).
+void XliteOpKpoolTailCompressAndSpill(XRuntime &rt, XTensor &tailCache, XTensor &indexerCache,
+                                      XTensor &k, XTensor &gate, const XTensor &ape,
+                                      XTensor &positions, XTensor &queryStartLoc, XTensor &lens,
+                                      XTensor &cachedLens, XTensor &slotMapping,
+                                      XTensor &tailBlockTable, uint32_t headDim, uint32_t kpool,
+                                      uint32_t mainBlockSize);
 #endif

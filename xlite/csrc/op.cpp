@@ -25,6 +25,44 @@ static inline bool IsDummyRuntime(const XRuntime &rt)
     return rt.IsDummyRuntime();
 }
 
+inline uint64_t HcMeanUbNeed(uint32_t hcMult, uint32_t hidden, uint32_t dtypeSize)
+{
+    return ROUND_UP((uint64_t)hcMult * hidden * dtypeSize, UB_BUF_ALIGN_SIZE) +
+           ROUND_UP((uint64_t)hidden * dtypeSize, UB_BUF_ALIGN_SIZE) +
+           ROUND_UP((uint64_t)hcMult * hidden * 4, UB_BUF_ALIGN_SIZE) +
+           ROUND_UP((uint64_t)hidden * 4, UB_BUF_ALIGN_SIZE);
+}
+
+// Kernels read these as dense ND raw pointers; reject stride mismatch on size>1 dims.
+inline void RequireContiguous(const XTensor &t, const char *name)
+{
+    size_t expect = 1;
+    for (int64_t i = (int64_t)t.shape.size() - 1; i >= 0; i--) {
+        if (t.shape[i] > 1 && t.stride[i] != expect) {
+            throw std::runtime_error(std::string(name) + ": non-contiguous descriptor " +
+                                     t.ToStr());
+        }
+        expect *= t.shape[i];
+    }
+}
+
+// Paged-pool cache views: dense inner dims; the dim-0 pitch (page padding) is passed to
+// kernels as a stride, so blocks may be page-aligned with arbitrary padding.
+inline void RequireDim0Pitched(const XTensor &t, const char *name)
+{
+    size_t expect = 1;
+    for (int64_t i = (int64_t)t.shape.size() - 1; i >= 1; i--) {
+        if (t.shape[i] > 1 && t.stride[i] != expect) {
+            throw std::runtime_error(std::string(name) +
+                                     ": non-dense inner dims (dim0-pitched cache contract)");
+        }
+        expect *= t.shape[i];
+    }
+    if (t.shape.size() > 1 && t.shape[0] > 1 && t.stride[0] < expect) {
+        throw std::runtime_error(std::string(name) + ": dim0 stride smaller than inner span");
+    }
+}
+
 // Kernels that index `positions` as a flat 1D array read only the first row of a 2D
 // (mrope) input; warn once per op so a wrong-layout call stays visible in per-step logs.
 static void WarnPositions2D(const char *op)
@@ -3075,6 +3113,69 @@ void XliteOpRecurrentGatedDeltaRulePaged(XRuntime &rt, XTensor &query, XTensor &
                  stateBlockSize, aligned ? 1u : 0u, g.dtype == FP32 ? 1u : 0u);
 }
 
+// KDA safe-gate decode: raw beta/gate sigmoid'd in-kernel, per-k decay,
+// q/k L2-normed in-kernel. Raw inputs: beta [T, Hv], gate [T, Hk*K];
+// aLog [Hk] / dtBias [Hk*K] are fp32 parameters.
+void XliteOpRecurrentGatedDeltaRuleKdaPaged(
+    XRuntime &rt, XTensor &query, XTensor &key, XTensor &value, XTensor &beta, XTensor &gate,
+    XTensor &aLog, XTensor &dtBias, XTensor &state, XTensor &out, XTensor *stateIndices,
+    uint32_t batch, uint32_t kHeads, uint32_t vHeads, uint32_t kDim, uint32_t vDim, float scale,
+    float lowerBound, float normEps, XTensor *cachedLens, uint32_t stateBlockSize, bool aligned)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (batch == 0 || kHeads == 0 || vHeads == 0 || vHeads % kHeads != 0 || kDim == 0 ||
+        kDim > 128 || kDim % 16 != 0 || vDim == 0 || vDim > 128 || vDim % 64 != 0) {
+        throw std::runtime_error("KDA paged recurrent: unsupported dimensions/head grouping");
+    }
+    auto matrixMatches = [batch](const XTensor &t, uint32_t features) {
+        return t.shape.size() == 2 && t.shape[0] == batch && t.shape[1] == features &&
+               t.stride == std::vector<size_t>{features, 1};
+    };
+    if (!matrixMatches(query, kHeads * kDim) || !matrixMatches(key, kHeads * kDim) ||
+        !matrixMatches(value, vHeads * vDim) || !matrixMatches(out, vHeads * vDim) ||
+        !matrixMatches(beta, vHeads) || !matrixMatches(gate, kHeads * kDim)) {
+        throw std::runtime_error("KDA paged recurrent: activation shape/stride mismatch");
+    }
+    if (gate.dtype != query.dtype) {
+        throw std::runtime_error("KDA paged recurrent: gate dtype must match activation dtype");
+    }
+    if (aLog.dtype != FP32 || aLog.shape.size() != 1 || aLog.numel != kHeads ||
+        dtBias.dtype != FP32 || dtBias.shape.size() != 1 || dtBias.numel != kHeads * kDim) {
+        throw std::runtime_error("KDA paged recurrent: A_log/dt_bias must be fp32 [Hk]/[Hk*K]");
+    }
+    if (state.shape.size() != 4 || state.shape[0] < 2 || state.shape[0] > UINT32_MAX ||
+        state.shape[1] != vHeads || state.shape[2] != vDim || state.shape[3] != kDim ||
+        state.stride.size() != 4 || state.stride[3] != 1 || state.stride[2] != kDim ||
+        state.stride[1] != vDim * kDim ||
+        state.stride[0] < static_cast<uint64_t>(vHeads) * vDim * kDim || stateIndices == nullptr) {
+        throw std::runtime_error("KDA paged recurrent: unsupported native page descriptor");
+    }
+    CheckGdnPageMetadata(*stateIndices, cachedLens, batch, stateBlockSize);
+    if (state.dtype != query.dtype && state.dtype != FP32) {
+        throw std::runtime_error("KDA paged recurrent: unsupported state dtype");
+    }
+    KERNEL_PTR_TYPE(recurrent_gated_delta_rule_kda_paged) * launchKernel;
+    if (EachXDtype(FP32, query, key, value, beta, out)) {
+        launchKernel = aclrtlaunch_recurrent_gated_delta_rule_kda_paged_float;
+    } else if (EachXDtype(FP16, query, key, value, beta, out)) {
+        launchKernel = aclrtlaunch_recurrent_gated_delta_rule_kda_paged_float16_t;
+    } else if (EachXDtype(BF16, query, key, value, beta, out)) {
+        launchKernel = aclrtlaunch_recurrent_gated_delta_rule_kda_paged_bfloat16_t;
+    } else {
+        throw std::runtime_error("KDA paged recurrent: unsupported activation dtype");
+    }
+    launchKernel(std::min(rt.aivNum, batch * vHeads), rt.stream, query.ptr, key.ptr, value.ptr,
+                 beta.ptr, gate.ptr, aLog.ptr, dtBias.ptr, state.ptr, out.ptr, stateIndices->ptr,
+                 batch, kHeads, vHeads, kDim, vDim, state.stride[0],
+                 static_cast<uint32_t>(state.shape[0]), state.dtype == FP32 ? 1u : 0u, scale,
+                 lowerBound, normEps, cachedLens == nullptr ? nullptr : cachedLens->ptr,
+                 cachedLens == nullptr ? 0 : stateIndices->stride[0],
+                 cachedLens == nullptr ? 0 : static_cast<uint32_t>(stateIndices->shape[1]),
+                 stateBlockSize, aligned ? 1u : 0u);
+}
+
 void XliteOpEinsumMhtHdtMhd(XRuntime &rt, XTensor &mht, XTensor &hdt, XTensor &mhd, uint32_t m,
                             uint32_t h, uint32_t t, uint32_t d, bool weightNZ, int T, int D)
 {
@@ -3779,4 +3880,217 @@ void XliteOpRecurrentGatedDeltaRulePrefillPaged(XRuntime &rt, XTensor &query, XT
     }
     RecurrentPrefillImpl(rt, query, key, value, beta, g, state, out, &indices, starts.numel - 1,
                          kHeads, vHeads, kDim, vDim, &starts, &initial);
+}
+// KDA safe-gate prefill: same in-kernel contracts as the decode variant.
+void XliteOpRecurrentGatedDeltaRuleKdaPrefillPaged(XRuntime &rt, XTensor &query, XTensor &key,
+                                                   XTensor &value, XTensor &beta, XTensor &gate,
+                                                   XTensor &aLog, XTensor &dtBias, XTensor &state,
+                                                   XTensor &out, XTensor &indices, XTensor &starts,
+                                                   XTensor &initial, uint32_t kHeads,
+                                                   uint32_t vHeads, uint32_t kDim, uint32_t vDim,
+                                                   float scale, float lowerBound, float normEps)
+{
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (starts.shape.size() != 1 || starts.numel < 2 || starts.numel > UINT32_MAX) {
+        throw std::runtime_error("KDA GDN prefill requires starts[B+1] with a nonempty batch");
+    }
+    uint32_t batch = starts.numel - 1;
+    if (batch == 0 || kHeads == 0 || vHeads == 0 || vHeads % kHeads != 0 || kDim == 0 ||
+        kDim > 128 || kDim % 16 != 0 || vDim == 0 || vDim > 128 || vDim % 64 != 0) {
+        throw std::runtime_error("KDA paged recurrent: unsupported dimensions/head grouping");
+    }
+    if (starts.dtype != INT32 || starts.stride != std::vector<size_t>{1} ||
+        initial.dtype != INT32 || initial.numel != batch ||
+        initial.stride != std::vector<size_t>{1}) {
+        throw std::runtime_error("KDA GDN prefill: invalid sequence metadata");
+    }
+    uint32_t tokens = query.shape.at(0);
+    auto matrixMatches = [tokens](const XTensor &t, uint32_t features) {
+        return t.shape.size() == 2 && t.shape[0] == tokens && t.shape[1] == features &&
+               t.stride == std::vector<size_t>{features, 1};
+    };
+    if (!matrixMatches(query, kHeads * kDim) || !matrixMatches(key, kHeads * kDim) ||
+        !matrixMatches(value, vHeads * vDim) || !matrixMatches(out, vHeads * vDim) ||
+        !matrixMatches(beta, vHeads) || !matrixMatches(gate, kHeads * kDim)) {
+        throw std::runtime_error("KDA paged recurrent: activation shape/stride mismatch");
+    }
+    if (gate.dtype != query.dtype) {
+        throw std::runtime_error("KDA paged recurrent: gate dtype must match activation dtype");
+    }
+    if (aLog.dtype != FP32 || aLog.shape.size() != 1 || aLog.numel != kHeads ||
+        dtBias.dtype != FP32 || dtBias.shape.size() != 1 || dtBias.numel != kHeads * kDim) {
+        throw std::runtime_error("KDA paged recurrent: A_log/dt_bias must be fp32 [Hk]/[Hk*K]");
+    }
+    if (state.shape.size() != 4 || state.shape[0] < 2 || state.shape[0] > UINT32_MAX ||
+        state.shape[1] != vHeads || state.shape[2] != vDim || state.shape[3] != kDim ||
+        state.stride.size() != 4 || state.stride[3] != 1 || state.stride[2] != kDim ||
+        state.stride[1] != vDim * kDim ||
+        state.stride[0] < static_cast<uint64_t>(vHeads) * vDim * kDim || indices.dtype != INT32 ||
+        indices.shape.size() != 1 || indices.numel < batch ||
+        indices.stride != std::vector<size_t>{1}) {
+        throw std::runtime_error("KDA paged recurrent: unsupported native page descriptor");
+    }
+    if (state.dtype != query.dtype && state.dtype != FP32) {
+        throw std::runtime_error("KDA paged recurrent: unsupported state dtype");
+    }
+    KERNEL_PTR_TYPE(recurrent_gated_delta_rule_kda_prefill_paged) * kernel;
+    if (EachXDtype(FP32, query, key, value, beta, out)) {
+        kernel = aclrtlaunch_recurrent_gated_delta_rule_kda_prefill_paged_float;
+    } else if (EachXDtype(FP16, query, key, value, beta, out)) {
+        kernel = aclrtlaunch_recurrent_gated_delta_rule_kda_prefill_paged_float16_t;
+    } else if (EachXDtype(BF16, query, key, value, beta, out)) {
+        kernel = aclrtlaunch_recurrent_gated_delta_rule_kda_prefill_paged_bfloat16_t;
+    } else {
+        throw std::runtime_error("KDA GDN prefill: unsupported activation dtype");
+    }
+    kernel(std::min(rt.aivNum, batch * vHeads * (vDim / 64)), rt.stream, query.ptr, key.ptr,
+           value.ptr, beta.ptr, gate.ptr, aLog.ptr, dtBias.ptr, state.ptr, out.ptr, indices.ptr,
+           batch, kHeads, vHeads, kDim, vDim, state.stride[0], state.shape[0],
+           state.dtype == FP32 ? 1u : 0u, scale, lowerBound, normEps, starts.ptr, initial.ptr,
+           tokens);
+}
+// HcMeanCollapse: y[m,hidden] = (1/hcMult) * Σ_{h} x[m, h*hidden + j]. Weight-free mean over
+// the hcMult MHC streams (GLM-5.3 head has no hc_head param). invHcMult is host-computed and
+// passed as float (CCE forbids uint->float cast inside aicore). Accumulation is fp32 inside the
+// kernel (mirrors PyTorch bf16 .mean() upcast), so only bf16/f16 hidden-state dtypes are wired.
+void XliteOpHcMeanCollapse(XRuntime &rt, XTensor &input, XTensor &output, uint32_t m,
+                           uint32_t hcMult, uint32_t hidden)
+{
+    if (IsDummyRuntime(rt) || input.numel == 0) {
+        return;
+    }
+    if (hcMult == 0 || hidden == 0 || m == 0) {
+        throw std::runtime_error(std::string(__func__) + ": invalid dims");
+    }
+    // Kernel converts in 64-element repeats with no tail handling.
+    if (hidden % 64 != 0) {
+        throw std::runtime_error(std::string(__func__) + ": hidden must be a multiple of 64, got " +
+                                 std::to_string(hidden));
+    }
+    // Host mirror of the kernel's InitUB budget.
+    const uint64_t dSize = input.dtype == FP32 ? 4 : 2;
+    if (HcMeanUbNeed(hcMult, hidden, dSize) + 512 > UB_SIZE) {
+        throw std::runtime_error(std::string(__func__) + ": exceeds kernel UB budget");
+    }
+    if (input.shape.size() < 2 || input.shape[0] != m || input.shape[1] != hcMult * hidden ||
+        output.shape.size() < 2 || output.shape[0] != m || output.shape[1] != hidden) {
+        throw std::runtime_error(std::string(__func__) + ": shape mismatch");
+    }
+    if (input.dtype != output.dtype) {
+        throw std::runtime_error(std::string(__func__) + ": input/output dtype must match");
+    }
+    KERNEL_PTR_TYPE(hc_mean_collapse) * launchKernel;
+    if (EachXDtype(BF16, input, output)) {
+        launchKernel = aclrtlaunch_hc_mean_collapse_bfloat16_t;
+    } else if (EachXDtype(FP16, input, output)) {
+        launchKernel = aclrtlaunch_hc_mean_collapse_float16_t;
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(input) + XT_STR(output);
+        throw std::runtime_error(err_str + "not supported! (only BF16/FP16 hidden state)");
+    }
+    launchKernel(PickMinBlockNum(rt.aivNum, m), rt.stream, input.ptr, output.ptr, m, hcMult, hidden,
+                 1.0f / static_cast<float>(hcMult));
+}
+void XliteOpKpoolTailCompressAndSpill(XRuntime &rt, XTensor &tailCache, XTensor &indexerCache,
+                                      XTensor &k, XTensor &gate, const XTensor &ape,
+                                      XTensor &positions, XTensor &queryStartLoc, XTensor &lens,
+                                      XTensor &cachedLens, XTensor &slotMapping,
+                                      XTensor &tailBlockTable, uint32_t headDim, uint32_t kpool,
+                                      uint32_t mainBlockSize)
+{
+    if (IsDummyRuntime(rt) || k.numel == 0) {
+        return;
+    }
+    if (tailCache.dtype != FP32 || ape.dtype != FP32) {
+        throw std::runtime_error(std::string(__func__) + ": tailCache and ape must be FP32");
+    }
+    // Native contract: keys and gate scores are FP32 (upstream computes them in
+    // fp32 end-to-end); the Dtype template only selects the indexerCache width.
+    if (k.dtype != FP32 || gate.dtype != FP32) {
+        throw std::runtime_error(std::string(__func__) + ": k and gate must be FP32");
+    }
+    if (positions.dtype != INT64 || queryStartLoc.dtype != INT32 || lens.dtype != INT32 ||
+        cachedLens.dtype != INT32 || slotMapping.dtype != INT32 || tailBlockTable.dtype != INT32) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": positions must be INT64, int tensors INT32");
+    }
+    if (queryStartLoc.numel == 0) {
+        throw std::runtime_error(std::string(__func__) + ": empty queryStartLoc");
+    }
+    // Rank checks precede any shape[] indexing.
+    if (tailCache.shape.size() < 3 || indexerCache.shape.size() < 4 || k.shape.size() < 2 ||
+        gate.shape.size() < 2 || ape.shape.size() < 2) {
+        throw std::runtime_error(std::string(__func__) + ": rank mismatch");
+    }
+    uint32_t numTokens = static_cast<uint32_t>(k.shape[0]);
+    // queryStartLoc[r] is request r's absolute start; lens[r] its query length.
+    uint32_t numReqs = static_cast<uint32_t>(queryStartLoc.numel) - 1;
+    uint32_t cap = static_cast<uint32_t>(tailCache.shape[1]);
+    uint32_t tailBlocks = static_cast<uint32_t>(tailCache.shape[0]);
+    uint32_t indexerBlockSize = static_cast<uint32_t>(indexerCache.shape[1]);
+    uint32_t idxBlocks = static_cast<uint32_t>(indexerCache.shape[0]);
+    if (headDim == 0 || kpool == 0 || numReqs == 0 || mainBlockSize == 0) {
+        throw std::runtime_error(std::string(__func__) + ": invalid dims");
+    }
+    // Host mirrors of the kernel's silent early-returns.
+    if (headDim > KPOOL_TAIL_MAX_HEAD_DIM || kpool > KPOOL_TAIL_MAX_KPOOL) {
+        throw std::runtime_error(std::string(__func__) + ": headDim/kpool exceed kernel budget");
+    }
+    if (headDim % 64 != 0) {
+        throw std::runtime_error(std::string(__func__) + ": headDim must be a multiple of 64");
+    }
+    // Ring must hold one compress window; pooled slots stay integral.
+    if (cap < kpool || mainBlockSize % kpool != 0) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": cap/mainBlockSize incompatible with kpool");
+    }
+    if (tailBlockTable.numel < numReqs) {
+        throw std::runtime_error(std::string(__func__) + ": tailBlockTable too small");
+    }
+    if (tailCache.shape[2] != 2 * headDim || indexerCache.shape[3] != headDim ||
+        k.shape[1] != headDim || gate.shape[1] != headDim || ape.shape[0] != kpool ||
+        ape.shape[1] != headDim || positions.numel < numTokens || cachedLens.numel < numReqs ||
+        lens.numel < numReqs || slotMapping.numel < numTokens) {
+        throw std::runtime_error(std::string(__func__) + ": shape mismatch");
+    }
+    // Pool views carry a dim-0 page pitch the kernels consume via stride; per-step
+    // tensors stay strictly contiguous.
+    RequireDim0Pitched(tailCache, "kpool_tail_compress.tailCache");
+    RequireDim0Pitched(indexerCache, "kpool_tail_compress.indexerCache");
+    RequireContiguous(k, "kpool_tail_compress.k");
+    RequireContiguous(gate, "kpool_tail_compress.gate");
+    RequireContiguous(ape, "kpool_tail_compress.ape");
+    RequireContiguous(positions, "kpool_tail_compress.positions");
+    RequireContiguous(queryStartLoc, "kpool_tail_compress.queryStartLoc");
+    RequireContiguous(lens, "kpool_tail_compress.lens");
+    RequireContiguous(cachedLens, "kpool_tail_compress.cachedLens");
+    RequireContiguous(slotMapping, "kpool_tail_compress.slotMapping");
+    RequireContiguous(tailBlockTable, "kpool_tail_compress.tailBlockTable");
+    KERNEL_PTR_TYPE(kpool_tail_compress) * launchCompress;
+    KERNEL_PTR_TYPE(kpool_tail_spill) * launchSpill;
+    if (indexerCache.dtype == FP32) {
+        launchCompress = aclrtlaunch_kpool_tail_compress_float;
+        launchSpill = aclrtlaunch_kpool_tail_spill_float;
+    } else if (indexerCache.dtype == FP16) {
+        launchCompress = aclrtlaunch_kpool_tail_compress_float16_t;
+        launchSpill = aclrtlaunch_kpool_tail_spill_float16_t;
+    } else if (indexerCache.dtype == BF16) {
+        launchCompress = aclrtlaunch_kpool_tail_compress_bfloat16_t;
+        launchSpill = aclrtlaunch_kpool_tail_spill_bfloat16_t;
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(indexerCache);
+        throw std::runtime_error(err_str + "not supported!");
+    }
+    uint32_t tailStride = static_cast<uint32_t>(tailCache.stride[0]);
+    uint32_t idxStride = static_cast<uint32_t>(indexerCache.stride[0]);
+    launchCompress(PickMinBlockNum(rt.aivNum, numTokens), rt.stream, tailCache.ptr,
+                   indexerCache.ptr, k.ptr, gate.ptr, ape.ptr, positions.ptr, queryStartLoc.ptr,
+                   lens.ptr, cachedLens.ptr, slotMapping.ptr, tailBlockTable.ptr, numReqs,
+                   numTokens, headDim, kpool, cap, tailBlocks, indexerBlockSize, idxBlocks,
+                   mainBlockSize, k.shape[1], gate.shape[1], tailStride, idxStride);
+    launchSpill(PickMinBlockNum(rt.aivNum, numReqs * cap), rt.stream, tailCache.ptr, k.ptr,
+                gate.ptr, queryStartLoc.ptr, lens.ptr, tailBlockTable.ptr, positions.ptr, numReqs,
+                numTokens, headDim, cap, tailBlocks, k.shape[1], gate.shape[1], tailStride);
 }
