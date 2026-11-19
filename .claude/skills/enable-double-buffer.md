@@ -1,0 +1,1 @@
+../../.agents/skills/enable-double-buffer/SKILL.md
