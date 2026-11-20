@@ -48,7 +48,7 @@
 #include "xlite.h"          // InitXTensor, XTensor
 #include "runtime.h"        // XRuntime (public; wrapped, not inherited)
 #include "model.h"          // XModel, XModelConfig, MatmulWeight, XModelAttnMeta
-#include "dsa_cp_weight.h"  // DsaCpWeightStorageShape, DsaCpWeightIsNZ
+#include "dsa_cp_weight.h"  // DsaCpWeightStorageShape
 #include "op.h"             // XliteOp* declarations
 #include "core_assigner.h"  // XCoreAssigner (public; wrapped)
 #include "auto_tuner.h"     // GetTileSizeOfCachedKV (vector<uint32_t> args)
@@ -329,15 +329,6 @@ static bool IsConfigLayerFullAttention(XModelConfig &c, uint32_t layer,
 
 namespace
 {
-bool DsaCpWeightIsNZ(const at::Tensor &weight)
-{
-    // Query the native format without linking the bridge against libtorch_npu.
-    static const auto getFormat = c10::Dispatcher::singleton()
-                                      .findSchemaOrThrow("npu::get_npu_format", "")
-                                      .typed<int64_t(const at::Tensor &)>();
-    return getFormat.call(weight) == ACL_FORMAT_FRACTAL_NZ;
-}
-
 using TensorsRef = std::reference_wrapper<std::vector<at::Tensor>>;
 struct LayersCheckEntry {
     TensorsRef weights;
@@ -1477,9 +1468,10 @@ static void DsaCpMaterializeNzShard(const uint8_t *src, uint8_t *dst, size_t out
 void _CModel::PrepareDsaCpDecodeWeights(const XModelConfig &c, uint32_t tpRank, uint32_t layer)
 {
     at::NoGradGuard noGrad;
-    auto headShard = [&](XTensor &out, const at::Tensor &weight, size_t dim, bool nz) {
+    auto headShard = [&](XTensor &out, const at::Tensor &weight, size_t dim) {
         XTensor source;
         InitXTensor(source, weight, DBG_LOC);
+        const bool nz = source.nz;
         auto shape = source.shape;
         if (shape[dim] % c.defTpSize != 0) {
             throw std::invalid_argument("DSA-CP decode weight head axis must be divisible by TP");
@@ -1521,6 +1513,7 @@ void _CModel::PrepareDsaCpDecodeWeights(const XModelConfig &c, uint32_t tpRank, 
         if (outer == 1) {
             // W8A8 transposed QB and leading-head WUKT/WUV slices share storage.
             out.Init(shape, source.dtype, src);
+            out.nz = true;
             return;
         }
         // Non-transposed NZ QB slices row blocks inside each column block.
@@ -1530,6 +1523,7 @@ void _CModel::PrepareDsaCpDecodeWeights(const XModelConfig &c, uint32_t tpRank, 
         const size_t sourceStride = storageShape[storageDim] * inner * weight.element_size();
         DsaCpMaterializeNzShard(src, dst, outer, shardBytes, sourceStride);
         out.Init(shape, source.dtype, dst);
+        out.nz = true;
         dsaCpDecodeWeightStorage.push_back(std::move(shard));
     };
     auto outputParameterShard = [&](XTensor &parameter, size_t elementsPerChannel) {
@@ -1540,19 +1534,13 @@ void _CModel::PrepareDsaCpDecodeWeights(const XModelConfig &c, uint32_t tpRank, 
         }
     };
 
-    const bool qbNZ = DsaCpWeightIsNZ(mlaQB[layer]);
-    const bool wuktNZ = DsaCpWeightIsNZ(mlaWUKT[layer]);
-    const bool wuvNZ = DsaCpWeightIsNZ(mlaWUV[layer]);
-    _model->dsaCpWUKTWeightNZ[layer] = wuktNZ;
-    _model->dsaCpWUVWeightNZ[layer] = wuvNZ;
-    _model->dsaCpOutWeightNZ[layer] = DsaCpWeightIsNZ(attnOut[layer]);
     InitMatmulWeight("mlaQBDecodeTp", mlaQB, mlaQBInputScale, mlaQBInputOffset, mlaQBQuantBias,
                      mlaQBDeqScale, _model->mlaQBDecodeTp, layer, false, tpRank);
     auto &qb = _model->mlaQBDecodeTp[layer];
     const bool transposed = mlaQB[layer].scalar_type() == at::kChar && c.quantAttnWeightTrans;
-    headShard(qb.weight, mlaQB[layer], transposed ? 1 : 0, qbNZ);
-    headShard(_model->mlaWUKTDecodeTp[layer], mlaWUKT[layer], 0, wuktNZ);
-    headShard(_model->mlaWUVDecodeTp[layer], mlaWUV[layer], 0, wuvNZ);
+    headShard(qb.weight, mlaQB[layer], transposed ? 1 : 0);
+    headShard(_model->mlaWUKTDecodeTp[layer], mlaWUKT[layer], 0);
+    headShard(_model->mlaWUVDecodeTp[layer], mlaWUV[layer], 0);
     outputParameterShard(qb.quantBias, 1);
     // Each dequantization channel is packed as two FP32 elements.
     outputParameterShard(qb.deqScale, 2);
@@ -1822,6 +1810,7 @@ void Print(at::Tensor &x, const char *name, uint32_t nRow, uint32_t nCol)
 void Matmul(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z, bool weightNZ,
             bool transpose)
 {
+    (void)weightNZ;  // deprecated no-op
     XTensor _x, _y, _z, _bias, _deqScale;
 
     InitXTensor(_x, x, DBG_LOC);
@@ -1831,13 +1820,14 @@ void Matmul(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z, bool weig
         _x.View(INT4);
         _y.View(INT4);
     }
-    XliteOpMatmul(rt, _x, _y, _z, weightNZ, _bias, _deqScale, transpose);
+    XliteOpMatmul(rt, _x, _y, _z, _bias, _deqScale, transpose);
 }
 
 uint64_t MatmulBench(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z,
                      at::Tensor &x_warmup, at::Tensor &y_warmup, at::Tensor &z_warmup,
                      int iterations, int warmup_iterations, bool weightNZ, bool transpose)
 {
+    (void)weightNZ;  // deprecated no-op
     XTensor _x, _y, _z, _x_warmup, _y_warmup, _z_warmup, _bias, _deqScale;
 
     InitXTensor(_x, x, DBG_LOC);
@@ -1849,13 +1839,13 @@ uint64_t MatmulBench(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z,
     InitXTensor(_z_warmup, z_warmup, DBG_LOC);
 
     for (int i = 0; i < warmup_iterations; i++) {
-        XliteOpMatmul(rt, _x_warmup, _y_warmup, _z_warmup, weightNZ, _bias, _deqScale, transpose);
+        XliteOpMatmul(rt, _x_warmup, _y_warmup, _z_warmup, _bias, _deqScale, transpose);
     }
     rt.Synchronize();
 
     auto begin = std::chrono::steady_clock::now();
     for (int i = 0; i < iterations; i++) {
-        XliteOpMatmul(rt, _x, _y, _z, weightNZ, _bias, _deqScale, transpose);
+        XliteOpMatmul(rt, _x, _y, _z, _bias, _deqScale, transpose);
     }
     rt.Synchronize();
     auto end = std::chrono::steady_clock::now();
@@ -1867,6 +1857,7 @@ uint64_t MatmulBench(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z,
 void MatmulWithBias(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z, at::Tensor &bias,
                     bool weightNZ)
 {
+    (void)weightNZ;  // deprecated no-op
     XTensor _x, _y, _z, _bias, _deqSacle;
 
     InitXTensor(_x, x, DBG_LOC);
@@ -1877,7 +1868,7 @@ void MatmulWithBias(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z, a
         _x.View(INT4);
         _y.View(INT4);
     }
-    XliteOpMatmul(rt, _x, _y, _z, weightNZ, _bias, _deqSacle);
+    XliteOpMatmul(rt, _x, _y, _z, _bias, _deqSacle);
     rt.Synchronize();
 }
 
@@ -2106,6 +2097,7 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
            at::Tensor &topkIndices, uint32_t topK, bool weightNz, bool enableFlashAttention,
            uint32_t tileSizeOfCachedKV, bool dense, const std::optional<at::Tensor> &kScaleCache)
 {
+    (void)weightNz;  // deprecated no-op: nz is auto-detected from the weight format
     XTensor _qWithQr, _qr, _kCache, _peCache, _wukT, _wuv, _output, _queryStartLoc, _lens,
         _cachedLens, _blockTables, _topkIndices, _kScaleCache;
     InitXTensor(_kScaleCache, kScaleCache, DBG_LOC);
@@ -2127,7 +2119,7 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
     XTensor &qAbsorb =
         rt.GetTensor({_qWithQr.shape[0], nHeads * kvLoraRank}, XDtypeOf(qWithQr), DBG_LOC);
     XliteOpEinsumMhtHtdMhd(rt, _qWithQr, _wukT, qAbsorb, _qWithQr.shape[0], nHeads, nopeHeadDim,
-                           kvLoraRank, weightNz, static_cast<int>(nopeHeadDim + ropeHeadDim));
+                           kvLoraRank, static_cast<int>(nopeHeadDim + ropeHeadDim));
 
     XTensor &oAbsorb =
         rt.GetTensor({_qWithQr.shape[0], nHeads * kvLoraRank}, XDtypeOf(qWithQr), DBG_LOC);
@@ -2220,7 +2212,7 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
     }
 
     XliteOpEinsumMhtHtdMhd(rt, oAbsorb, _wuv, _output, _qWithQr.shape[0], nHeads, kvLoraRank,
-                           vHeadDim, weightNz);
+                           vHeadDim);
     rt.Synchronize();
     rt.PutTensor(qAbsorb);
     rt.PutTensor(oAbsorb);
@@ -2512,6 +2504,10 @@ void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
                  std::vector<at::Tensor> &scales, at::Tensor &counts, uint32_t start, uint32_t end,
                  long outDim, long inDim, at::Tensor &output, bool weightNZ, bool transpose)
 {
+    (void)weightNZ;  // deprecated no-op
+    if (weights.empty()) {
+        throw std::invalid_argument(DBG_PREFIX + ": weights must not be empty");
+    }
     XTensor _in, _counts, _output, _scalesTensor;
     XTensor *_scales = &_scalesTensor;
     std::vector<void *> p;
@@ -2527,6 +2523,7 @@ void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
         _in.View(INT4);
     }
     XTensor &_weights = rt.GetTensor({num}, INT64, DBG_LOC);
+    const bool expertNZ = IsNpuNzFormat(weights[0]);
 
     p.resize(num);
     for (i = 0; i < num; i++) {
@@ -2547,7 +2544,7 @@ void GroupMatmul(XRuntime &rt, at::Tensor &in, std::vector<at::Tensor> &weights,
         weightDtype = INT4;
     }
     XliteOpGroupMatmul(rt, _in, _weights, *_scales, _counts, start, end, weightDtype, outDim, inDim,
-                       _output, weightNZ, transpose);
+                       _output, expertNZ, transpose);
     rt.Synchronize();
     rt.PutTensor(_weights);
     if (hasScale) {
@@ -2827,6 +2824,7 @@ void MSDMergeDequant(XRuntime &rt, at::Tensor &yMerged, std::vector<at::Tensor> 
 void MatmulDeQuant(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &bias,
                    at::Tensor &deqScale, at::Tensor &z, bool weightNZ, bool transpose)
 {
+    (void)weightNZ;  // deprecated no-op
     XTensor _x, _y, _z, _bias, _deqScale;
 
     InitXTensor(_x, x, DBG_LOC);
@@ -2838,7 +2836,7 @@ void MatmulDeQuant(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &bias,
         _x.View(INT4);
         _y.View(INT4);
     }
-    XliteOpMatmul(rt, _x, _y, _z, weightNZ, _bias, _deqScale, transpose);
+    XliteOpMatmul(rt, _x, _y, _z, _bias, _deqScale, transpose);
     rt.Synchronize();
 }
 
@@ -2860,6 +2858,7 @@ void FusionOperatorMatmulDequantPipeline(XRuntime &rt, at::Tensor &x, at::Tensor
                                          bool weightNZ, bool transpose, at::Tensor &outScale,
                                          at::Tensor &num)
 {
+    (void)weightNZ;  // deprecated no-op
     XTensor _x, _weight, _out, _bias, _deqScale, _outScale, _num;
 
     InitXTensor(_x, x, DBG_LOC);
@@ -2873,8 +2872,8 @@ void FusionOperatorMatmulDequantPipeline(XRuntime &rt, at::Tensor &x, at::Tensor
     if (num.numel() > 0) {
         InitXTensor(_num, num, DBG_LOC);
     }
-    XliteOpFusionOperatorMatmulDequantPipeline(rt, _x, _weight, _out, _bias, _deqScale, weightNZ,
-                                               transpose, _outScale, _num);
+    XliteOpFusionOperatorMatmulDequantPipeline(rt, _x, _weight, _out, _bias, _deqScale, transpose,
+                                               _outScale, _num);
     rt.Synchronize();
 }
 void FusedQuantMatmulDequant(XRuntime &rt, at::Tensor &x,
@@ -2886,6 +2885,7 @@ void FusedQuantMatmulDequant(XRuntime &rt, at::Tensor &x,
                              const std::optional<at::Tensor> &num, bool dynQuant, bool weightNZ,
                              bool transpose)
 {
+    (void)weightNZ;  // deprecated no-op
     XTensor _x, _quantScaleRec, _quantOffset, _weight, _out, _bias, _deqScale, _xQuant, _outScale,
         _num;
 
@@ -2902,8 +2902,7 @@ void FusedQuantMatmulDequant(XRuntime &rt, at::Tensor &x,
     InitXTensor(_outScale, outScale);
     InitXTensor(_num, num);
     XliteOpFusedQuantMatmulDequant(rt, _x, _quantScaleRec, _quantOffset, _weight, _out, _bias,
-                                   _deqScale, _xQuant, _outScale, _num, dynQuant, weightNZ,
-                                   transpose);
+                                   _deqScale, _xQuant, _outScale, _num, dynQuant, transpose);
     rt.Synchronize();
 }
 
@@ -3050,7 +3049,7 @@ void LinearAttProj(XRuntime &rt, at::Tensor &x, at::Tensor &W_qkv, at::Tensor &W
     XliteOpConcatCol(rt, inputs, W);
 
     XTensor &out = rt.GetTensor({m, n + v + h + h}, XDtypeOf(x), DBG_LOC);
-    XliteOpMatmul(rt, _x, W, out, false, bias, deqScale, true);
+    XliteOpMatmul(rt, _x, W, out, bias, deqScale, true);
     rt.PutTensor(W);
 
     std::vector<XTensor> outputs = {_mix_qkv, _z, _b, _a};
@@ -3306,22 +3305,24 @@ void RecurrentGatedDeltaRuleKdaPaged(
 void EinsumMhtHdtMhd(XRuntime &rt, at::Tensor &mht, at::Tensor &hdt, at::Tensor &mhd, uint32_t m,
                      uint32_t h, uint32_t t, uint32_t d, bool weightNZ)
 {
+    (void)weightNZ;  // deprecated no-op
     XTensor _mht, _hdt, _mhd;
     InitXTensor(_mht, mht, DBG_LOC);
     InitXTensor(_hdt, hdt, DBG_LOC);
     InitXTensor(_mhd, mhd, DBG_LOC);
-    XliteOpEinsumMhtHdtMhd(rt, _mht, _hdt, _mhd, m, h, t, d, weightNZ);
+    XliteOpEinsumMhtHdtMhd(rt, _mht, _hdt, _mhd, m, h, t, d);
     rt.Synchronize();
 }
 
 void EinsumMhtHtdMhd(XRuntime &rt, at::Tensor &mht, at::Tensor &htd, at::Tensor &mhd, uint32_t m,
                      uint32_t h, uint32_t t, uint32_t d, bool weightNZ)
 {
+    (void)weightNZ;  // deprecated no-op
     XTensor _mht, _htd, _mhd;
     InitXTensor(_mht, mht, DBG_LOC);
     InitXTensor(_htd, htd, DBG_LOC);
     InitXTensor(_mhd, mhd, DBG_LOC);
-    XliteOpEinsumMhtHtdMhd(rt, _mht, _htd, _mhd, m, h, t, d, weightNZ);
+    XliteOpEinsumMhtHtdMhd(rt, _mht, _htd, _mhd, m, h, t, d);
     rt.Synchronize();
 }
 
@@ -4309,8 +4310,8 @@ TORCH_LIBRARY(xlite_sabi, m)
         .def_rw("num_spec_tokens", &XModelConfig::numSpecTokens)
         .def_rw("block_size", &XModelConfig::blockSize)
         .def_rw("block_sizes", &XModelConfig::blockSizes)
-        .def_rw("weight_nz", &XModelConfig::weightNZ)
         .def_rw("experts_weight_transpose", &XModelConfig::expertsWeightTrans)
+        .def_rw("weight_nz", &XModelConfig::weightNZ)
         .def_rw("experts_weight_nz", &XModelConfig::expertsWeightNZ)
         .def_rw("gate_captured", &XModelConfig::gateCaptured)
         .def_rw("mla_wuv_weight_nz", &XModelConfig::mlaWuvWeightNZ)

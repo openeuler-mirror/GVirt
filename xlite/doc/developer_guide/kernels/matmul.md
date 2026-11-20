@@ -27,9 +27,11 @@ matmul_##dtype(x, y, z, m, n, k, nz, transpose, m0, n0, k0, swizzl, bias, deqSca
 
 Python 调用方式：
 
-- `matmul(rt, x, y, z, weightNZ, transpose)`（`tests/kernels/matmul.py` 的 `matmul(rt, x, y, z, ...)` 调用示例，关键字 `matmul(rt, x, y, z`）
-- `matmul_with_bias(rt, x, y, z, bias, weightNZ)`（`tests/kernels/matmul_with_bias.py` 的 `matmul_with_bias(...)` 调用示例，关键字 `matmul_with_bias(rt, x, y, z`）
-- `matmul_dequant(rt, x, y, bias, scale, z, weightNZ, transpose)`（`tests/kernels/matmul_int8.py` 的 `matmul_dequant(...)` 调用示例，关键字 `matmul_dequant(rt, x, y_in`；`tests/kernels/matmul_int4.py` 的 `matmul_dequant(...)` 调用示例，关键字 `matmul_dequant(rt, x_int4_pack`）
+- `matmul(rt, x, y, z, weight_nz, transpose)`（`tests/kernels/matmul.py` 的 `matmul(rt, x, y, z, ...)` 调用示例，关键字 `matmul(rt, x, y, z`）
+- `matmul_with_bias(rt, x, y, z, bias, weight_nz)`（`tests/kernels/matmul_with_bias.py` 的 `matmul_with_bias(...)` 调用示例，关键字 `matmul_with_bias(rt, x, y, z`）
+- `matmul_dequant(rt, x, y, bias, scale, z, weight_nz, transpose)`（`tests/kernels/matmul_int8.py` 的 `matmul_dequant(...)` 调用示例，关键字 `matmul_dequant(rt, x, y_in`；`tests/kernels/matmul_int4.py` 的 `matmul_dequant(...)` 调用示例，关键字 `matmul_dequant(rt, x_int4_pack`）
+
+各接口的 `weight_nz` 参数已废弃并将被移除：传入值被忽略，NZ 权重布局由 `InitXTensor` 边界自动检测的 FRACTAL_NZ 存储格式决定（`csrc/xlite.h` 的 `IsNpuNzFormat`），matmul 类 op 据此选择 kernel 路径。
 
 int4 路径中 x/y 为 int32 容器（`npu_convert_weight_to_int4pack` 打包结果），`_C.cpp` 中 `View(INT4)` 重解释为 int4（`csrc/_C.cpp` 的 `Matmul` 与 `MatmulDeQuant` 两处 `if (_x.dtype == INT32 && _y.dtype == INT32)` 块，关键字 `View(INT4)`）。
 

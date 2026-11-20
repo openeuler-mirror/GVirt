@@ -287,6 +287,7 @@ public:
     enum XDtype dtype;           // DO NOT MODIFY dtype directly, use View() to change dtype
     size_t bytes;                // DO NOT MODIFY bytes directly, use View() to change shape/dtype
     void *ptr = nullptr;         // DO NOT MODIFY ptr directly unless you know what you are doing
+    bool nz = false;  // FRACTAL_NZ storage layout, detected by InitXTensor, reset by Init()
 
 private:
     XTensor &Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr, enum XTensorType type,

@@ -14,7 +14,7 @@ AIV 2b/2b+1:   dequant(out FP16 → BF16 原位, dyn 乘 outScale)
 
 ## 输入输出参数
 
-Python 入口 `fused_quant_matmul_dequant(rt, x, quant_scale_rec, quant_offset, weight, out, bias, deq_scale, x_quant, out_scale, num, dyn_quant, weight_nz, transpose)`（`csrc/_C.cpp`）。kernel 签名见 `FUSED_QUANT_MATMUL_DEQUANT_FUNC_DEFINE` 宏（[csrc/kernels/fused_quant_matmul_dequant.h](../../../csrc/kernels/fused_quant_matmul_dequant.h)）:
+Python 入口 `fused_quant_matmul_dequant(rt, x, quant_scale_rec, quant_offset, weight, out, bias, deq_scale, x_quant, out_scale, num, dyn_quant, weight_nz, transpose)`（`csrc/_C.cpp`）。kernel 签名见 `FUSED_QUANT_MATMUL_DEQUANT_FUNC_DEFINE` 宏（[csrc/kernels/fused_quant_matmul_dequant.h](../../../csrc/kernels/fused_quant_matmul_dequant.h)）:`weight_nz` 已废弃并将被移除,传入值被忽略,`weight` 的 FRACTAL_NZ 存储格式由 `InitXTensor` 自动检测。
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
@@ -28,7 +28,8 @@ Python 入口 `fused_quant_matmul_dequant(rt, x, quant_scale_rec, quant_offset, 
 | out_scale | workspace | `[m]` | float32 | dyn 模式 per-token scale（quant 写、dequant 读）；静态模式传空 |
 | num | 输入(可选) | `[1]` | uint32 | 动态 token 数，dequant 侧行收缩（同独立 dequant） |
 | dyn_quant | 标量 | - | bool | true=动态 per-token；false=静态 per-channel |
-| weight_nz / transpose | 标量 | - | bool | 权重布局 |
+| weight_nz | 标量 | - | bool | 已废弃,传入值被忽略（NZ 由自动检测决定） |
+| transpose | 标量 | - | bool | 权重是否转置存储 |
 | m0/n0/k0 | 标量 | - | uint64 | tiling，默认走 `PickMatmulTiling`（与独立 matmul 一致） |
 
 测试参考：[tests/kernels/fused_quant_matmul_dequant.py](../../../tests/kernels/fused_quant_matmul_dequant.py)，golden 为串行三 kernel 链，覆盖 nz/transpose/dyn/static 交叉、quant 尾路径与长序列。perf 参考：[tests/performance/perf_fused_quant_matmul_dequant.py](../../../tests/performance/perf_fused_quant_matmul_dequant.py)。

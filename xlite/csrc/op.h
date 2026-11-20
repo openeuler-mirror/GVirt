@@ -27,7 +27,7 @@ void XliteOpDsaCpWriteKVCacheBySlot(XRuntime &rt, XTensor &input, XTensor &cache
                                     XTensor &slotMapping, uint32_t numTokens, uint32_t blockSize);
 // Gather TP input-channel shards in their original format. The returned pool
 // tensor contains a full weight; the caller releases it after projection.
-XTensor &XliteOpDsaCpGatherWeight(XRuntime &rt, XTensor &weight, bool nz, bool transposed);
+XTensor &XliteOpDsaCpGatherWeight(XRuntime &rt, XTensor &weight, bool transposed = false);
 // Reorder AllGathered NZ weights from [rank, N1, ...] into [N1, rank, ...] at
 // whole-NZ-block granularity; exposed for kernel-level testing.
 void XliteOpDsaCpReorderWo(XRuntime &rt, XTensor &input, XTensor &output, uint32_t ranks,
@@ -58,7 +58,7 @@ void XliteOpL2Norm(XRuntime &rt, XTensor &in, XTensor &out, float normEps, uint3
                    uint32_t cntPerToken = 1, uint32_t inStartOffset = 0,
                    uint32_t outStartOffset = 0);
 void XliteOpAdd(XRuntime &rt, XTensor &in1, XTensor &in2, XTensor &out);
-void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, bool weightNZ = false,
+void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out,
                    const XTensor &bias = XTensor(), const XTensor &deqScale = XTensor(),
                    bool transpose = false, uint64_t m0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
                    uint64_t n0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
@@ -78,6 +78,8 @@ void XliteOpUnpermutation(XRuntime &rt, XTensor &in, XTensor &unpIdx, XTensor &r
 // zeroed by the op. log2phy is [nRoutedExperts] INT32.
 void XliteOpRemapGateOutputs(XRuntime &rt, XTensor &wIn, XTensor &rIn, XTensor &wOut, XTensor &rOut,
                              const XTensor &log2phy);
+// weights is an INT64 pointer table with no layout info: the caller passes the
+// first local expert's nz flag.
 void XliteOpGroupMatmul(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &deqScales,
                         XTensor &counts, uint32_t start, uint32_t end, XDtype weightDtype,
                         long outDim, long inDim, XTensor &output, bool weightNZ = false,
@@ -226,12 +228,11 @@ void XliteOpMSDMergeDequant(XRuntime &rt, XTensor &yMerged, XTensor &scaleBiasPt
                             uint32_t start, uint32_t end, XTensor &perTokenScale, XTensor &out);
 void XliteOpMatmulDeQuant(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out,
                           const XTensor &quantBias = XTensor(),
-                          const XTensor &weightScale = XTensor(), bool weightNZ = false,
-                          bool transpose = false, const XTensor &outScale = XTensor(),
-                          const XTensor &num = XTensor());
+                          const XTensor &weightScale = XTensor(), bool transpose = false,
+                          const XTensor &outScale = XTensor(), const XTensor &num = XTensor());
 void XliteOpFusionOperatorMatmulDequantPipeline(
     XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, const XTensor &quantBias = XTensor(),
-    const XTensor &weightScale = XTensor(), bool weightNZ = false, bool transpose = false,
+    const XTensor &weightScale = XTensor(), bool transpose = false,
     const XTensor &outScale = XTensor(), const XTensor &num = XTensor(),
     uint64_t m0 = MATMUL_M0_N0_K0_DEFAULT_VALUE, uint64_t n0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
     uint64_t k0 = MATMUL_M0_N0_K0_DEFAULT_VALUE);
@@ -244,7 +245,7 @@ void XliteOpFusedQuantMatmulDequant(XRuntime &rt, XTensor &x, const XTensor &qua
                                     const XTensor &quantOffset, XTensor &weight, XTensor &out,
                                     const XTensor &quantBias, const XTensor &weightScale,
                                     XTensor &xQuant, XTensor &outScale, const XTensor &num,
-                                    bool dynQuant, bool weightNZ = false, bool transpose = false,
+                                    bool dynQuant, bool transpose = false,
                                     uint64_t m0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
                                     uint64_t n0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
                                     uint64_t k0 = MATMUL_M0_N0_K0_DEFAULT_VALUE);
@@ -311,11 +312,9 @@ void XliteOpRecurrentGatedDeltaRuleKdaPaged(XRuntime &rt, XTensor &query, XTenso
                                             float normEps, XTensor *cachedLens = nullptr,
                                             uint32_t stateBlockSize = 0, bool aligned = false);
 void XliteOpEinsumMhtHdtMhd(XRuntime &rt, XTensor &mht, XTensor &hdt, XTensor &mhd, uint32_t m,
-                            uint32_t h, uint32_t t, uint32_t d, bool weightNZ, int T = -1,
-                            int D = -1);
+                            uint32_t h, uint32_t t, uint32_t d, int T = -1, int D = -1);
 void XliteOpEinsumMhtHtdMhd(XRuntime &rt, XTensor &mht, XTensor &htd, XTensor &mhd, uint32_t m,
-                            uint32_t h, uint32_t t, uint32_t d, bool weightNZ, int T = -1,
-                            int D = -1);
+                            uint32_t h, uint32_t t, uint32_t d, int T = -1, int D = -1);
 void XliteOpUnpackActivation(XRuntime &rt, XTensor &input, XTensor &output);
 void XliteOpHcAct(XRuntime &rt, XTensor &mixes, const XTensor &hcScale, const XTensor &hcBase,
                   XTensor &post, XTensor &comb, uint32_t hcMult, float eps, uint32_t sinkhornIters,
