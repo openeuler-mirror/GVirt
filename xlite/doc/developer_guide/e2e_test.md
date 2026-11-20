@@ -158,7 +158,7 @@ python3 run_benchmark_scheduler.py --run-now
 
 # 自定义所有参数
 python3 run_benchmark_scheduler.py \
-    --model moe \
+    --online-models moe \
     --receiver "1234567890" \
     --run-time 02:00
 ```
