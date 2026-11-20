@@ -821,12 +821,72 @@ def _split_into_atomic_units(message: str) -> list[str]:
     return ["\n".join(b) for b in blocks]
 
 
+def _truncate_to_wire(text: str, budget: int) -> str:
+    """把 text 截断到 wire 字节数 <= budget, 末尾追加 "…(已截断)" 占位。
+
+    用于单行仍超预算的终极兜底: 保证任何内容都能塞进一条消息送达,
+    宁可丢尾部也不让整条消息被平台静默丢弃。截断按 UTF-8 字符边界进行, 不会切碎多字节字符。
+    """
+    suffix = "…(已截断)"
+    suffix_bytes = _wire_bytes(suffix)
+    if _wire_bytes(text) <= budget:
+        return text
+    target = budget - suffix_bytes
+    if target <= 0:
+        return suffix[:budget]  # 极端情况: budget 连后缀都放不下
+    encoded = text.replace("\n", "</br>").encode("utf-8")
+    # 按字节截到 <= target, 再回退到完整 UTF-8 字符边界 (避免半个多字节字符)
+    cut = encoded[:target]
+    # 解码时 errors="ignore" 丢掉可能被截断的末尾多字节字符
+    truncated = cut.decode("utf-8", errors="ignore")
+    return truncated + suffix
+
+
+def _split_oversized_unit(unit: str, budget: int) -> list[str]:
+    """单个原子单元 (一个场景块) 超 budget 时的降级切分, 保证每段 <= budget。
+
+    降级顺序:
+      1. 单元内按行 (\n) 再切, 累积到 budget 即断段;
+      2. 单行仍超 budget 时, 对该行硬截断 + "…(已截断)" 后缀。
+
+    这是分片路径的终极兜底: 宁可拆场景/截断内容, 也不让超限消息被平台
+    "返回成功但静默丢弃"。日常场景块 ~1.5KB 离 4300B 余量充足, 此路径几乎不触发,
+    仅在单场景块异常膨胀时保底送达。
+    """
+    parts: list[str] = []
+    cur: list[str] = []
+    cur_bytes = 0
+    for line in unit.split("\n"):
+        line_bytes = _wire_bytes(line)
+        # cur 非空时加该行需 5B </br> 连接符
+        add = line_bytes + (5 if cur else 0)
+        # 单行本身就超 budget: 先把 cur 冲掉, 再对该行硬截断独占一段
+        if line_bytes > budget:
+            if cur:
+                parts.append("\n".join(cur))
+                cur = []
+                cur_bytes = 0
+            parts.append(_truncate_to_wire(line, budget))
+            continue
+        if cur and cur_bytes + add > budget:
+            parts.append("\n".join(cur))
+            cur = [line]
+            cur_bytes = line_bytes
+        else:
+            cur.append(line)
+            cur_bytes += add
+    if cur:
+        parts.append("\n".join(cur))
+    return parts
+
+
 def _split_message_for_wire(message: str, max_wire_bytes: int) -> list[str]:
     """把 message 按原子单元边界切成多段, 使每段 (含段标记) 经 "\\n"->"</br>" 替换后的
     UTF-8 字节数不超过 max_wire_bytes。
 
     原子单元 = 一个完整场景 (性能报告) 或一行 (无场景结构的报告), 切分点不落在
-    场景内部, 故一个场景不会被劈到两条消息里。单个原子单元超预算时独占一段 (记 warning)。
+    场景内部, 故一个场景不会被劈到两条消息里。单个原子单元超预算时, 降级为单元内按行
+    再切 (仍超则硬截断加省略号), 保证任何内容都能送达, 不出现静默丢弃。
     """
     # 段标记 "(第i/N段)</br>" 的 wire 开销预留 (两位段号约 15B), 留余量
     marker_reserve = 20
@@ -837,6 +897,15 @@ def _split_message_for_wire(message: str, max_wire_bytes: int) -> list[str]:
     cur_bytes = 0
     for unit in units:
         unit_bytes = _wire_bytes(unit)
+        # 单个原子单元本身超预算: 降级切分 (按行/硬截断), 不整段照发以免被静默丢弃
+        if unit_bytes > budget:
+            if cur:
+                segments.append("\n".join(cur))
+                cur = []
+                cur_bytes = 0
+            log_warning(f"单个原子单元 wire 字节数 {unit_bytes}B 超预算 {budget}B, 降级按行切分")
+            segments.extend(_split_oversized_unit(unit, budget))
+            continue
         # 若 cur 非空, 加入该单元还需 5B 的 </br> 连接符
         add = unit_bytes + (5 if cur else 0)
         if cur and cur_bytes + add > budget:
@@ -844,8 +913,6 @@ def _split_message_for_wire(message: str, max_wire_bytes: int) -> list[str]:
             cur = [unit]
             cur_bytes = unit_bytes
         else:
-            if not cur and unit_bytes > budget:
-                log_warning(f"单个原子单元 wire 字节数 {unit_bytes}B 超预算 {budget}B, 该单元独占一段")
             cur.append(unit)
             cur_bytes += add
     if cur:
