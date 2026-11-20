@@ -10,6 +10,7 @@
 | update-kernel-docs | [skills/update-kernel-docs/SKILL.md](skills/update-kernel-docs/SKILL.md) | 生成 / 刷新 `xlite/doc/developer_guide/kernels/` 下的算子实现原理文档 |
 | optimize-vector-kernel | [skills/optimize-vector-kernel/SKILL.md](skills/optimize-vector-kernel/SKILL.md) | 优化昇腾 910B3(arch 2201)向量核算子的 UB bank 冲突(constexpr 布局、多行批处理、A/B 位一致验证) |
 | transfer-larger-blocks | [skills/transfer-larger-blocks/SKILL.md](skills/transfer-larger-blocks/SKILL.md) | 通过单次 DataCopy 搬运更大数据块(≥16KB)最大化 AscendC 算子的 MTE 搬运带宽 |
+| enable-double-buffer | [skills/enable-double-buffer/SKILL.md](skills/enable-double-buffer/SKILL.md) | 用 Ping/Pong 双缓冲重叠搬运与计算,将 MTE2/MTE3 传输延迟隐藏在 Vector/Cube 计算之后(TPipe/TQue `InitBuffer(que, 2, ...)` 与 C-API `set_flag`/`wait_flag` 手动双缓冲) |
 | cross-core-sync | [skills/cross-core-sync/SKILL.md](skills/cross-core-sync/SKILL.md) | 实现 AscendC MIX 核 AIC/AIV 间手动同步(`CrossCoreSetFlag`/`CrossCoreWaitFlag`)并选择正确的 handoff 粒度,避免死锁 / 假唤醒 / 性能回退 |
 | op-perf-bottleneck-analysis | [skills/op-perf-bottleneck-analysis/SKILL.md](skills/op-perf-bottleneck-analysis/SKILL.md) | 定位 NPU 算子性能瓶颈(msprof 负载基线 → MIX AIC/AIV 关键路径消融 → pipeline 与流水并行性分析 → 逐段消融定位代码段),输出瓶颈结论与优化手段建议 |
 
