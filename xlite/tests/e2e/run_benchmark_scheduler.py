@@ -55,6 +55,7 @@ class BenchmarkScheduler:
         retry: int = 3,
         vllm_timeout: int = 1800,
         offline_only: bool = False,
+        offline_models: str | None = None,
     ):
         self.type = type
         self.script = script.resolve()
@@ -68,6 +69,7 @@ class BenchmarkScheduler:
         self.retry = retry
         self.vllm_timeout = vllm_timeout
         self.offline_only = offline_only
+        self.offline_models = offline_models
 
         # 注册信号处理
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -101,7 +103,7 @@ class BenchmarkScheduler:
             cmd = [
                 PYTHON_CMD,
                 str(self.script),
-                "--model",
+                "--online-models",
                 self.model,
                 "--receiver",
                 self.receiver,
@@ -109,6 +111,9 @@ class BenchmarkScheduler:
             if self.offline_only:
                 # offline_only=True => 跳过在线, 仅跑离线 bench (透传 bot 的 --offline-bench)
                 cmd.append("--offline-bench")
+            if self.offline_models:
+                # 透传离线模型列表给 bot (bot 侧校验合法性), 不传则 bot 默认跑全部
+                cmd.extend(["--offline-models", self.offline_models])
 
             self.log(f"执行命令: {' '.join(cmd)}")
 
@@ -303,6 +308,13 @@ def main():
         action="store_true",
         help="仅跑离线 bench (跳过在线性能测试); 默认为 先在线→再离线 两阶段; 仅 bench 模式有效",
     )
+    parser.add_argument(
+        "-om",
+        "--offline-models",
+        type=str,
+        default=None,
+        help="离线 bench 模型列表 (逗号分隔, 如 glm5_w8a8,deepseek_v4_w8a8); 不传则跑全部 (仅 bench 模式有效)",
+    )
     parser.add_argument("--timeout", type=int, default=2 * 3600, help="ais_bench 子进程超时时间（秒），默认 2h = 7200s")
     parser.add_argument("--retry", type=int, default=3, help="ais_bench 失败时的重试次数，默认 3")
     parser.add_argument("--vllm-timeout", type=int, default=1800, help="vLLM 服务器启动超时时间（秒），默认 1800s")
@@ -328,6 +340,7 @@ def main():
         retry=args.retry,
         vllm_timeout=args.vllm_timeout,
         offline_only=args.offline_only,
+        offline_models=args.offline_models,
     )
 
     # 如果需要立即执行

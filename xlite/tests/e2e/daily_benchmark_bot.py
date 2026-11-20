@@ -15,10 +15,9 @@ xlite 每日自动化测试机器人
 - 从远程仓库拉取代码到 /workspaces/code/opencode/GVirt
 
 使用方法:
-    python3 daily_benchmark_bot.py --model moe --receiver "927280411401503971"
+    python3 daily_benchmark_bot.py --online-models moe --receiver "927280411401503971"
 
     可选参数:
-    --model: 测试模型类型 (moe/moe_quant/moe_quant_a3/glm5_2_dummy/moe_mix/quant/all)，默认 moe
     --skip-pull: 跳过代码拉取
     --skip-build: 跳过编译
     --receiver: 接收者ID，默认 927280411401503971
@@ -29,7 +28,8 @@ xlite 每日自动化测试机器人
                - blue 环境: 不需要 source /home/env.sh
     --compare-ttft: 启用TTFT指标作为对比指标（默认不比较TTFT）
     --compare-tpot-p99: 启用TPOT P99指标作为对比指标（默认不比较TPOT P99）
-    --online-models: 逗号分隔的在线模型类型列表 (如 moe,glm5_2_dummy), 覆盖 --model
+    --online-models: 在线模型类型 (原子 moe/moe_quant/moe_quant_a3/glm5_2_dummy,
+                     或预设 moe_mix/quant/all, 或逗号列表如 moe,glm5_2_dummy)，默认 moe
     --offline-models: 逗号分隔的离线 bench 模型列表 (如 glm5_w8a8,glm53_flash_w8a8,
                       deepseek_v4_w8a8); 不传默认全部
 
@@ -234,7 +234,7 @@ def run_benchmark(model_type: str = "moe", report_subdir: Path | None = None) ->
     执行基准测试脚本
 
     参数:
-        model_type: 模型类型 (moe/moe_quant/moe_quant_a3/glm5_2_dummy/moe_mix/quant/all)
+        model_type: 模型类型 (moe/moe_quant/moe_quant_a3/glm5_2_dummy/moe_mix/quant/all, 或逗号列表如 moe,glm5_2_dummy); 原样透传给 online_server_compare.sh
         report_subdir: 报告目录路径。传入则复用, 否则按当前版本+日期新建。
 
     返回:
@@ -2194,12 +2194,6 @@ def main():
     """
     # 解析命令行参数
     parser = argparse.ArgumentParser(description="xlite 每日自动化测试机器人")
-    parser.add_argument(
-        "--model",
-        default="moe",
-        choices=["moe", "moe_quant", "moe_quant_a3", "glm5_2_dummy", "moe_mix", "quant", "all"],
-        help="测试模型类型 (default: moe)",
-    )
     parser.add_argument("--skip-pull", action="store_true", help="跳过代码拉取")
     parser.add_argument("--skip-build", action="store_true", help="跳过编译")
     parser.add_argument(
@@ -2232,13 +2226,20 @@ def main():
         action="store_true",
         help="跳过离线 bench 阶段, 只跑在线性能测试。",
     )
-    # 在线模型类型有效集合 (与 online_server_compare.sh 的 MODELS 注册表键一致)
-    _VALID_ONLINE_MODELS = {"moe", "moe_quant", "moe_quant_a3", "glm5_2_dummy"}
+    # 在线模型校验集合, 与 online_server_compare.sh 的接受范围对齐:
+    #   单值: 原子模型 或 预设 (all/moe_mix/quant, 在 shell if/elif 链展开)
+    #   逗号列表: 仅原子模型 (预设不可与其它混用, 同 shell 逗号分支行为)
+    _ONLINE_ATOMIC_MODELS = {"moe", "moe_quant", "moe_quant_a3", "glm5_2_dummy"}
+    _ONLINE_PRESET_MODELS = {"all", "moe_mix", "quant"}
     parser.add_argument(
         "--online-models",
         type=str,
         default=None,
-        help=f"逗号分隔的在线模型类型列表 (如 moe,glm5_2_dummy), 覆盖 --model; 可选值: {sorted(_VALID_ONLINE_MODELS)}",
+        help=(
+            f"在线模型类型: 原子 {sorted(_ONLINE_ATOMIC_MODELS)}, "
+            f"预设 {sorted(_ONLINE_PRESET_MODELS)}, 或逗号列表如 moe,glm5_2_dummy; 默认 moe. "
+            "原样透传给 online_server_compare.sh (该校验仅 fail-fast, 避免笔误浪费编译)"
+        ),
     )
     parser.add_argument(
         "--offline-models",
@@ -2259,17 +2260,26 @@ def main():
     COMPARE_TPOT_P99_METRICS = args.compare_tpot_p99
 
     # 解析在线/离线模型列表
-    # 在线: --online-models 优先 (逗号分隔), 否则回退 --model (向后兼容现有 cron)
-    if args.online_models is not None:
-        online_models = [m.strip() for m in args.online_models.split(",") if m.strip()]
-        invalid = [m for m in online_models if m not in _VALID_ONLINE_MODELS]
-        if invalid:
-            log_error(f"--online-models 含无效模型类型: {invalid}, 可选: {sorted(_VALID_ONLINE_MODELS)}")
-            sys.exit(1)
-        if args.model != "moe":
-            log_warning(f"--online-models 覆盖 --model (忽略 --model={args.model})")
+    # 在线模型: --online-models (默认 moe). 原样透传给 online_server_compare.sh,
+    # 该脚本为唯一权威 (预设/单值/逗号列表均由其校验展开).
+    # 此处仅做 fail-fast 校验 (build 在 run_benchmark 之前, 避免笔误浪费数分钟编译).
+    online_models = args.online_models if args.online_models is not None else "moe"
+    _tokens = [t.strip() for t in online_models.split(",") if t.strip()]
+    if not _tokens:
+        log_error("--online-models 不能为空")
+        sys.exit(1)
+    if len(_tokens) == 1:
+        _invalid = [] if _tokens[0] in (_ONLINE_ATOMIC_MODELS | _ONLINE_PRESET_MODELS) else [_tokens[0]]
     else:
-        online_models = [args.model]
+        # 逗号列表: 仅原子模型 (预设不可与其它混用, 同 shell 逗号分支行为)
+        _invalid = [t for t in _tokens if t not in _ONLINE_ATOMIC_MODELS]
+    if _invalid:
+        log_error(
+            f"--online-models 含无效模型类型: {_invalid}, "
+            f"原子: {sorted(_ONLINE_ATOMIC_MODELS)}, 预设: {sorted(_ONLINE_PRESET_MODELS)}"
+        )
+        sys.exit(1)
+    online_models = ",".join(_tokens)  # 规范化 (去空白), 透传给 shell
     # 离线: --offline-models 指定子集, 否则默认 OFFLINE_BENCH_MODELS 全部
     if args.offline_models is not None:
         offline_model_names = [m.strip() for m in args.offline_models.split(",") if m.strip()]
@@ -2350,7 +2360,7 @@ def main():
             log_info("=" * 60)
             log_info("阶段 1/2: 在线性能测试")
             log_info("=" * 60)
-            online_report_dir = run_benchmark(",".join(online_models), report_dir)
+            online_report_dir = run_benchmark(online_models, report_dir)
             if not online_report_dir:
                 log_error("在线基准测试失败，终止执行")
                 # 在线阶段整体失败 (online_server_compare.sh 非零退出) 前必发通知,
