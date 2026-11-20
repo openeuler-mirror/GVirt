@@ -35,6 +35,18 @@ elif [ "${MODEL_TYPE}" = "quant" ]; then
     TEST_MODELS=("moe_quant" "moe_quant_a3")
 elif [ "${MODEL_TYPE}" = "moe" ] || [ "${MODEL_TYPE}" = "moe_quant" ] || [ "${MODEL_TYPE}" = "moe_quant_a3" ] || [ "${MODEL_TYPE}" = "glm5_2_dummy" ]; then
     TEST_MODELS=("${MODEL_TYPE}")
+elif [[ "${MODEL_TYPE}" == *,* ]]; then
+    # 逗号分隔的模型列表 (如 moe,glm5_2_dummy): 逐个校验后展开为 TEST_MODELS,
+    # 复用下方 for model_type in TEST_MODELS 循环, 一次调用跑多个模型。
+    IFS=',' read -ra _list <<< "${MODEL_TYPE}"
+    TEST_MODELS=()
+    for _m in "${_list[@]}"; do
+        if [[ -z "${MODELS[$_m]:-}" ]]; then
+            echo "错误：无效的模型类型 '${_m}'（在逗号列表 '${MODEL_TYPE}' 中），请使用 'moe'、'moe_quant'、'moe_quant_a3' 或 'glm5_2_dummy'"
+            exit 1
+        fi
+        TEST_MODELS+=("$_m")
+    done
 else
     echo "错误：无效的模型类型 '${MODEL_TYPE}'，请使用 'moe'、'moe_quant'、'moe_quant_a3'、'glm5_2_dummy'、'moe_mix'、'quant' 或 'all'"
     echo "用法：$0 [model_type] [output_dir]"
@@ -46,6 +58,7 @@ else
     echo "  moe_mix      - 测试 moe + moe_quant（量化前后对比）"
     echo "  quant        - 测试所有量化模型（moe_quant + moe_quant_a3，不含 glm5_2_dummy）"
     echo "  all          - 测试所有模型（含 glm5_2_dummy）"
+    echo "  <a,b,...>    - 逗号分隔的模型列表，自定义组合（如 moe,glm5_2_dummy）"
     echo "  output_dir（可选）：主输出目录；传入已存在且非空的目录即进入断点续测模式"
     exit 1
 fi

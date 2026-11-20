@@ -29,6 +29,9 @@ xlite 每日自动化测试机器人
                - blue 环境: 不需要 source /home/env.sh
     --compare-ttft: 启用TTFT指标作为对比指标（默认不比较TTFT）
     --compare-tpot-p99: 启用TPOT P99指标作为对比指标（默认不比较TPOT P99）
+    --online-models: 逗号分隔的在线模型类型列表 (如 moe,glm5_2_dummy), 覆盖 --model
+    --offline-models: 逗号分隔的离线 bench 模型列表 (如 glm5_w8a8,glm53_flash_w8a8,
+                      deepseek_v4_w8a8); 不传默认全部
 
 退出码:
     0 - 成功，无性能劣化，且所有场景正常完成
@@ -47,6 +50,7 @@ import re
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -101,15 +105,61 @@ COMPARE_TTFT_METRICS = True
 COMPARE_TPOT_P99_METRICS = False
 
 # ====================== 离线 bench 测试配置 ======================
-# 用 run.sh 跑 run_glm5_w8a8 的 bench 模式，只跑 8 层（不关心精度），
+# 用 run.sh 跑各模型的 bench 模式（只跑若干层、不关心精度），
 # 记录性能数据并与基线对比。其余逻辑与 online 性能测试一致。
-OFFLINE_BENCH_MODEL = "glm5_w8a8"
-OFFLINE_BENCH_N_LAYERS = 8
+
+
+@dataclass(frozen=True)
+class OfflineModelConfig:
+    """单个离线 bench 模型的配置。
+
+    Attributes:
+        model_name: 文件名 token (offline_bench_<model_name>_...), 必须 \\w+ 无分隔符,
+            与 run.sh 函数名 run_<model_name> 的 <model_name> 一致, 也用于报告分组键。
+        run_func: run.sh 中的模型函数名, 如 "run_glm5_w8a8" -> env["MODEL"]。
+        n_layers: 离线 bench 裁剪层数 (-> XLITE_N_LAYERS), 仅测性能不关心精度。
+        ckpt_dir: checkpoint 目录名 (models_base_path 下子目录)。
+        ckpt_env_var: run.sh 函数读取的 ckpt 环境变量名 (如 XLITE_GLM5_W8A8_CKPT)。
+    """
+
+    model_name: str
+    run_func: str
+    n_layers: int
+    ckpt_dir: str
+    ckpt_env_var: str
+
+
+# 离线 bench 模型列表: 第一条逐字复现旧单模型行为 (glm5_w8a8/8 层/GLM-5.1-w8a8),
+# 保证旧基线 offline_bench_glm5_w8a8_* 仍匹配。新增模型: GLM-5.3-Flash (11 层)、
+# DeepSeek-V4-Flash-w8a8-mtp (10 层)。DeepSeek-V4.1-Flash-1017-w8a8 (14 层) 暂缓。
+OFFLINE_BENCH_MODELS: list[OfflineModelConfig] = [
+    OfflineModelConfig(
+        model_name="glm5_w8a8",
+        run_func="run_glm5_w8a8",
+        n_layers=8,
+        ckpt_dir="GLM-5.1-w8a8",
+        ckpt_env_var="XLITE_GLM5_W8A8_CKPT",
+    ),
+    OfflineModelConfig(
+        model_name="glm53_flash_w8a8",
+        run_func="run_glm53_flash_w8a8",
+        n_layers=11,
+        ckpt_dir="GLM-5.3-Flash-w8a8",
+        ckpt_env_var="XLITE_GLM53_FLASH_W8A8_CKPT",
+    ),
+    OfflineModelConfig(
+        model_name="deepseek_v4_w8a8",
+        run_func="run_deepseek_v4_w8a8",
+        n_layers=10,
+        ckpt_dir="DeepSeek-V4-Flash-w8a8-mtp",
+        ckpt_env_var="XLITE_DEEPSEEK_V4_W8A8_CKPT",
+    ),
+]
+# O(1) 查找: parse/glob 函数从文件名提取 model_name 后查 n_layers/iters 等元数据。
+OFFLINE_MODEL_CONFIG_MAP: dict[str, OfflineModelConfig] = {c.model_name: c for c in OFFLINE_BENCH_MODELS}
 # 用 8 卡跑：NPU id 列表（长度即卡数）。moe_ep_size 必须与卡数一致
 OFFLINE_BENCH_NPUS = "0,1,2,3,4,5,6,7"
 OFFLINE_BENCH_MOE_EP_SIZE = 8
-# checkpoint 目录名 (models_base_path 下的子目录), 不同环境挂载的目录名可能不同。
-OFFLINE_BENCH_CKPT_DIR = "GLM-5.1-w8a8"
 OFFLINE_BENCH_ITERS = 10
 # bench 场景: (input_len, output_len, batch_size)
 # output_len==1 即 prefill 场景
@@ -258,25 +308,33 @@ def run_benchmark(model_type: str = "moe", report_subdir: Path | None = None) ->
 
 
 # ====================== 离线 bench 测试执行函数 ======================
-def run_offline_bench(report_subdir: Path | None = None) -> Path | None:
+def run_offline_bench(
+    report_subdir: Path | None = None,
+    models: list[OfflineModelConfig] | None = None,
+) -> Path | None:
     """
     执行离线 bench 测试 (run.sh bench 模式)
 
-    用 run.sh 跑 run_glm5_w8a8 的 bench 模式，只跑 OFFLINE_BENCH_N_LAYERS 层。
+    对 models 列表中每个模型, 跑其裁剪层数 (仅测性能不关心精度) 的 bench 模式,
+    逐场景记录性能数据, 供后续与基线对比。models 默认为 OFFLINE_BENCH_MODELS 全部。
 
     参数:
         report_subdir: 报告目录路径。传入则复用, 否则按当前版本+日期新建。
+        models: 要跑的离线模型配置列表, 默认 OFFLINE_BENCH_MODELS 全部。
 
     返回:
         报告目录路径，失败返回 None
 
     说明:
-        每个场景的完整 stdout 保存到报告目录下的 offline_bench_<scenario>.log，
-        供 parse_offline_bench_report 解析。
+        每个场景的完整 stdout 保存到报告目录下的
+        offline_bench_<model>_<scenario>_<date>.log, 供 parse_offline_bench_report 解析。
+        外层遍历模型、内层遍历场景; 所有模型共用同一报告目录, 靠文件名 <model> 段区分。
     """
+    if models is None:
+        models = OFFLINE_BENCH_MODELS
+    model_names = [c.model_name for c in models]
     log_info(
-        f"开始执行离线 bench 测试 (模型: {OFFLINE_BENCH_MODEL}, 层数: {OFFLINE_BENCH_N_LAYERS}, "
-        f"场景数: {len(OFFLINE_BENCH_SCENARIOS)})..."
+        f"开始执行离线 bench 测试 (模型: {', '.join(model_names)}, 场景数/模型: {len(OFFLINE_BENCH_SCENARIOS)})..."
     )
 
     # 检测模型存储设备以确定 models_base_path
@@ -302,69 +360,78 @@ def run_offline_bench(report_subdir: Path | None = None) -> Path | None:
     # 将日志文件移动到报告目录
     move_log_file(report_subdir)
 
+    # 前置 site-packages 的 PYTHONPATH 仅依赖环境 (cwd/库路径), 与模型无关, 构建一次复用。
+    xlite_lib_path = get_xlite_lib_path()
+    base_pythonpath: str | None = None
+    if xlite_lib_path and xlite_lib_path.exists():
+        site_packages_dir = str(xlite_lib_path.parent)
+        existing_pp = os.environ.get("PYTHONPATH", "")
+        base_pythonpath = (
+            f"{site_packages_dir}:{XLITE_DIR}:{existing_pp}" if existing_pp else f"{site_packages_dir}:{XLITE_DIR}"
+        )
+
     try:
-        # run.sh 内部 cd "$(dirname "$0")/.." 到 XLITE_DIR 拉取仓根, 故以 XLITE_DIR 为 cwd
-        for input_len, output_len, bs in OFFLINE_BENCH_SCENARIOS:
-            scenario_tag = f"in{input_len}_out{output_len}_bs{bs}"
-            log_file = report_subdir / f"offline_bench_{OFFLINE_BENCH_MODEL}_{scenario_tag}_{current_date}.log"
+        # 外层遍历模型, 内层遍历场景: run.sh 内部 cd 仓根, 故以 XLITE_DIR 为 cwd。
+        for cfg in models:
             log_info(
-                f"执行离线 bench: in={input_len} out={output_len} bs={bs} "
-                f"(iters={OFFLINE_BENCH_ITERS}) -> {log_file.name}"
+                f"离线 bench 模型: {cfg.model_name} (run_func={cfg.run_func}, "
+                f"n_layers={cfg.n_layers}, ckpt={cfg.ckpt_dir})"
             )
-
-            env = os.environ.copy()
-            env["XLITE_N_LAYERS"] = str(OFFLINE_BENCH_N_LAYERS)
-            # 前置 site-packages: cwd=拉取仓根, 其下 xlite/ 源码会遮蔽已装 wheel (含 _C),
-            # 前置 site-packages 即可; XLITE_DIR 留后让 tests 包仍可达。
-            xlite_lib_path = get_xlite_lib_path()
-            if xlite_lib_path and xlite_lib_path.exists():
-                site_packages_dir = str(xlite_lib_path.parent)
-                existing_pp = env.get("PYTHONPATH", "")
-                env["PYTHONPATH"] = (
-                    f"{site_packages_dir}:{XLITE_DIR}:{existing_pp}"
-                    if existing_pp
-                    else f"{site_packages_dir}:{XLITE_DIR}"
+            for input_len, output_len, bs in OFFLINE_BENCH_SCENARIOS:
+                scenario_tag = f"in{input_len}_out{output_len}_bs{bs}"
+                log_file = report_subdir / f"offline_bench_{cfg.model_name}_{scenario_tag}_{current_date}.log"
+                log_info(
+                    f"执行离线 bench: {cfg.model_name} in={input_len} out={output_len} bs={bs} "
+                    f"(iters={OFFLINE_BENCH_ITERS}) -> {log_file.name}"
                 )
-            env["XLITE_NPUS"] = OFFLINE_BENCH_NPUS  # -> ASCEND_RT_VISIBLE_DEVICES
-            env["XLITE_MOE_EP_SIZE"] = str(OFFLINE_BENCH_MOE_EP_SIZE)  # 须等于卡数
-            env["XLITE_GLM5_W8A8_CKPT"] = OFFLINE_BENCH_CKPT_DIR
-            env["RUN_MODE"] = "bench"
-            env["MODEL"] = f"run_{OFFLINE_BENCH_MODEL}"
-            env["BENCH_IT"] = str(OFFLINE_BENCH_ITERS)
-            env["BENCH_BS"] = str(bs)
-            env["BENCH_N1"] = str(input_len)
-            env["BENCH_N2"] = str(output_len)
-            if should_disable_xccl():
-                env["XLITE_DISABLE_XCCL"] = "True"
 
-            result = subprocess.run(
-                ["bash", "tests/run.sh", models_base_path],
-                cwd=str(XLITE_DIR),
-                env=env,
-                capture_output=True,
-                text=True,
-            )
+                env = os.environ.copy()
+                env["XLITE_N_LAYERS"] = str(cfg.n_layers)
+                if base_pythonpath is not None:
+                    # 前置 site-packages: cwd=拉取仓根, 其下 xlite/ 源码会遮蔽已装 wheel (含 _C),
+                    # 前置 site-packages 即可; XLITE_DIR 留后让 tests 包仍可达。
+                    env["PYTHONPATH"] = base_pythonpath
+                env["XLITE_NPUS"] = OFFLINE_BENCH_NPUS  # -> ASCEND_RT_VISIBLE_DEVICES
+                env["XLITE_MOE_EP_SIZE"] = str(OFFLINE_BENCH_MOE_EP_SIZE)  # 须等于卡数
+                env[cfg.ckpt_env_var] = cfg.ckpt_dir
+                env["RUN_MODE"] = "bench"
+                env["MODEL"] = cfg.run_func
+                env["BENCH_IT"] = str(OFFLINE_BENCH_ITERS)
+                env["BENCH_BS"] = str(bs)
+                env["BENCH_N1"] = str(input_len)
+                env["BENCH_N2"] = str(output_len)
+                if should_disable_xccl():
+                    env["XLITE_DISABLE_XCCL"] = "True"
 
-            # 保存完整 stdout (含配置打印与 Iter 行) 供解析与排查
-            log_file.write_text(result.stdout, encoding="utf-8")
-
-            if result.returncode != 0:
-                log_error(
-                    f"离线 bench 场景 {scenario_tag} 执行失败 (返回码 {result.returncode}): {result.stderr[-500:]}"
+                result = subprocess.run(
+                    ["bash", "tests/run.sh", models_base_path],
+                    cwd=str(XLITE_DIR),
+                    env=env,
+                    capture_output=True,
+                    text=True,
                 )
-                continue
 
-            # OOM 兜底: torchrun 吞掉 OOM 的 SIGTERM(-15) 仍返回 0, 仅看 returncode
-            # 会把"空日志 + null 指标"误报成功。校验日志无 'tokens/s' 行则判失败。
-            if "tokens/s" not in result.stdout:
-                err_tail = (result.stderr or "")[-800:]
-                log_error(
-                    f"离线 bench 场景 {scenario_tag} 未产出有效结果 "
-                    f"(返回码 {result.returncode} 但日志无 'tokens/s' 行, 疑似 OOM/崩溃):\n{err_tail}"
-                )
-                continue
+                # 保存完整 stdout (含配置打印与 Iter 行) 供解析与排查
+                log_file.write_text(result.stdout, encoding="utf-8")
 
-            log_success(f"离线 bench 场景 {scenario_tag} 执行完成!")
+                if result.returncode != 0:
+                    log_error(
+                        f"离线 bench {cfg.model_name} 场景 {scenario_tag} 执行失败 "
+                        f"(返回码 {result.returncode}): {result.stderr[-500:]}"
+                    )
+                    continue
+
+                # OOM 兜底: torchrun 吞掉 OOM 的 SIGTERM(-15) 仍返回 0, 仅看 returncode
+                # 会把"空日志 + null 指标"误报成功。校验日志无 'tokens/s' 行则判失败。
+                if "tokens/s" not in result.stdout:
+                    err_tail = (result.stderr or "")[-800:]
+                    log_error(
+                        f"离线 bench {cfg.model_name} 场景 {scenario_tag} 未产出有效结果 "
+                        f"(返回码 {result.returncode} 但日志无 'tokens/s' 行, 疑似 OOM/崩溃):\n{err_tail}"
+                    )
+                    continue
+
+                log_success(f"离线 bench {cfg.model_name} 场景 {scenario_tag} 执行完成!")
 
         log_success("离线 bench 测试执行完成!")
         return report_subdir
@@ -375,23 +442,35 @@ def run_offline_bench(report_subdir: Path | None = None) -> Path | None:
 
 
 # ====================== 离线 bench 报告解析函数 ======================
-def parse_offline_bench_report(report_path: Path) -> dict:
+def parse_offline_bench_report(report_path: Path, model_name: str | None = None) -> dict:
     """
     解析离线 bench 报告文件 (run.sh bench 模式的 stdout)
 
-    返回指标字典 (input_len/output_len/batch_size 从文件名提取, 其余从 Iter 行解析)。
+    返回指标字典 (model/input_len/output_len/batch_size 从文件名提取, 其余从 Iter 行解析)。
     首轮含 warmup 偏差大, 丢弃; 对其余轮 total_ms / decode_tps / step_latency_ms
     取算术平均; generated_tokens 各轮稳定, 取末轮。
     decode_tps: prefill(output_len==1) 取日志 avg 字段 (prefilled/时间),
     decode 取 tokens/s 字段 (generated/时间)。
+
+    参数:
+        report_path: 报告文件路径。
+        model_name: 显式指定模型名 (覆盖从文件名提取的); 一般留空, 由文件名推导。
     """
+    # model/n_layers/iters 仅作报告元数据, 不参与 compare_offline_metrics 对比。
+    # 从文件名提取 model_name 后查 OFFLINE_MODEL_CONFIG_MAP 回填 n_layers/iters;
+    # 查不到 (未知模型) 则 n_layers/iters 留 None/共享默认值, 不影响性能对比。
+    name_match = re.search(r"offline_bench_(\w+)_in(\d+)_out(\d+)_bs(\d+)", report_path.name)
+    derived_model = name_match.group(1) if name_match else ""
+    effective_model = model_name or derived_model
+    cfg = OFFLINE_MODEL_CONFIG_MAP.get(effective_model) if effective_model else None
     metrics = {
-        "model": OFFLINE_BENCH_MODEL,
+        "model": effective_model,
         "timestamp": "",
         "batch_size": None,
         "input_len": None,
         "output_len": None,
-        "n_layers": OFFLINE_BENCH_N_LAYERS,
+        # n_layers 按模型配置回填 (未知模型留 None); iters 全模型共享 OFFLINE_BENCH_ITERS。
+        "n_layers": cfg.n_layers if cfg else None,
         "iters": OFFLINE_BENCH_ITERS,
         "decode_tps": None,
         "step_latency_ms": None,
@@ -406,11 +485,10 @@ def parse_offline_bench_report(report_path: Path) -> dict:
 
     # 场景信息从文件名解析:
     # offline_bench_<model>_in<input>_out<output>_bs<bs>_<date>.log
-    name_match = re.search(r"offline_bench_\w+_in(\d+)_out(\d+)_bs(\d+)", report_path.name)
     if name_match:
-        metrics["input_len"] = int(name_match.group(1))
-        metrics["output_len"] = int(name_match.group(2))
-        metrics["batch_size"] = int(name_match.group(3))
+        metrics["input_len"] = int(name_match.group(2))
+        metrics["output_len"] = int(name_match.group(3))
+        metrics["batch_size"] = int(name_match.group(4))
 
     # Iter 行: "Iter X/Y: ... generated N tokens in D.DD ms. avg: A.AA | B.BB tokens/s @ C.CC ms step bs: D"
     # 捕获 g1=generated g2=total_ms g3=avg(prefill) g4=tokens/s(decode) g5=step; .*? 兼容 DP 的 (≈... agg)
@@ -508,7 +586,9 @@ def compare_offline_metrics(current: dict, baseline: dict) -> dict:
 
 
 # ====================== 离线 bench 历史报告查找函数 ======================
-def get_previous_offline_report(input_len: int, output_len: int, batch_size: int) -> tuple[Path | None, str | None]:
+def get_previous_offline_report(
+    input_len: int, output_len: int, batch_size: int, model_name: str
+) -> tuple[Path | None, str | None]:
     """
     获取基线版本指定离线 bench 场景的报告文件路径
 
@@ -516,6 +596,7 @@ def get_previous_offline_report(input_len: int, output_len: int, batch_size: int
         input_len: 输入长度
         output_len: 输出长度
         batch_size: 批大小
+        model_name: 模型名 (文件名 <model> 段), 基线按 (model, in, out, bs) 四元组定位
 
     返回:
         (报告文件路径, 版本号)，不存在则返回 (None, None)
@@ -536,12 +617,12 @@ def get_previous_offline_report(input_len: int, output_len: int, batch_size: int
         log_warning(f"基线目录不存在: {baseline_version_dir}")
         return None, baseline_version
 
-    pattern = f"offline_bench_{OFFLINE_BENCH_MODEL}_in{input_len}_out{output_len}_bs{batch_size}_*.log"
+    pattern = f"offline_bench_{model_name}_in{input_len}_out{output_len}_bs{batch_size}_*.log"
     reports = list(baseline_version_dir.glob(pattern))
     if reports:
         return reports[0], baseline_version
 
-    log_warning(f"基线目录中未找到离线 bench 场景 in={input_len} out={output_len} bs={batch_size} 的报告")
+    log_warning(f"基线目录中未找到离线 bench 场景 {model_name} in={input_len} out={output_len} bs={batch_size} 的报告")
     return None, baseline_version
 
 
@@ -1465,36 +1546,43 @@ def _collect_online_failures(report_dir: Path) -> list[str]:
     return failures
 
 
-def _collect_offline_failures(report_dir: Path) -> list[str]:
+def _collect_offline_failures(report_dir: Path, models: list[OfflineModelConfig] | None = None) -> list[str]:
     """
     扫描离线 bench 产物, 收集未能正常完成的场景。
 
     判据 (与 run_offline_bench 的 "tokens/s" in stdout 对齐):
-    OFFLINE_BENCH_SCENARIOS 中每个期望场景都应产出
+    models 中每个模型的 OFFLINE_BENCH_SCENARIOS 每个期望场景都应产出
     offline_bench_<model>_in<in>_out<out>_bs<bs>_*.log 且含 "tokens/s"。
     日志缺失 (场景未跑/中途崩溃且未落盘) 或不含完成关键字均记为失败;
     不含完成关键字时若日志含显存 OOM 串, 标注为 OOM 以便直接定位根因。
+
+    参数:
+        report_dir: 当前版本报告目录
+        models: 要核对的离线模型配置列表, 默认 OFFLINE_BENCH_MODELS 全部。
     """
+    if models is None:
+        models = OFFLINE_BENCH_MODELS
     failures: list[str] = []
 
-    for input_len, output_len, bs in OFFLINE_BENCH_SCENARIOS:
-        pattern = f"offline_bench_{OFFLINE_BENCH_MODEL}_in{input_len}_out{output_len}_bs{bs}_*.log"
-        logs = list(report_dir.glob(pattern))
-        if not logs:
-            failures.append(f"离线 bench 场景未产出日志: in={input_len} out={output_len} bs={bs}")
-            continue
-        log_file = logs[0]
-        try:
-            content = log_file.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            failures.append(f"离线 bench 日志读取失败: {log_file.name}")
-            continue
-        if "tokens/s" not in content:
-            if _detect_oom(content):
-                reason = "显存 OOM"
-            else:
-                reason = "无有效结果 (疑似崩溃)"
-            failures.append(f"离线 bench 场景{reason}: in={input_len} out={output_len} bs={bs}")
+    for cfg in models:
+        for input_len, output_len, bs in OFFLINE_BENCH_SCENARIOS:
+            pattern = f"offline_bench_{cfg.model_name}_in{input_len}_out{output_len}_bs{bs}_*.log"
+            logs = list(report_dir.glob(pattern))
+            if not logs:
+                failures.append(f"离线 bench {cfg.model_name} 场景未产出日志: in={input_len} out={output_len} bs={bs}")
+                continue
+            log_file = logs[0]
+            try:
+                content = log_file.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                failures.append(f"离线 bench {cfg.model_name} 日志读取失败: {log_file.name}")
+                continue
+            if "tokens/s" not in content:
+                if _detect_oom(content):
+                    reason = "显存 OOM"
+                else:
+                    reason = "无有效结果 (疑似崩溃)"
+                failures.append(f"离线 bench {cfg.model_name} 场景{reason}: in={input_len} out={output_len} bs={bs}")
 
     return failures
 
@@ -1702,24 +1790,33 @@ def _load_prev_day_online_metrics(prev_day_dir: Path, model_name: str, input_len
     return None
 
 
-def _load_prev_day_offline_metrics(prev_day_dir: Path, input_len: int, output_len: int, batch_size: int) -> dict | None:
+def _load_prev_day_offline_metrics(
+    prev_day_dir: Path, input_len: int, output_len: int, batch_size: int, model_name: str
+) -> dict | None:
     """
-    加载前一天指定离线 bench 场景的指标。
+    加载前一天指定离线 bench 场景 (model×in×out×bs) 的指标。
 
     首选 offline_metrics_{model}_in{in}_out{out}_bs{bs}.json, 回退
     offline_bench_{model}_in{in}_out{out}_bs{bs}_*.log (parse_offline_bench_report)。
+
+    参数:
+        prev_day_dir: 前一天报告目录
+        input_len: 输入长度
+        output_len: 输出长度
+        batch_size: 批大小
+        model_name: 模型名 (文件名 <model> 段)
 
     返回:
         含 decode_tps 的指标 dict, 找不到返回 None
     """
     scenario_tag = f"in{input_len}_out{output_len}_bs{batch_size}"
-    json_path = prev_day_dir / f"offline_metrics_{OFFLINE_BENCH_MODEL}_{scenario_tag}.json"
+    json_path = prev_day_dir / f"offline_metrics_{model_name}_{scenario_tag}.json"
     if json_path.exists():
         metrics = load_metrics_json(json_path)
         if metrics.get("decode_tps") is not None:
             return metrics
 
-    pattern = f"offline_bench_{OFFLINE_BENCH_MODEL}_in{input_len}_out{output_len}_bs{batch_size}_*.log"
+    pattern = f"offline_bench_{model_name}_in{input_len}_out{output_len}_bs{batch_size}_*.log"
     reports = list(prev_day_dir.glob(pattern))
     if reports:
         metrics = parse_offline_bench_report(reports[0])
@@ -1888,8 +1985,9 @@ def _process_offline_reports(report_dir: Path) -> list[dict]:
     """
     all_comparison_results = []
 
-    # 查找所有离线 bench 场景报告
-    offline_reports = sorted(report_dir.glob(f"offline_bench_{OFFLINE_BENCH_MODEL}_*_*.log"))
+    # 查找所有离线 bench 场景报告: 放宽 glob 到 offline_bench_*.log, 多模型产物都在当日目录里,
+    # parse_offline_bench_report 正则 + 下面的 None 字段跳过会过滤非匹配文件。
+    offline_reports = sorted(report_dir.glob("offline_bench_*.log"))
     if not offline_reports:
         log_error("未找到离线 bench 测试报告文件")
         return all_comparison_results
@@ -1904,11 +2002,12 @@ def _process_offline_reports(report_dir: Path) -> list[dict]:
     for current_report in offline_reports:
         log_info(f"处理离线 bench 报告: {current_report}")
 
-        # 解析当前版本指标
+        # 解析当前版本指标 (model 由 parse_offline_bench_report 从文件名提取)
         current_metrics = parse_offline_bench_report(current_report)
         input_len = current_metrics.get("input_len")
         output_len = current_metrics.get("output_len")
         batch_size = current_metrics.get("batch_size")
+        model_name = current_metrics.get("model", "")
 
         if batch_size is None or input_len is None or output_len is None:
             log_warning(f"无法从报告文件名提取场景信息: {current_report.name}")
@@ -1925,19 +2024,19 @@ def _process_offline_reports(report_dir: Path) -> list[dict]:
         scenario_tag = f"in{input_len}_out{output_len}_bs{batch_size}"
 
         # 保存当前版本指标
-        current_json = report_dir / f"offline_metrics_{OFFLINE_BENCH_MODEL}_{scenario_tag}.json"
+        current_json = report_dir / f"offline_metrics_{model_name}_{scenario_tag}.json"
         save_metrics_json(current_metrics, current_json)
 
-        # 与基线版本数据对比
-        baseline_report, baseline_version = get_previous_offline_report(input_len, output_len, batch_size)
+        # 与基线版本数据对比 (按 model×in×out×bs 四元组定位基线)
+        baseline_report, baseline_version = get_previous_offline_report(input_len, output_len, batch_size, model_name)
         comparison_result = {}
 
         if baseline_report:
-            log_info(f"对比基准: {baseline_report} (版本: {baseline_version}, 场景: {scenario_tag})")
+            log_info(f"对比基准: {baseline_report} (版本: {baseline_version}, 场景: {model_name}/{scenario_tag})")
             baseline_metrics = parse_offline_bench_report(baseline_report)
             comparison_result = compare_offline_metrics(current_metrics, baseline_metrics)
         else:
-            log_warning(f"未找到离线 bench 场景 {scenario_tag} 的基线报告，跳过对比")
+            log_warning(f"未找到离线 bench 场景 {model_name}/{scenario_tag} 的基线报告，跳过对比")
             comparison_result = {
                 "error": "无基线数据",
                 "date_current": current_metrics.get("timestamp", ""),
@@ -1952,14 +2051,16 @@ def _process_offline_reports(report_dir: Path) -> list[dict]:
         # baseline 位换成前一天 current 指标。
         prev_day_info: dict = {"date": prev_day_date, "row_changes": [], "error": None}
         if prev_day_dir:
-            prev_day_metrics = _load_prev_day_offline_metrics(prev_day_dir, input_len, output_len, batch_size)
+            prev_day_metrics = _load_prev_day_offline_metrics(
+                prev_day_dir, input_len, output_len, batch_size, model_name
+            )
             if prev_day_metrics:
-                log_info(f"对比前一天: {prev_day_dir} (日期: {prev_day_date}, 场景: {scenario_tag})")
+                log_info(f"对比前一天: {prev_day_dir} (日期: {prev_day_date}, 场景: {model_name}/{scenario_tag})")
                 prev_day_comparison = compare_offline_metrics(current_metrics, prev_day_metrics)
                 prev_day_info["row_changes"] = prev_day_comparison.get("row_changes", [])
                 prev_day_info["error"] = prev_day_comparison.get("error")
             else:
-                log_warning(f"前一天目录无离线 bench 场景 {scenario_tag} 的有效指标, 跳过前一天对比")
+                log_warning(f"前一天目录无离线 bench 场景 {model_name}/{scenario_tag} 的有效指标, 跳过前一天对比")
                 prev_day_info["error"] = "无前一天数据"
         else:
             prev_day_info["error"] = "无前一天数据"
@@ -1967,7 +2068,7 @@ def _process_offline_reports(report_dir: Path) -> list[dict]:
 
         # 统一落盘对比结果 (含基线 + 前一天 prev_day): 在此一次性写盘,
         # 避免基线分支内提前写一次被覆盖的冗余 IO.
-        comparison_json = report_dir / f"offline_comparison_{OFFLINE_BENCH_MODEL}_{scenario_tag}.json"
+        comparison_json = report_dir / f"offline_comparison_{model_name}_{scenario_tag}.json"
         save_metrics_json(comparison_result, comparison_json)
 
         all_comparison_results.append(comparison_result)
@@ -2131,6 +2232,22 @@ def main():
         action="store_true",
         help="跳过离线 bench 阶段, 只跑在线性能测试。",
     )
+    # 在线模型类型有效集合 (与 online_server_compare.sh 的 MODELS 注册表键一致)
+    _VALID_ONLINE_MODELS = {"moe", "moe_quant", "moe_quant_a3", "glm5_2_dummy"}
+    parser.add_argument(
+        "--online-models",
+        type=str,
+        default=None,
+        help=f"逗号分隔的在线模型类型列表 (如 moe,glm5_2_dummy), 覆盖 --model; 可选值: {sorted(_VALID_ONLINE_MODELS)}",
+    )
+    parser.add_argument(
+        "--offline-models",
+        type=str,
+        default=None,
+        help="逗号分隔的离线 bench 模型列表 (如 glm5_w8a8,glm53_flash_w8a8,deepseek_v4_w8a8); "
+        f"默认全部 ({[c.model_name for c in OFFLINE_BENCH_MODELS]}); "
+        f"可选值: {sorted(OFFLINE_MODEL_CONFIG_MAP.keys())}",
+    )
 
     args = parser.parse_args()
 
@@ -2140,6 +2257,29 @@ def main():
     OFFLINE_DEGRADATION_THRESHOLD = args.offline_threshold
     COMPARE_TTFT_METRICS = args.compare_ttft
     COMPARE_TPOT_P99_METRICS = args.compare_tpot_p99
+
+    # 解析在线/离线模型列表
+    # 在线: --online-models 优先 (逗号分隔), 否则回退 --model (向后兼容现有 cron)
+    if args.online_models is not None:
+        online_models = [m.strip() for m in args.online_models.split(",") if m.strip()]
+        invalid = [m for m in online_models if m not in _VALID_ONLINE_MODELS]
+        if invalid:
+            log_error(f"--online-models 含无效模型类型: {invalid}, 可选: {sorted(_VALID_ONLINE_MODELS)}")
+            sys.exit(1)
+        if args.model != "moe":
+            log_warning(f"--online-models 覆盖 --model (忽略 --model={args.model})")
+    else:
+        online_models = [args.model]
+    # 离线: --offline-models 指定子集, 否则默认 OFFLINE_BENCH_MODELS 全部
+    if args.offline_models is not None:
+        offline_model_names = [m.strip() for m in args.offline_models.split(",") if m.strip()]
+        invalid = [m for m in offline_model_names if m not in OFFLINE_MODEL_CONFIG_MAP]
+        if invalid:
+            log_error(f"--offline-models 含无效模型名: {invalid}, 可选: {sorted(OFFLINE_MODEL_CONFIG_MAP.keys())}")
+            sys.exit(1)
+        offline_models = [OFFLINE_MODEL_CONFIG_MAP[m] for m in offline_model_names]
+    else:
+        offline_models = OFFLINE_BENCH_MODELS
 
     # 设置配置
     set_env_type(args.env_type)
@@ -2210,7 +2350,7 @@ def main():
             log_info("=" * 60)
             log_info("阶段 1/2: 在线性能测试")
             log_info("=" * 60)
-            online_report_dir = run_benchmark(args.model, report_dir)
+            online_report_dir = run_benchmark(",".join(online_models), report_dir)
             if not online_report_dir:
                 log_error("在线基准测试失败，终止执行")
                 # 在线阶段整体失败 (online_server_compare.sh 非零退出) 前必发通知,
@@ -2224,7 +2364,7 @@ def main():
             log_info("=" * 60)
             log_info(f"阶段 {'2/2' if run_online else '1/1'}: 离线 bench 测试")
             log_info("=" * 60)
-            offline_report_dir = run_offline_bench(report_dir)
+            offline_report_dir = run_offline_bench(report_dir, models=offline_models)
             if not offline_report_dir:
                 log_error("离线 bench 测试失败，终止执行")
                 _send_phase_crash_notification(report_dir, args.receiver, "离线 bench 测试", "run.sh bench 执行异常")
@@ -2275,7 +2415,7 @@ def main():
         log_info("离线 bench 测试: 生成报告与通知")
         log_info("=" * 60)
         # 先收集失败场景, 以便把数量透传给 _report_phase (避免"无变化"通知与失败矛盾)
-        offline_failures = _collect_offline_failures(report_dir)
+        offline_failures = _collect_offline_failures(report_dir, models=offline_models)
         if offline_failures:
             log_warning(f"离线 bench 测试发现 {len(offline_failures)} 个失败场景")
             has_infra_failure = True
