@@ -1836,10 +1836,6 @@ def _process_online_reports(report_dir: Path, current_reports: list[Path]) -> li
             log_info(f"对比基准: {baseline_report} (版本: {baseline_version})")
             baseline_metrics = parse_benchmark_report(baseline_report)
             comparison_result = compare_metrics(current_metrics, baseline_metrics)
-
-            # 保存对比结果
-            comparison_json = report_dir / f"comparison_{model_name}_input{input_len}_output{output_len}.json"
-            save_metrics_json(comparison_result, comparison_json)
         else:
             log_warning(f"未找到模型 {model_name} (input={input_len}, output={output_len}) 的基线测试报告，跳过对比")
             comparison_result = {
@@ -1870,8 +1866,8 @@ def _process_online_reports(report_dir: Path, current_reports: list[Path]) -> li
             prev_day_info["error"] = "无前一天数据"
         comparison_result["prev_day"] = prev_day_info
 
-        # 落盘对比结果 (含基线 + 前一天); 基线分支上面已存过一次, 这里统一再存一次
-        # 确保 prev_day 信息进入 comparison_*.json。
+        # 统一落盘对比结果 (含基线 + 前一天 prev_day): 基线与 prev_day 均已并入
+        # comparison_result, 在此一次性写盘, 避免基线分支内提前写一次被覆盖的冗余 IO.
         comparison_json = report_dir / f"comparison_{model_name}_input{input_len}_output{output_len}.json"
         save_metrics_json(comparison_result, comparison_json)
 
@@ -1940,10 +1936,6 @@ def _process_offline_reports(report_dir: Path) -> list[dict]:
             log_info(f"对比基准: {baseline_report} (版本: {baseline_version}, 场景: {scenario_tag})")
             baseline_metrics = parse_offline_bench_report(baseline_report)
             comparison_result = compare_offline_metrics(current_metrics, baseline_metrics)
-
-            # 保存对比结果
-            comparison_json = report_dir / f"offline_comparison_{OFFLINE_BENCH_MODEL}_{scenario_tag}.json"
-            save_metrics_json(comparison_result, comparison_json)
         else:
             log_warning(f"未找到离线 bench 场景 {scenario_tag} 的基线报告，跳过对比")
             comparison_result = {
@@ -1973,7 +1965,8 @@ def _process_offline_reports(report_dir: Path) -> list[dict]:
             prev_day_info["error"] = "无前一天数据"
         comparison_result["prev_day"] = prev_day_info
 
-        # 落盘对比结果 (含基线 + 前一天)
+        # 统一落盘对比结果 (含基线 + 前一天 prev_day): 在此一次性写盘,
+        # 避免基线分支内提前写一次被覆盖的冗余 IO.
         comparison_json = report_dir / f"offline_comparison_{OFFLINE_BENCH_MODEL}_{scenario_tag}.json"
         save_metrics_json(comparison_result, comparison_json)
 
