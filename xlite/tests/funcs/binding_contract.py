@@ -139,6 +139,20 @@ def main(_device):
         raise AssertionError(f"Model.init rejected a proxy config (unwrap missing?): {e}") from e
     print("PASS class proxies probed (ModelConfig + Model fields, init unwrap)")
 
+    # vector<bool> round-trip type guard: _C.pyi declares index_full_mask /
+    # index_c8_mask as List[bool], but the C++ IValueField used to route both
+    # through the ListInt branch, so reads came back as [1, 0, 1] (int). Value
+    # equality (1 == True) hides that, so assert the element type directly on a
+    # non-trivial pattern. Guards the c10::List<bool> path in _C.cpp::IValueField.
+    for _field in ("index_full_mask", "index_c8_mask"):
+        setattr(cfg_proxy, _field, [True, False, True, False])
+        _got = getattr(cfg_proxy, _field)
+        assert _got == [True, False, True, False], f"{_field} value mismatch: {_got}"
+        assert all(type(_e) is bool for _e in _got), (
+            f"{_field} read back non-bool elements: {[_e.__class__.__name__ for _e in _got]}"
+        )
+    print("PASS vector<bool> config fields round-trip as bool (index_full_mask, index_c8_mask)")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

@@ -4018,27 +4018,31 @@ static T &fieldRef(const c10::intrusive_ptr<Holder> &h, T C::*field)
 // IValue-side type for a property field: the dispatcher only carries
 // int64_t/double/bool/std::string/at::Tensor and lists of those, so other
 // field types convert at the boundary —
-//   vector<uint32_t>/vector<bool>   <-> ListInt (std::vector<int64_t>)
+//   vector<bool>                    <-> ListBool (bool preserved element-wise)
+//   vector<uint32_t>                <-> ListInt (std::vector<int64_t>)
 //   vector<vector<uint32_t>>        <-> ListListInt (per-row conversion)
 //   float                           <-> double
 //   bool                            <-> bool  (before the integral branch)
 //   integral/enum                   <-> int64_t
 // Anything else passes through and must be dispatcher-native (at::Tensor,
 // std::optional<at::Tensor>, std::vector<at::Tensor>, ...); a type IValue
-// cannot hold fails to compile at the def_rw site.
+// cannot hold fails to compile at the def_rw site. vector<bool> stays on the
+// IValue-native List<bool> path so Python sees [True, False, ...] rather than
+// [0, 1, ...].
 template <typename T>
 struct IValueField {
     using type = std::conditional_t<
-        std::is_same_v<T, std::vector<uint32_t>> || std::is_same_v<T, std::vector<bool>>,
-        std::vector<int64_t>,
+        std::is_same_v<T, std::vector<bool>>, c10::List<bool>,
         std::conditional_t<
-            std::is_same_v<T, std::vector<std::vector<uint32_t>>>,
-            std::vector<std::vector<int64_t>>,
+            std::is_same_v<T, std::vector<uint32_t>>, std::vector<int64_t>,
             std::conditional_t<
-                std::is_same_v<T, float>, double,
-                std::conditional_t<
-                    std::is_same_v<T, bool>, bool,
-                    std::conditional_t<std::is_integral_v<T> || std::is_enum_v<T>, int64_t, T>>>>>;
+                std::is_same_v<T, std::vector<std::vector<uint32_t>>>,
+                std::vector<std::vector<int64_t>>,
+                std::conditional_t<std::is_same_v<T, float>, double,
+                                   std::conditional_t<std::is_same_v<T, bool>, bool,
+                                                      std::conditional_t<std::is_integral_v<T> ||
+                                                                             std::is_enum_v<T>,
+                                                                         int64_t, T>>>>>>;
 };
 
 // Getter/setter for one field. Unlike op<&Fn> (compile-time function pointer
@@ -4053,7 +4057,14 @@ static auto propGetter(T C::*field)
     using D = typename IValueField<T>::type;
     return [field](const c10::intrusive_ptr<Holder> &h) -> D {
         auto &f = fieldRef(h, field);
-        if constexpr (std::is_same_v<D, std::vector<int64_t>>) {
+        if constexpr (std::is_same_v<D, c10::List<bool>>) {
+            c10::List<bool> o;
+            o.reserve(f.size());
+            for (auto v : f) {
+                o.push_back(v);
+            }
+            return o;
+        } else if constexpr (std::is_same_v<D, std::vector<int64_t>>) {
             std::vector<int64_t> o;
             o.reserve(f.size());
             for (auto v : f) {
@@ -4085,8 +4096,15 @@ static auto propSetter(T C::*field)
         auto &f = fieldRef(h, field);
         // The list/unsigned narrowings below used to be rejected by pybind11's
         // int->uint32 casters; guard them so out-of-range values fail loudly
-        // instead of wrapping. vector<bool> keeps Python truthiness semantics.
-        if constexpr (std::is_same_v<D, std::vector<int64_t>>) {
+        // instead of wrapping. vector<bool> maps to c10::List<bool> (not
+        // std::vector<bool>) because the boxed-kernel signature only accepts the
+        // IValue-native List<bool>.
+        if constexpr (std::is_same_v<D, c10::List<bool>>) {
+            f.clear();
+            for (auto x : v) {
+                f.push_back(static_cast<bool>(x));
+            }
+        } else if constexpr (std::is_same_v<D, std::vector<int64_t>>) {
             f.clear();
             for (auto x : v) {
                 if constexpr (std::is_same_v<typename T::value_type, uint32_t>) {
