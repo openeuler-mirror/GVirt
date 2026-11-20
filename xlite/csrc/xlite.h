@@ -48,6 +48,29 @@ inline void *TensorPtr(const torch::Tensor &t)
                                     t.storage_offset() * t.dtype().itemsize());
 }
 
+// ACL_FORMAT_FRACTAL_NZ (acl_base_rt.h), kept local to avoid a CANN include here.
+constexpr int64_t XLITE_ACL_FORMAT_FRACTAL_NZ = 29;
+
+// npu::get_npu_format via the dispatcher (no libtorch_npu link); other backends
+// and query failures report as non-NZ.
+inline bool IsNpuNzFormat(const torch::Tensor &t)
+{
+    try {
+        static const auto getFormat = c10::Dispatcher::singleton()
+                                          .findSchemaOrThrow("npu::get_npu_format", "")
+                                          .typed<int64_t(const at::Tensor &)>();
+        return getFormat.call(t) == XLITE_ACL_FORMAT_FRACTAL_NZ;
+    } catch (...) {
+        static const bool warned = []() {
+            std::cerr << "xlite: npu::get_npu_format query failed; treating weights as ND"
+                      << std::endl;
+            return true;
+        }();
+        (void)warned;
+        return false;
+    }
+}
+
 /**
  * Effects: Initializes out to wrap in (shape, dtype, data pointer). A torch-contiguous or
  *   empty in yields a contiguous out; any other in needs allowPitched, which forwards
@@ -55,7 +78,8 @@ inline void *TensorPtr(const torch::Tensor &t)
  * Throws: std::invalid_argument if allowPitched is false and in is non-contiguous, or the
  *   strides are not a valid dim-0 pitch; std::runtime_error on a negative size/stride or
  *   an unknown dtype. All messages are prefixed with loc.
- * Remarks: in's storage must outlive out. See doc/developer_guide/xtensor.md for the
+ * Remarks: in's storage must outlive out. The FRACTAL_NZ storage format (if
+ *   any) is auto-detected into out.nz. See doc/developer_guide/xtensor.md for the
  *   layout policy and its consumers.
  */
 inline void InitXTensor(XTensor &out, const torch::Tensor &in, DebugSrcLoc loc = UNKNOWN_DBG_LOC,
@@ -75,6 +99,7 @@ inline void InitXTensor(XTensor &out, const torch::Tensor &in, DebugSrcLoc loc =
 
         if (in.numel() == 0 || in.is_contiguous()) {
             out.Init(sizes, XDtypeOf(in), TensorPtr(in));
+            out.nz = IsNpuNzFormat(in);
             return;
         }
 
@@ -104,6 +129,7 @@ inline void InitXTensor(XTensor &out, const torch::Tensor &in, DebugSrcLoc loc =
                 shapeStr + "]; call .contiguous() first.");
         }
         out.Init(sizes, XDtypeOf(in), TensorPtr(in), std::move(strides));
+        out.nz = IsNpuNzFormat(in);
     } catch (const std::invalid_argument &e) {
         throw std::invalid_argument(loc.ToStr() + std::string(__func__) + ": " + e.what());
     } catch (const std::runtime_error &e) {

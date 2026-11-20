@@ -51,6 +51,7 @@ struct XModelConfig {
     uint64_t maxSeqLen;
     int numSpecTokens = -1;  // -1 = unset
     bool quantAttnWeightTrans = false;
+    // Deprecated no-op: ignored (nz is auto-detected); will be removed.
     bool quantAttnWeightNz = false;
     float normEps;
     float ropeTheta;
@@ -92,11 +93,12 @@ struct XModelConfig {
     float routeScale = 1.0f;
     bool normTopKProb;
     bool expertsWeightTrans = false;
+    // Deprecated no-op: ignored (nz is auto-detected); will be removed.
     bool expertsWeightNZ = false;
-    // For GLM4/GLM5, vllm-ascend doesn't capture the Gate layer, so its gate won't use NZ format
+    // Deprecated no-op: ignored (nz is auto-detected); will be removed.
     bool gateCaptured = true;
 
-    // MLA related weight format
+    // Deprecated no-op: ignored (nz is auto-detected); will be removed.
     bool mlaWuvWeightNZ = false;
     bool mlaWuktWeightNZ = false;
 
@@ -106,6 +108,7 @@ struct XModelConfig {
     uint32_t moeEpSize;
     uint32_t moeTPSize;
 
+    // Deprecated no-op: ignored (nz is auto-detected); will be removed.
     bool weightNZ = false;
 
     // ===== DeepSeek-V4 (CxA) =====
@@ -222,9 +225,6 @@ public:
     std::vector<MatmulWeight> attnOutDecodeTp;
     std::vector<XTensor> mlaWUVDecodeTp;
     std::vector<XTensor> mlaWUKTDecodeTp;
-    std::vector<bool> dsaCpWUKTWeightNZ;
-    std::vector<bool> dsaCpWUVWeightNZ;
-    std::vector<bool> dsaCpOutWeightNZ;
     std::vector<XTensor> mlaKVNorm;
     std::vector<XTensor> mlaKVNormBias;
 
@@ -356,7 +356,7 @@ private:
     void ForwardMoEMSD(XRuntime &rt, uint32_t layer, XTensor &expertsSorted, XTensor &counts,
                        XTensor &num, uint32_t start, uint32_t end, uint32_t outDim,
                        std::vector<XTensor> &weights, std::vector<XTensor> &deqScales,
-                       std::vector<XTensor> &scaleBias, XTensor &output);
+                       std::vector<XTensor> &scaleBias, XTensor &output, bool weightNz);
     void ForwardFFN(XRuntime &rt, uint32_t layer, XTensor &hiddenState);
     void ForwardEmbedAndLayers(XRuntime &rt, XTensor &input,
                                std::vector<std::vector<XTensor>> &kvCache,

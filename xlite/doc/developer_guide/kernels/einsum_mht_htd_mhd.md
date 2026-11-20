@@ -6,18 +6,17 @@
 
 ## 输入输出参数
 
-Python 接口:`einsum_mht_htd_mhd(rt, mht, htd, mhd, m, h, t, d, weight_nz=False)`(`XliteOpEinsumMhtHtdMhd`,见 `csrc/op.cpp` 的 `XliteOpEinsumMhtHtdMhd`)。
+Python 接口:`einsum_mht_htd_mhd(rt, mht, htd, mhd, m, h, t, d, weight_nz=False)`(`XliteOpEinsumMhtHtdMhd`,见 `csrc/op.cpp` 的 `XliteOpEinsumMhtHtdMhd`)。`weight_nz` 已废弃并将被移除:传入值被忽略,`htd` 的 FRACTAL_NZ 存储格式由 `InitXTensor` 自动检测。
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
 | mht | 输入 | `[m, h, t]`(逻辑上 `[m, h*T]` 连续存储) | float16 / bfloat16 | 左操作数,按头切出 `[m, t]` 子矩阵作为 GEMM 的 A |
-| htd | 输入 | `[h, t, d]` | 同上 | 右操作数(权重),行主序转置布局;`weight_nz=True` 时为 NZ 分形布局 |
+| htd | 输入 | `[h, t, d]` | 同上 | 右操作数(权重),行主序转置布局;FRACTAL_NZ 分形布局自动检测(`weight_nz` 已废弃,传入值被忽略) |
 | mhd | 输出 | `[m, h, d]`(逻辑上 `[m, h*D]`) | 同上 | 逐头 GEMM 结果 |
 | m | 标量 | - | uint32 | token 数(GEMM 的 M 维) |
 | h | 标量 | - | uint32 | 头数(GEMM 批次数),MLA 中为 nLocalHeads |
 | t | 标量 | - | uint32 | 收缩维(GEMM 的 K 维),如 kvLoraRank |
 | d | 标量 | - | uint32 | 输出维(GEMM 的 N 维),如 kvLoraRank / vHeadDim |
-| weight_nz | 标量 | - | bool | 右操作数是否为 ND2NZ 分形布局 |
 | T / D | 标量(可选) | - | int | mht 行宽 / mhd 行宽的对齐覆盖;缺省(`-1`)时取 t / d。Q 吸收场景传 `nopeHeadDim + ropeHeadDim`(A 行距为完整 head 宽,只取前 t 列参与计算,见 `csrc/model.cpp` 的 `XModel::ForwardAttnMLACommonV2`,关键字 `_c.nopeHeadDim + _c.ropeHeadDim`) |
 
 host 侧 swizzle 由 `XlitePickSwizzle(d, t, ...)` 依据 N/K 形状挑选(见 `csrc/op.cpp` 的 `XliteOpEinsumMhtHtdMhd`,关键字 `XlitePickSwizzle`);`m0/n0/k0` 取默认值(M0=128,N0=256,K0 按 dtype)。

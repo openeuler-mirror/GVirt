@@ -26,7 +26,7 @@ group_matmul_##dtype(x, ws, z, deqScales, counts, n, kN, kK, m0, n0, k0,
 | kK | 标量 | - | int64 | hidden size（单专家 GEMM 的 K） |
 | m0, n0, k0 | 标量 | - | uint64 | 分块尺寸；host 固定传 -1（用 kernel 默认，`csrc/op.cpp` 的 `XliteOpGroupMatmul`，关键字 `MATMUL_M0_N0_K0_DEFAULT_VALUE`） |
 | startIdx, endIdx | 标量 | - | uint32 | 本次调用参与的专家索引区间 `[startIdx, endIdx)`（支持分批启动） |
-| weightNZ | 标量 | - | bool | 权重是否 NZ 格式 |
+| weightNZ | 标量 | - | bool | 权重是否 NZ 格式（ws 为指针数组、不携带布局信息，host 侧由调用方从首个本 rank 专家权重的自动检测结果传入（`weights[0].nz`，源自 `InitXTensor` 对 FRACTAL_NZ 的检测）；Python `weight_nz` 参数已废弃，传入值被忽略） |
 | transpose | 标量 | - | bool | 权重是否 `[kK, kN]` 转置存储 |
 | swizzle | 标量 | - | uint64 | tile 遍历 swizzle（host 传 `rt.defaultMatmulSwizzle`，`csrc/op.cpp` 的 `XliteOpGroupMatmul`，关键字 `rt.defaultMatmulSwizzle`） |
 

@@ -66,6 +66,7 @@ XTensor &XTensor::Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr,
     this->ptr = ptr;
     this->origPtr = ptr;
     this->type = type;
+    this->nz = false;
     return *this;
 }
 

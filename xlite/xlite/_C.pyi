@@ -121,7 +121,8 @@ class ModelConfig:
         q_lora_rank (int): LoRA rank for query projection.
         kv_lora_rank (int): LoRA rank for key/value projection.
         quant_attn_weight_transpose (bool): Whether quanted attention weights are transposed.
-        quant_attn_weight_nz (bool): Whether quanted attention weights are in NZ layout.
+        quant_attn_weight_nz (bool): Deprecated: ignored (nz is auto-detected);
+            will be removed.
         norm_eps (float): RMSNorm/LayerNorm epsilon.
         rope_theta (float): Rotary base frequency.
         softmax_scale (float): Attention softmax scale.
@@ -151,12 +152,12 @@ class ModelConfig:
             non-CXA; for CXA one entry per 5-tuple cache in order
             ``(indexer_state, indexer_k, compress_kv, state, swa_kv)``. Seeded from
             ``block_size`` when empty at construction.
-        weight_nz (bool): Whether weights are in NZ layout.
+        weight_nz (bool): Deprecated: ignored (nz is auto-detected); will be removed.
         experts_weight_transpose (bool): Whether expert weights are transposed.
-        experts_weight_nz (bool): Whether expert weights are in NZ layout.
-        gate_captured(bool): Whether gate layer is captured by vllm-ascend.
-        mla_wuv_weight_nz (bool): Whether MLA W_UV weights are in NZ layout.
-        mla_wukt_weight_nz (bool): Whether MLA W_UK^T weights are in NZ layout.
+        experts_weight_nz (bool): Deprecated: ignored (nz is auto-detected); will be removed.
+        gate_captured (bool): Deprecated: ignored (nz is auto-detected); will be removed.
+        mla_wuv_weight_nz (bool): Deprecated: ignored (nz is auto-detected); will be removed.
+        mla_wukt_weight_nz (bool): Deprecated: ignored (nz is auto-detected); will be removed.
         qkv_bias (bool): Whether MHA QKV has bias.
         qk_norm (bool): Whether MHA applies Q/K norm.
         qk_norm_full (bool): Whether MHA applies Q/K norm full.
@@ -230,7 +231,7 @@ class ModelConfig:
     quant_attn_weight_transpose: bool = ...
     """Whether quanted attention weights are transposed."""
     quant_attn_weight_nz: bool = ...
-    """Whether quanted attention weights are in NZ layout."""
+    """Deprecated: ignored (nz is auto-detected); will be removed."""
     norm_eps: float = ...
     """RMSNorm/LayerNorm epsilon."""
     rope_theta: float = ...
@@ -283,17 +284,17 @@ class ModelConfig:
     per 5-tuple cache in order (indexer_state, indexer_k, compress_kv, state, swa_kv).
     Seeded from ``block_size`` when empty at construction."""
     weight_nz: bool = ...
-    """Whether weights are in NZ layout."""
+    """Deprecated: ignored (nz is auto-detected); will be removed."""
     experts_weight_transpose: bool = ...
     """Whether expert weights are transposed."""
     experts_weight_nz: bool = ...
-    """Whether expert weights are in NZ layout."""
+    """Deprecated: ignored (nz is auto-detected); will be removed."""
     gate_captured: bool = ...
-    """Whether gate layer is captured by vllm-ascend."""
+    """Deprecated: ignored (nz is auto-detected); will be removed."""
     mla_wuv_weight_nz: bool = ...
-    """Whether MLA W_UV weights are in NZ layout."""
+    """Deprecated: ignored (nz is auto-detected); will be removed."""
     mla_wukt_weight_nz: bool = ...
-    """Whether MLA W_UK^T weights are in NZ layout."""
+    """Deprecated: ignored (nz is auto-detected); will be removed."""
     qkv_bias: bool = ...
     """Whether MHA QKV has bias."""
     qk_norm: bool = ...
@@ -1901,7 +1902,7 @@ def matmul(
         y (torch.Tensor): Right matrix/weight, shape ``[n, k]`` (transpose=False) or
             ``[k, n]`` (transpose=True).
         z (torch.Tensor): Output matrix, shape ``[m, n]``.
-        weight_nz (bool): Whether `y` uses NZ weight layout.
+        weight_nz (bool): Deprecated: ignored (nz is auto-detected); will be removed.
         transpose (bool): Whether to transpose the right matrix in compute.
 
     Returns:
@@ -1937,7 +1938,7 @@ def matmul_bench(
         y_warmup (torch.Tensor): Right matrix/weight for warmup, same contract as ``y``.
         z_warmup (torch.Tensor): Output matrix for warmup, same contract as ``z``.
         iterations: Number of matmul iterations to run
-        weight_nz (bool): Whether `y` uses NZ weight layout.
+        weight_nz (bool): Deprecated: ignored (nz is auto-detected); will be removed.
         transpose (bool): Whether to transpose the right matrix in compute.
 
     Returns:
@@ -1966,7 +1967,7 @@ def matmul_with_bias(
         y (torch.Tensor): Right matrix/weight, shape ``[n, k]``.
         z (torch.Tensor): Output matrix, shape ``[m, n]``.
         bias (torch.Tensor): Per-column bias added to output, shape ``[n]``.
-        weight_nz (bool): Whether `y` uses NZ weight layout.
+        weight_nz (bool): Deprecated: ignored (nz is auto-detected); will be removed.
 
     Returns:
         None: `z` is written in place.
@@ -2643,7 +2644,7 @@ def group_matmul(
         out_dim (int): Output dimension.
         in_dim (int): Input dimension.
         output (torch.Tensor): Output tensor, shape ``[sum_tokens, out_dim]``.
-        weight_nz (bool): Whether weight tensors use NZ layout.
+        weight_nz (bool): Deprecated: ignored (nz is auto-detected); will be removed.
         transpose (bool): Whether grouped weights are transposed.
 
     Returns:
@@ -3282,7 +3283,7 @@ def matmul_dequant(
         deq_scale (torch.Tensor): Weight dequantization scale, flat ``[2*n]``, fp32
             (uint64 TF32-packed pairs).
         z (torch.Tensor): Output matrix, shape ``[m, n]``, fp16.
-        weight_nz (bool): Whether `y` uses NZ layout.
+        weight_nz (bool): Deprecated: ignored (nz is auto-detected); will be removed.
         transpose (bool): Whether to transpose the right matrix.
 
     Returns:
@@ -3331,7 +3332,7 @@ def fused_quant_matmul_dequant(
         quant_offset (Optional[torch.Tensor]): Static per-channel offset,
             shape ``[k]``, bfloat16; omit in dynamic mode.
         weight (torch.Tensor): Quantized weight, shape ``[n, k]`` (or
-            transposed/NZ per ``weight_nz``/``transpose``), int8.
+            transposed/NZ per ``transpose``), int8.
         out (torch.Tensor): Output, shape ``[m, n]``, bfloat16 (written in place).
         bias (Optional[torch.Tensor]): Matmul bias, shape ``[n]``, int32; pass an
             empty tensor (or omit) to skip.
@@ -3344,7 +3345,7 @@ def fused_quant_matmul_dequant(
             shape ``[m]`` fp32; omit in static mode.
         num (Optional[torch.Tensor]): Dynamic token count, shape ``[1]`` uint32.
         dyn_quant (bool): True = dynamic per-token; False = static per-channel.
-        weight_nz (bool): Whether ``weight`` uses NZ layout.
+        weight_nz (bool): Deprecated: ignored (nz is auto-detected); will be removed.
         transpose (bool): Whether to transpose the weight.
 
     Returns:
@@ -3452,7 +3453,7 @@ def fusion_operator_matmul_dequant_pipeline(
             (read as uint32; only the first ``min(num, m)`` rows are
             processed). Required keyword-only argument; pass an empty tensor
             to use ``m``.
-        weight_nz (bool): Whether `weight` uses NZ layout.
+        weight_nz (bool): Deprecated: ignored (nz is auto-detected); will be removed.
         transpose (bool): Whether to transpose the right matrix.
 
     Returns:
@@ -4387,7 +4388,6 @@ def einsum_mht_hdt_mhd(
     h: int,
     t: int,
     d: int,
-    *,
     weight_nz: bool = False,
 ) -> None:
     """Batched matmul for ``mhd = einsum("mht,hdt->mhd", mht, hdt)``.
@@ -4407,7 +4407,7 @@ def einsum_mht_hdt_mhd(
         h (int): Head dimension.
         t (int): Inner reduction dimension.
         d (int): Output feature dimension.
-        weight_nz (bool): Whether ``hdt`` is in NZ weight layout.
+        weight_nz (bool): Deprecated: ignored (nz is auto-detected); will be removed.
 
     Returns:
         None: ``mhd`` is written in place.
@@ -4423,7 +4423,6 @@ def einsum_mht_htd_mhd(
     h: int,
     t: int,
     d: int,
-    *,
     weight_nz: bool = False,
 ) -> None:
     """Batched matmul for ``mhd = einsum("mht,htd->mhd", mht, htd)``.
@@ -4443,7 +4442,7 @@ def einsum_mht_htd_mhd(
         h (int): Head dimension.
         t (int): Inner reduction dimension.
         d (int): Output feature dimension.
-        weight_nz (bool): Whether ``htd`` is in NZ weight layout.
+        weight_nz (bool): Deprecated: ignored (nz is auto-detected); will be removed.
 
     Returns:
         None: ``mhd`` is written in place.

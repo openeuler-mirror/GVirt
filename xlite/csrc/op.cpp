@@ -126,9 +126,10 @@ void XliteOpDsaCpReorderWo(XRuntime &rt, XTensor &input, XTensor &output, uint32
     }
 }
 
-XTensor &XliteOpDsaCpGatherWeight(XRuntime &rt, XTensor &weight, bool nz, bool transposed)
+XTensor &XliteOpDsaCpGatherWeight(XRuntime &rt, XTensor &weight, bool transposed)
 {
     const size_t tp = rt.tpSize();
+    const bool nz = weight.nz;
     const auto storageShape = DsaCpWeightStorageShape(weight, nz);
     XTensor storage(storageShape, weight.dtype, weight.ptr);
     const size_t storageLen = storage.numel;
@@ -141,6 +142,7 @@ XTensor &XliteOpDsaCpGatherWeight(XRuntime &rt, XTensor &weight, bool nz, bool t
         }
     }
     auto &gathered = rt.GetTensor({tp, storageLen}, weight.dtype, DBG_LOC);
+    gathered.nz = nz;
     XTensor input({storageLen}, weight.dtype, weight.ptr);
     if (rt._tpXcclComm != nullptr) {
         // Keep the view's pool provenance for dummy runtime accounting too.
@@ -157,6 +159,7 @@ XTensor &XliteOpDsaCpGatherWeight(XRuntime &rt, XTensor &weight, bool nz, bool t
     XliteOpAllGather(rt, input, gathered, TP, true, DBG_LOC);
     if (nz && transposed) {
         auto &full = rt.GetTensor({tp, storageLen}, weight.dtype, DBG_LOC);
+        full.nz = nz;
         if (!IsDummyRuntime(rt)) {
             const size_t columnBlocks = storageShape[0];
             const size_t blockBytes = storageLen / columnBlocks * XDtypeBit(weight.dtype) / 8;
@@ -168,6 +171,7 @@ XTensor &XliteOpDsaCpGatherWeight(XRuntime &rt, XTensor &weight, bool nz, bool t
     }
     if (!nz && !transposed) {
         auto &full = rt.GetTensor(fullShape, weight.dtype, DBG_LOC);
+        full.nz = nz;
         std::vector<XTensor> shards;
         for (size_t rank = 0; rank < tp; ++rank) {
             auto shard = gathered;
@@ -822,9 +826,8 @@ void XliteOpAddAndRmsNorm(XRuntime &rt, XTensor &in, XTensor &addInOut, XTensor 
                  nullptr, rt.tpSize(), false);
 }
 
-void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, bool weightNZ,
-                   const XTensor &bias, const XTensor &deqScale, bool transpose, uint64_t m0,
-                   uint64_t n0, uint64_t k0)
+void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, const XTensor &bias,
+                   const XTensor &deqScale, bool transpose, uint64_t m0, uint64_t n0, uint64_t k0)
 {
     if (IsDummyRuntime(rt)) {
         if (EachXDtype(BF16, in, weight, out) && bias.ptr != nullptr) {
@@ -842,6 +845,7 @@ void XliteOpMatmul(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out, boo
         return;
     }
 
+    const bool weightNZ = weight.nz;
     uint64_t m = in.shape[0];
     uint64_t n = transpose ? weight.shape[1] : weight.shape[0];
     uint64_t k = transpose ? weight.shape[0] : weight.shape[1];
@@ -2371,8 +2375,8 @@ static bool FusedMatmulDeQuantBeneficial(uint64_t m, uint64_t k, bool dynQuant)
 }
 
 void XliteOpMatmulDeQuant(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out,
-                          const XTensor &quantBias, const XTensor &weightScale, bool weightNZ,
-                          bool transpose, const XTensor &outScale, const XTensor &num)
+                          const XTensor &quantBias, const XTensor &weightScale, bool transpose,
+                          const XTensor &outScale, const XTensor &num)
 {
     if (IsDummyRuntime(rt) || in.numel == 0) {
         return;
@@ -2384,10 +2388,10 @@ void XliteOpMatmulDeQuant(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &o
 
         if (enableFused) {
             XliteOpFusionOperatorMatmulDequantPipeline(rt, in, weight, out, quantBias, weightScale,
-                                                       weightNZ, transpose, outScale, num);
+                                                       transpose, outScale, num);
         } else {
             out.View(FP16);
-            XliteOpMatmul(rt, in, weight, out, weightNZ, quantBias, weightScale, transpose);
+            XliteOpMatmul(rt, in, weight, out, quantBias, weightScale, transpose);
             XliteOpDeQuant(rt, out, out, outScale, num);
             out.View(BF16);
         }
@@ -2399,15 +2403,15 @@ void XliteOpMatmulDeQuant(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &o
 
 void XliteOpFusionOperatorMatmulDequantPipeline(XRuntime &rt, XTensor &in, XTensor &weight,
                                                 XTensor &out, const XTensor &quantBias,
-                                                const XTensor &weightScale, bool weightNZ,
-                                                bool transpose, const XTensor &outScale,
-                                                const XTensor &num, uint64_t m0, uint64_t n0,
-                                                uint64_t k0)
+                                                const XTensor &weightScale, bool transpose,
+                                                const XTensor &outScale, const XTensor &num,
+                                                uint64_t m0, uint64_t n0, uint64_t k0)
 {
     if (IsDummyRuntime(rt) || in.numel == 0) {
         return;
     }
 
+    const bool weightNZ = weight.nz;
     uint64_t m = in.shape[0];
     uint64_t k = in.shape[1];
     uint64_t n = transpose ? weight.shape[1] : weight.shape[0];
@@ -2432,13 +2436,14 @@ void XliteOpFusedQuantMatmulDequant(XRuntime &rt, XTensor &x, const XTensor &qua
                                     const XTensor &quantOffset, XTensor &weight, XTensor &out,
                                     const XTensor &quantBias, const XTensor &weightScale,
                                     XTensor &xQuant, XTensor &outScale, const XTensor &num,
-                                    bool dynQuant, bool weightNZ, bool transpose, uint64_t m0,
-                                    uint64_t n0, uint64_t k0)
+                                    bool dynQuant, bool transpose, uint64_t m0, uint64_t n0,
+                                    uint64_t k0)
 {
     if (IsDummyRuntime(rt) || x.numel == 0) {
         return;
     }
 
+    const bool weightNZ = weight.nz;
     uint64_t m = x.shape[0];
     uint64_t k = x.shape[1];
     uint64_t n = transpose ? weight.shape[1] : weight.shape[0];
@@ -3177,11 +3182,12 @@ void XliteOpRecurrentGatedDeltaRuleKdaPaged(
 }
 
 void XliteOpEinsumMhtHdtMhd(XRuntime &rt, XTensor &mht, XTensor &hdt, XTensor &mhd, uint32_t m,
-                            uint32_t h, uint32_t t, uint32_t d, bool weightNZ, int T, int D)
+                            uint32_t h, uint32_t t, uint32_t d, int T, int D)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
+    const bool weightNZ = hdt.nz;
     KERNEL_PTR_TYPE(einsum_mht_hdt_mhd) * launchKernel;
     if (EachXDtype(FP16, mht, hdt, mhd)) {
         launchKernel = aclrtlaunch_einsum_mht_hdt_mhd_float16_t;
@@ -3201,11 +3207,12 @@ void XliteOpEinsumMhtHdtMhd(XRuntime &rt, XTensor &mht, XTensor &hdt, XTensor &m
 }
 
 void XliteOpEinsumMhtHtdMhd(XRuntime &rt, XTensor &mht, XTensor &htd, XTensor &mhd, uint32_t m,
-                            uint32_t h, uint32_t t, uint32_t d, bool weightNZ, int T, int D)
+                            uint32_t h, uint32_t t, uint32_t d, int T, int D)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
+    const bool weightNZ = htd.nz;
     KERNEL_PTR_TYPE(einsum_mht_htd_mhd) * launchKernel;
     if (EachXDtype(FP16, mht, htd, mhd)) {
         launchKernel = aclrtlaunch_einsum_mht_htd_mhd_float16_t;
