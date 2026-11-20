@@ -200,9 +200,7 @@ def run_static_checks(wt: Path) -> Check:
             "skipped",
             note="PR base predates the pre-commit setup; rebase onto latest master to enable them",
         )
-    output, returncode = run_cmd(
-        [sys.executable, "tests/run_static_checks.py", "--skip-tidy"], wt / "xlite", STATIC_CHECK_TIMEOUT
-    )
+    output, returncode = run_cmd([sys.executable, "tests/run_static_checks.py"], wt / "xlite", STATIC_CHECK_TIMEOUT)
     check = Check("xlite static checks", "passed" if returncode == 0 else "failed", output)
     if returncode != 0:
         failed = [name for name, status, _ in split_hook_sections(output) if status == "failed"]

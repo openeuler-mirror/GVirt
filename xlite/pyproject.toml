@@ -108,7 +108,7 @@ ignore = [
 [tool.codespell]
 skip = ".git,build,.mypy_cache,.pytest_cache,*.json"
 # AscendC/CCE kernel vocabulary and API parameter names.
-ignore-words-list = "clen,inout,outWeights,vor,rIn,biasIn,inH,unparseable,CANN,cann,CopyIn,EnQue,ND,nd,espace"
+ignore-words-list = "clen,inout,outWeights,vor,rIn,biasIn,inH,unparseable,CANN,cann,CopyIn,EnQue,ND,nd,espace,aLog,prevEnd"
 
 [tool.mypy]
 mypy_path = "."

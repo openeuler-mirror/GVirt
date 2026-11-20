@@ -5,6 +5,11 @@ Requires a build tree with compile_commands.json; configures the project when
 the tree is missing and always brings it current (kernel launch headers are
 build-time artifacts). Kernel sources under csrc/kernels and csrc/ascend.h are
 excluded (CCE intrinsics produce intentional warnings).
+
+Analysis runs one clang-tidy process per file in parallel (XLITE_CI_TIDY_JOBS
+workers, default min(16, cpus) — the pre-pre-commit checker's jobs=16): the
+serial loop made a full pass cost the SUM of all per-file analyses instead of
+the slowest few.
 """
 
 import os
@@ -12,10 +17,16 @@ import re
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 XLITE_ROOT = Path(__file__).resolve().parents[2]
 SKIP_PATHS = ("csrc/kernels/", "csrc/ascend.h")
+# The static analyzer (clang-analyzer-*) explores every registration lambda in
+# the TORCH_LIBRARY table — 428 s on the current _C.cpp, 96% of the file's
+# analysis cost and most of a full pass — while never having reported a
+# finding there; these files keep every other check family.
+ANALYZER_EXEMPT_FILES = ("_C.cpp",)
 TIDY_FINDING = re.compile(r":\d+:\d+: (?:warning|error): ")
 
 
@@ -68,27 +79,38 @@ def main() -> int:
     if not ensure_build_tree():
         return 1
 
-    failed = False
-    for path in sorted(files):
+    def analyze_one(path: Path) -> tuple[bool, str]:
         rel = path.relative_to(XLITE_ROOT)
+        cmd = ["clang-tidy", rel.as_posix(), f"--config-file={XLITE_ROOT / '.clang-tidy'}", "-p=build"]
+        if path.name in ANALYZER_EXEMPT_FILES:
+            cmd.append("--checks=-clang-analyzer-*")
         result = subprocess.run(
-            ["clang-tidy", rel.as_posix(), f"--config-file={XLITE_ROOT / '.clang-tidy'}", "-p=build"],
+            cmd,
             cwd=XLITE_ROOT,
             capture_output=True,
             text=True,
+            check=False,
         )
         output = result.stdout + result.stderr
-        findings = [line for line in output.splitlines() if TIDY_FINDING.search(line)]
+        hits = [line for line in output.splitlines() if TIDY_FINDING.search(line)]
         if result.returncode != 0:
-            failed = True
-            print(f"clang-tidy failed for {rel} (exit {result.returncode}):")
-            print("\n".join(findings) if findings else output.strip()[-2000:])
-        elif findings:
-            failed = True
-            print(f"clang-tidy issues in {rel}:")
-            print("\n".join(findings))
+            text = f"clang-tidy failed for {rel} (exit {result.returncode}):\n" + (
+                "\n".join(hits) if hits else output.strip()[-2000:]
+            )
+        elif hits:
+            text = f"clang-tidy issues in {rel}:\n" + "\n".join(hits)
+        else:
+            text = ""
+        return result.returncode == 0 and not hits, text
 
+    jobs = int(os.environ.get("XLITE_CI_TIDY_JOBS") or min(16, os.cpu_count() or 4))
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        # map keeps the output in input (sorted) order: deterministic logs.
+        results = list(executor.map(analyze_one, files))
+    failed = [text for clean, text in results if not clean]
     if failed:
+        for text in failed:
+            print(text)
         print("Run `clang-tidy -p=build --fix <file>` under xlite/ to apply suggested fixes.")
     return 1 if failed else 0
 
