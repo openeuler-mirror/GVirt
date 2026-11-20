@@ -85,6 +85,27 @@ case "${mode}" in
 		;;
 esac
 
+# load_format / n_layers: 仅跑前 n_layers 层时用 dummy 加载（默认 auto、跑全部层）
+# N_LAYERS>0 时强制 dummy 并通过 hf-overrides 覆盖 num_hidden_layers
+n_layers="${N_LAYERS:-0}"
+load_format="${LF:-auto}"
+extra_args=()
+
+# 校验 N_LAYERS 为非负整数: 非法值 (如 abc/1.5/-1/带空格) 会令下面的 [ -gt 0 ]
+# 向 stderr 报 "integer expression expected" 并静默回退全量加载, 可能使 dummy 冒烟
+# 在无意间以全量权重起服务 (加载时长放大一个量级). 非法值显式报错终止.
+case "${n_layers}" in
+	''|*[!0-9]*)
+		echo "错误: N_LAYERS 非法值 '${N_LAYERS}' (应为非负整数), 终止启动" >&2
+		exit 1
+		;;
+esac
+if [ "${n_layers}" -gt 0 ]; then
+	load_format="dummy"
+	extra_args+=(--hf-overrides '{"num_hidden_layers": '"${n_layers}"'}')
+	echo "Using ${n_layers} layers"
+fi
+
 python -m vllm.entrypoints.openai.api_server \
 	--model ${model_path}  \
 	--tensor-parallel-size ${tensor_parallel_size} \
@@ -103,4 +124,6 @@ python -m vllm.entrypoints.openai.api_server \
 	${quantization_param} \
 	--profiler-config "${profiler_param}" \
 	--host ${ip} \
-	--port ${port} > ${log} 2>&1 &
+	--port ${port} \
+	--load-format "${load_format}" \
+	"${extra_args[@]}" > ${log} 2>&1 &

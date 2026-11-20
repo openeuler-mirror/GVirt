@@ -158,7 +158,7 @@ python3 run_benchmark_scheduler.py --run-now
 
 # 自定义所有参数
 python3 run_benchmark_scheduler.py \
-    --model moe \
+    --online-models moe \
     --receiver "1234567890" \
     --run-time 02:00
 ```
@@ -182,12 +182,13 @@ kill $(cat .scheduler.pid)
 
 ```bash
 cd ./tests/e2e/
-python3 daily_benchmark_bot.py --model moe --receiver 1234567890
+python3 daily_benchmark_bot.py --online-models moe --receiver 1234567890
 ```
 
 **可选参数：**
 
-- `--model`: 测试模型类型（moe/moe_quant/moe_quant_a3/moe_mix/quant/all），默认 moe
+- `--online-models`: 在线模型类型（moe/moe_quant/moe_quant_a3/glm5_2_dummy，或预设 moe_mix/quant/all，或逗号列表如 moe,glm5_2_dummy），默认 moe
+- `--offline-models`: 离线 bench 模型列表（逗号分隔，如 glm5_w8a8,deepseek_v4_w8a8），不传默认全部
 - `--skip-pull`: 跳过代码拉取
 - `--skip-build`: 跳过编译
 - `--receiver`: 接收者ID，welink 群号
@@ -273,7 +274,7 @@ kill <PID>
 **手动执行测试：**
 
 ```bash
-python3 daily_benchmark_bot.py --model moe --receiver "927280411401503971"
+python3 daily_benchmark_bot.py --online-models moe --receiver "927280411401503971"
 ```
 
 ### NPU-SMI 版本检测

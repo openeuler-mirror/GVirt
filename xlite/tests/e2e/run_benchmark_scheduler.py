@@ -46,7 +46,7 @@ class BenchmarkScheduler:
         self,
         type: Literal["bench", "accuracy"] = "bench",
         script: Path = SCRIPT_DIR / "daily_benchmark_bot.py",
-        model: str = "moe",
+        online_models: str = "moe",
         receiver: str = DEFAULT_RECEIVER,
         run_time: str = DEFAULT_RUN_TIME,
         log_file: Path = SCRIPT_DIR / "scheduler.log",
@@ -55,10 +55,12 @@ class BenchmarkScheduler:
         retry: int = 3,
         vllm_timeout: int = 1800,
         offline_only: bool = False,
+        offline_models: str | None = None,
+        model_args: str | None = None,
     ):
         self.type = type
         self.script = script.resolve()
-        self.model = model
+        self.online_models = online_models
         self.receiver = receiver
         self.run_time = run_time
         self.running = True
@@ -68,6 +70,8 @@ class BenchmarkScheduler:
         self.retry = retry
         self.vllm_timeout = vllm_timeout
         self.offline_only = offline_only
+        self.offline_models = offline_models
+        self.model_args = model_args
 
         # 注册信号处理
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -94,21 +98,24 @@ class BenchmarkScheduler:
     def run_benchmark(self):
         """执行测试任务"""
         self.log("=" * 60)
-        self.log(f"开始执行每日测试任务 - {self.type.upper()} - 模型: {self.model}")
+        self.log(f"开始执行每日测试任务 - {self.type.upper()} - 在线模型: {self.online_models}")
         self.log("=" * 60)
 
         try:
             cmd = [
                 PYTHON_CMD,
                 str(self.script),
-                "--model",
-                self.model,
+                "--online-models",
+                self.online_models,
                 "--receiver",
                 self.receiver,
             ]
             if self.offline_only:
                 # offline_only=True => 跳过在线, 仅跑离线 bench (透传 bot 的 --offline-bench)
                 cmd.append("--offline-bench")
+            if self.offline_models:
+                # 透传离线模型列表给 bot (bot 侧校验合法性), 不传则 bot 默认跑全部
+                cmd.extend(["--offline-models", self.offline_models])
 
             self.log(f"执行命令: {' '.join(cmd)}")
 
@@ -147,7 +154,7 @@ class BenchmarkScheduler:
                 PYTHON_CMD,
                 str(self.script),
                 "--model-args",
-                self.model,
+                self.model_args,
                 "--receiver",
                 self.receiver,
                 "--timeout",
@@ -204,7 +211,10 @@ class BenchmarkScheduler:
         self.log("========================================")
         self.log(f"Python 解释器: {PYTHON_CMD}")
         self.log(f"测试脚本: {self.script}")
-        self.log(f"模型类型: {self.model}")
+        if self.type == "bench":
+            self.log(f"在线模型: {self.online_models}")
+        else:
+            self.log(f"精度模型参数: {self.model_args}")
         self.log(f"接收者ID: {self.receiver}")
         self.log(f"执行时间: 每天 {self.run_time}")
         self.log(f"日志文件: {self.log_file}")
@@ -256,11 +266,11 @@ def main():
     )
     parser.add_argument(
         "-m",
-        "--model",
+        "--online-models",
         type=str,
         default="moe",
-        choices=["moe", "moe_quant", "moe_quant_a3", "moe_mix", "quant", "all"],
-        help="*性能*测试模型类型 (moe/moe_quant/moe_quant_a3/moe_mix/quant/all)，默认 moe；仅 bench 模式有效",
+        help="*性能*测试在线模型类型 (原子 moe/moe_quant/moe_quant_a3/glm5_2_dummy, 预设 moe_mix/quant/all, "
+        "或逗号列表如 moe,glm5_2_dummy)，默认 moe；仅 bench 模式有效 (透传给 daily_benchmark_bot.py 校验)",
     )
     default_model_args = (
         "--models Qwen3-VL-30B-A3B-Instruct Qwen3-32B-w8a8-nopdmix",
@@ -303,6 +313,13 @@ def main():
         action="store_true",
         help="仅跑离线 bench (跳过在线性能测试); 默认为 先在线→再离线 两阶段; 仅 bench 模式有效",
     )
+    parser.add_argument(
+        "-om",
+        "--offline-models",
+        type=str,
+        default=None,
+        help="离线 bench 模型列表 (逗号分隔, 如 glm5_w8a8,deepseek_v4_w8a8); 不传则跑全部 (仅 bench 模式有效)",
+    )
     parser.add_argument("--timeout", type=int, default=2 * 3600, help="ais_bench 子进程超时时间（秒），默认 2h = 7200s")
     parser.add_argument("--retry", type=int, default=3, help="ais_bench 失败时的重试次数，默认 3")
     parser.add_argument("--vllm-timeout", type=int, default=1800, help="vLLM 服务器启动超时时间（秒），默认 1800s")
@@ -319,7 +336,7 @@ def main():
     scheduler = BenchmarkScheduler(
         type=args.script,
         script=script_path,
-        model=args.model if args.script == "bench" else args.model_args,
+        online_models=args.online_models,
         receiver=args.receiver,
         run_time=args.run_time,
         log_file=log_file,
@@ -328,6 +345,8 @@ def main():
         retry=args.retry,
         vllm_timeout=args.vllm_timeout,
         offline_only=args.offline_only,
+        offline_models=args.offline_models,
+        model_args=args.model_args,
     )
 
     # 如果需要立即执行

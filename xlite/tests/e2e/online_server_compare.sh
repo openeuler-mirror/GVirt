@@ -14,31 +14,51 @@ MODEL_TYPE=${1:-moe}
 RESUME_DIR_ARG=${2:-}
 
 # 定义模型配置
+# 格式: <served_name>|<model_path>|<n_layers>
+#   n_layers（可省略，默认 0=全量加载）: >0 时用 load_format=dummy 只跑前 n_layers 层，
+#   经 online_api_server.sh 的 N_LAYERS/LF 环境变量注入。
 declare -A MODELS
 MODELS[moe]="Qwen3-30B-A3B-Instruct-2507|/mnt/nvme0n1/models/Qwen3-30B-A3B-Instruct-2507"
 MODELS[moe_quant]="Qwen3-30B-A3B-Instruct-2507-w8a8|/mnt/nvme0n1/models/Qwen3-30B-A3B-Instruct-2507-w8a8"
 MODELS[moe_quant_a3]="GLM-5.2-w8a8|/mnt/nvme0n1/models/GLM-5.2-w8a8/"
+# glm5_2_dummy: GLM-5.2-w8a8 的 dummy 快速冒烟变体，跑在 910B3(A2) 上、复用 DEFAULT 6 场景（tp=8），
+# dummy 加载只跑前 10 层（N_LAYERS=10）；served_name 加 -dummy 后缀避免与全量混淆
+MODELS[glm5_2_dummy]="GLM-5.2-w8a8-dummy|/mnt/nvme0n1/models/GLM-5.2-w8a8/|10"
 
 # 确定要测试的模型列表
 declare -a TEST_MODELS
 if [ "${MODEL_TYPE}" = "all" ]; then
-    TEST_MODELS=("moe" "moe_quant" "moe_quant_a3")
+    TEST_MODELS=("moe" "moe_quant" "moe_quant_a3" "glm5_2_dummy")
 elif [ "${MODEL_TYPE}" = "moe_mix" ]; then
     TEST_MODELS=("moe" "moe_quant")
 elif [ "${MODEL_TYPE}" = "quant" ]; then
     TEST_MODELS=("moe_quant" "moe_quant_a3")
-elif [ "${MODEL_TYPE}" = "moe" ] || [ "${MODEL_TYPE}" = "moe_quant" ] || [ "${MODEL_TYPE}" = "moe_quant_a3" ]; then
+elif [ "${MODEL_TYPE}" = "moe" ] || [ "${MODEL_TYPE}" = "moe_quant" ] || [ "${MODEL_TYPE}" = "moe_quant_a3" ] || [ "${MODEL_TYPE}" = "glm5_2_dummy" ]; then
     TEST_MODELS=("${MODEL_TYPE}")
+elif [[ "${MODEL_TYPE}" == *,* ]]; then
+    # 逗号分隔的模型列表 (如 moe,glm5_2_dummy): 逐个校验后展开为 TEST_MODELS,
+    # 复用下方 for model_type in TEST_MODELS 循环, 一次调用跑多个模型。
+    IFS=',' read -ra _list <<< "${MODEL_TYPE}"
+    TEST_MODELS=()
+    for _m in "${_list[@]}"; do
+        if [[ -z "${MODELS[$_m]:-}" ]]; then
+            echo "错误：无效的模型类型 '${_m}'（在逗号列表 '${MODEL_TYPE}' 中），请使用 'moe'、'moe_quant'、'moe_quant_a3' 或 'glm5_2_dummy'"
+            exit 1
+        fi
+        TEST_MODELS+=("$_m")
+    done
 else
-    echo "错误：无效的模型类型 '${MODEL_TYPE}'，请使用 'moe'、'moe_quant'、'moe_quant_a3'、'moe_mix'、'quant' 或 'all'"
+    echo "错误：无效的模型类型 '${MODEL_TYPE}'，请使用 'moe'、'moe_quant'、'moe_quant_a3'、'glm5_2_dummy'、'moe_mix'、'quant' 或 'all'"
     echo "用法：$0 [model_type] [output_dir]"
     echo "  model_type（可选，默认 moe）："
     echo "  moe          - 测试 Qwen3-30B-A3B-Instruct-2507 模型（默认）"
     echo "  moe_quant    - 测试 Qwen3-30B-A3B-Instruct-2507-w8a8 模型"
-    echo "  moe_quant_a3 - 测试 GLM-5.2-w8a8 模型"
+    echo "  moe_quant_a3 - 测试 GLM-5.2-w8a8 模型（全量加载）"
+    echo "  glm5_2_dummy - 测试 GLM-5.2-w8a8 模型（dummy 加载，只跑前 10 层）"
     echo "  moe_mix      - 测试 moe + moe_quant（量化前后对比）"
-    echo "  quant        - 测试所有量化模型"
-    echo "  all          - 测试所有模型"
+    echo "  quant        - 测试所有量化模型（moe_quant + moe_quant_a3，不含 glm5_2_dummy）"
+    echo "  all          - 测试所有模型（含 glm5_2_dummy）"
+    echo "  <a,b,...>    - 逗号分隔的模型列表，自定义组合（如 moe,glm5_2_dummy）"
     echo "  output_dir（可选）：主输出目录；传入已存在且非空的目录即进入断点续测模式"
     exit 1
 fi
@@ -56,21 +76,6 @@ wait_10s() {
     echo "等待 10 秒..."
     echo "======================================"
     sleep 10
-}
-
-# 格式化时间显示（参数：秒数）
-# 返回格式：X小时Y分钟Z秒（如果小时为0则不显示小时）
-format_duration() {
-    local total_seconds=$1
-    local hours=$((total_seconds / 3600))
-    local minutes=$(((total_seconds % 3600) / 60))
-    local seconds=$((total_seconds % 60))
-
-    if [ ${hours} -gt 0 ]; then
-        echo "${hours}小时${minutes}分钟${seconds}秒"
-    else
-        echo "${minutes}分钟${seconds}秒"
-    fi
 }
 
 # 启动服务（参数：服务启动脚本路径 日志文件名名 模型路径 max_num_batched_tokens max_num_seqs max_model_len tensor_parallel_size mode）
@@ -210,135 +215,104 @@ is_service_bench_complete() {
     return 0
 }
 
-# 执行单个场景的完整测试流程
-# 参数说明：
-#   $1 - scenario_desc: 场景描述
-#   $2 - input_len: 输入token长度
-#   $3 - output_len: 输出token长度
-#   $4 - concurrency_list: 并发度列表（空格分隔）
-#   $5 - num_prompts_multiplier_list: num_prompts_multiplier列表，与concurrency_list一一对应（空格分隔）
-#   $6 - model_path: 模型路径
-#   $7 - max_num_batched_tokens: 最大批处理token数
-#   $8 - max_num_seqs: 最大序列数
-#   $9 - max_model_len: 最大模型长度
-#   $10 - tensor_parallel_size: 张量并行大小
-#   $11 - main_output_dir: 主输出目录（断点续测产物所在目录）
-run_scenario_test() {
-    local scenario_desc=$1
-    local input_len=$2
-    local output_len=$3
-    local concurrency_list=$4
-    local num_prompts_multiplier_list=$5
-    local model_path=$6
-    local max_num_batched_tokens=$7
-    local max_num_seqs=$8
-    local max_model_len=$9
-    local tensor_parallel_size=${10}
-    local main_output_dir=${11}
+# 判断某服务的所有场景所有并发度是否都已完成（服务外提复用结构下的服务级续测判据）。
+# 参数：service_tag model_name main_output_dir
+# 依赖全局：SCENARIOS（当前模型的场景表）、MODEL_SCENARIO_LIMIT（场景数）。
+# 返回码：0=该服务全部场景全部并发已完成, 1=有未完成项。
+is_service_all_scenarios_complete() {
+    local service_tag=$1
+    local model_name=$2
+    local main_output_dir=$3
+    for ((i=1; i<=MODEL_SCENARIO_LIMIT; i++)); do
+        IFS='|' read -r input_len output_len concurrency_list _mult <<< "${SCENARIOS[$i]}"
+        local result_dir="${main_output_dir}/result_input_${input_len}_output_${output_len}_${service_tag}_${model_name}"
+        if ! is_service_bench_complete "${result_dir}" "${concurrency_list}" "${input_len}" "${output_len}"; then
+            return 1
+        fi
+    done
+    return 0
+}
 
-    # 提取模型名称（从路径中获取最后一部分）
+# 执行单个服务的全部场景测试（服务外提复用结构：服务起一次，跑完所有场景再 kill）
+# 参数说明：
+#   $1 - service_mode: online_api_server.sh 的 mode 参数 (xlite_decode_only | xlite_full_mode | aclgraph)
+#   $2 - service_tag: result_input 目录命名用的服务标签 (xlite_decode_only | xlite_full | aclgraph)
+#   $3 - model_path: 模型路径
+#   $4 - max_num_batched_tokens: 最大批处理token数（模型级统一）
+#   $5 - max_num_seqs: 最大序列数（模型级统一）
+#   $6 - max_model_len: 最大模型长度（模型级统一）
+#   $7 - tensor_parallel_size: 张量并行大小（模型级统一）
+#   $8 - main_output_dir: 主输出目录（断点续测产物所在目录）
+# 依赖全局：SCENARIOS（当前模型的场景表，4字段 in|out|并发|mult）、MODEL_SCENARIO_LIMIT（场景数）。
+run_service_all_scenarios() {
+    local service_mode=$1
+    local service_tag=$2
+    local model_path=$3
+    local max_num_batched_tokens=$4
+    local max_num_seqs=$5
+    local max_model_len=$6
+    local tensor_parallel_size=$7
+    local main_output_dir=$8
+
     local model_name=$(basename "${model_path}")
 
-    # 记录开始时间
-    local start_time=$(date +%s)
-    local start_time_formatted=$(date "+%Y-%m-%d %H:%M:%S")
+    # service_tag -> 中文服务名 (便于日志直读)
+    local service_cn="未知服务"
+    case "${service_tag}" in
+        xlite_decode_only) service_cn="Xlite Decode Only" ;;
+        xlite_full)        service_cn="Xlite Full" ;;
+        aclgraph)          service_cn="Aclgraph" ;;
+    esac
+    # load_format 提示: dummy 分层加载时显示跑的层数, 否则全量
+    local load_info="全量加载"
+    if [ "${LF:-auto}" = "dummy" ] && [ -n "${N_LAYERS:-}" ] && [ "${N_LAYERS}" -gt 0 ]; then
+        load_info="dummy 加载, 只跑前 ${N_LAYERS} 层"
+    fi
 
     echo "======================================"
-    echo "场景：${scenario_desc}"
-    echo "输入长度：${input_len}，输出长度：${output_len}"
-    echo "并发列表：${concurrency_list}"
-    echo "num_prompts_multiplier列表：${num_prompts_multiplier_list}"
-    echo "模型路径：${model_path}"
+    echo "服务：${service_cn}（tag=${service_tag}, mode=${service_mode}）"
+    echo "模型：${model_name}（${load_info}）"
     echo "max_num_batched_tokens：${max_num_batched_tokens}"
     echo "max_num_seqs：${max_num_seqs}"
     echo "max_model_len：${max_model_len}"
     echo "tensor_parallel_size：${tensor_parallel_size}"
-    echo "开始时间：${start_time_formatted}"
+    echo "场景数：${MODEL_SCENARIO_LIMIT}"
     echo "======================================"
 
-    # Xlite Decode Only 服务
-    echo -e "\n>>> 测试 Xlite Decode Only 服务"
-    local decode_only_log="${main_output_dir}/server_${model_name}_input${input_len}_output${output_len}_xlite_decode_only.log"
-    local decode_only_result_dir="${main_output_dir}/result_input_${input_len}_output_${output_len}_xlite_decode_only_${model_name}"
-    # 断点续测：扫描已有产物，仅补跑未完成的并发度；全部完成则跳过该服务
-    filter_incomplete_concurrencies "${concurrency_list}" "${num_prompts_multiplier_list}" "${decode_only_result_dir}" "${input_len}" "${output_len}"
-    local decode_only_need=$?
-    if [ ${decode_only_need} -eq 0 ]; then
-        echo "[续测] Xlite Decode Only 所有并发度均已完成，跳过服务启动与压测"
-    else
-        echo "[续测] 待补跑并发度(${decode_only_need})：${FILTERED_CONCURRENCY}"
-        start_server "online_api_server.sh" "${decode_only_log}" "${model_path}" "${max_num_batched_tokens}" "${max_num_seqs}" "${max_model_len}" "${tensor_parallel_size}" "xlite_decode_only"
-        if ! wait_server_ready "${decode_only_log}"; then
-            echo "警告：Xlite Decode Only 服务启动失败，跳过此服务"
-            cleanup_all_processes
-        else
-            run_bench_scripts_sequential "online_server_test.sh" "xlite_decode_only_${model_name}" "${input_len}" "${output_len}" "qwen" "${model_path}" "127.0.0.1" "8080" "${FILTERED_CONCURRENCY}" "${FILTERED_MULTIPLIER}" "${main_output_dir}"
-            wait_10s "压测脚本执行完成，准备清理进程"
-            cleanup_all_processes
-        fi
+    # 服务级断点续测：该服务所有场景所有并发都已完成则跳过起服务
+    if is_service_all_scenarios_complete "${service_tag}" "${model_name}" "${main_output_dir}"; then
+        echo "[续测] ${service_cn} 所有场景均已完成，跳过服务启动与压测"
+        return 0
     fi
-    wait_10s "Xlite Decode Only 测试完成，准备下一个服务"
 
-    # Xlite Full 服务
-    echo -e "\n>>> 测试 Xlite Full 服务"
-    local full_log="${main_output_dir}/server_${model_name}_input${input_len}_output${output_len}_xlite_full.log"
-    local full_result_dir="${main_output_dir}/result_input_${input_len}_output_${output_len}_xlite_full_${model_name}"
-    filter_incomplete_concurrencies "${concurrency_list}" "${num_prompts_multiplier_list}" "${full_result_dir}" "${input_len}" "${output_len}"
-    local full_need=$?
-    if [ ${full_need} -eq 0 ]; then
-        echo "[续测] Xlite Full 所有并发度均已完成，跳过服务启动与压测"
-    else
-        echo "[续测] 待补跑并发度(${full_need})：${FILTERED_CONCURRENCY}"
-        start_server "online_api_server.sh" "${full_log}" "${model_path}" "${max_num_batched_tokens}" "${max_num_seqs}" "${max_model_len}" "${tensor_parallel_size}" "xlite_full_mode"
-        if ! wait_server_ready "${full_log}"; then
-            echo "警告：Xlite Full 服务启动失败，跳过此服务"
-            cleanup_all_processes
-        else
-            run_bench_scripts_sequential "online_server_test.sh" "xlite_full_${model_name}" "${input_len}" "${output_len}" "qwen" "${model_path}" "127.0.0.1" "8080" "${FILTERED_CONCURRENCY}" "${FILTERED_MULTIPLIER}" "${main_output_dir}"
-            wait_10s "压测脚本执行完成，准备清理进程"
-            cleanup_all_processes
-        fi
+    local service_log="${main_output_dir}/server_${model_name}_${service_tag}.log"
+    start_server "online_api_server.sh" "${service_log}" "${model_path}" "${max_num_batched_tokens}" "${max_num_seqs}" "${max_model_len}" "${tensor_parallel_size}" "${service_mode}"
+    if ! wait_server_ready "${service_log}"; then
+        echo "警告：${service_cn} 服务启动失败，跳过此服务"
+        cleanup_all_processes
+        return 1
     fi
-    wait_10s "Xlite Full 测试完成，准备下一个服务"
+    echo ">>> ${service_cn} 服务已就绪，开始压测 ${MODEL_SCENARIO_LIMIT} 个场景"
 
-    # Aclgraph 服务
-    echo -e "\n>>> 测试 Aclgraph 服务"
-    local aclgraph_log="${main_output_dir}/server_${model_name}_input${input_len}_output${output_len}_aclgraph.log"
-    local aclgraph_result_dir="${main_output_dir}/result_input_${input_len}_output_${output_len}_aclgraph_${model_name}"
-    filter_incomplete_concurrencies "${concurrency_list}" "${num_prompts_multiplier_list}" "${aclgraph_result_dir}" "${input_len}" "${output_len}"
-    local aclgraph_need=$?
-    if [ ${aclgraph_need} -eq 0 ]; then
-        echo "[续测] Aclgraph 所有并发度均已完成，跳过服务启动与压测"
-    else
-        echo "[续测] 待补跑并发度(${aclgraph_need})：${FILTERED_CONCURRENCY}"
-        start_server "online_api_server.sh" "${aclgraph_log}" "${model_path}" "${max_num_batched_tokens}" "${max_num_seqs}" "${max_model_len}" "${tensor_parallel_size}" "aclgraph"
-        if ! wait_server_ready "${aclgraph_log}"; then
-            echo "警告：Aclgraph 服务启动失败，跳过此服务"
-            cleanup_all_processes
-        else
-            run_bench_scripts_sequential "online_server_test.sh" "aclgraph_${model_name}" "${input_len}" "${output_len}" "qwen" "${model_path}" "127.0.0.1" "8080" "${FILTERED_CONCURRENCY}" "${FILTERED_MULTIPLIER}" "${main_output_dir}"
-            wait_10s "压测脚本执行完成，准备清理进程"
-            cleanup_all_processes
+    # 场景在内：逐场景压测（仅补跑未完成的并发度）
+    for ((i=1; i<=MODEL_SCENARIO_LIMIT; i++)); do
+        IFS='|' read -r input_len output_len concurrency_list multiplier_list <<< "${SCENARIOS[$i]}"
+        local result_dir="${main_output_dir}/result_input_${input_len}_output_${output_len}_${service_tag}_${model_name}"
+        echo -e "\n>>> [场景${i}/${MODEL_SCENARIO_LIMIT}] ${service_cn}：input=${input_len}, output=${output_len}, 并发=[${concurrency_list}], multiplier=[${multiplier_list}]"
+        filter_incomplete_concurrencies "${concurrency_list}" "${multiplier_list}" "${result_dir}" "${input_len}" "${output_len}"
+        local need=$?
+        if [ ${need} -eq 0 ]; then
+            echo "    [续测] 全部并发已完成，跳过压测"
+            continue
         fi
-    fi
-    wait_10s "Aclgraph 测试完成，准备下一个场景"
+        echo "    待补跑并发度(${need})：${FILTERED_CONCURRENCY}"
+        run_bench_scripts_sequential "online_server_test.sh" "${service_tag}_${model_name}" \
+            "${input_len}" "${output_len}" "qwen" "${model_path}" "127.0.0.1" "8080" \
+            "${FILTERED_CONCURRENCY}" "${FILTERED_MULTIPLIER}" "${main_output_dir}"
+    done
 
-    # 计算和和显示耗时
-    local end_time=$(date +%s)
-    local end_time_formatted=$(date "+%Y-%m-%d %H:%M:%S")
-    local duration=$((end_time - start_time))
-    local hours=$((duration / 3600))
-    local minutes=$(((duration % 3600) / 60))
-    local seconds=$((duration % 60))
-
-    echo -e "\n======================================"
-    echo "场景 ${scenario_desc} 全部完成！"
-    echo "结束时间：${end_time_formatted}"
-    echo "总耗时：${hours}小时 ${minutes}分钟 ${seconds}秒（${duration}秒）"
-    echo "======================================"
-
-    # 返回耗时（秒数）
-    echo "${duration}"
+    wait_10s "${service_cn} 压测完成，准备清理进程"
+    cleanup_all_processes
 }
 
 # 清理指定类型进程（避免无进程时kill报错，排除当前进程）
@@ -472,21 +446,36 @@ total_start_time=$(date +%s)
 total_start_time_formatted=$(date "+%Y-%m-%d %H:%M:%S")
 
 # 定义场景配置（按模型维度选择，all/quant 等组合模式下 moe_quant_a3 也用 A3 专属参数）
-# 格式：input_len|output_len|concurrency_list|num_prompts_multiplier_list|max_num_batched_tokens|max_num_seqs|max_model_len|tensor_parallel_size
+# 服务启动参数（模型级统一，覆盖该模型所有场景；服务外提后一个服务起一次跑全部场景，
+# 故 max_model_len/max_num_seqs 取各场景最大值以覆盖全部）。
+# vLLM 用分页 KV cache，max_model_len/max_num_seqs 仅是上限不预分配，统一为大值不影响实际 KV 占用。
+# DEFAULT 模型（moe/moe_quant/glm5_2_dummy，910B3/A2）：mnbt=8192, mns=96, mml=89600, tp=8
+DEFAULT_MNBT=8192
+DEFAULT_MNS=96
+DEFAULT_MML=89600
+DEFAULT_TP=8
+# A3 专属（moe_quant_a3，Ascend910(A3)）：mnbt=8192, mns=32, mml=22768, tp=16
+A3_MNBT=8192
+A3_MNS=32
+A3_MML=22768
+A3_TP=16
+
+# 场景配置：仅 in|out|并发|mult 四字段（服务启动参数已提取为上方模型级常量）。
+# 格式：input_len|output_len|concurrency_list|num_prompts_multiplier_list
 # num_prompts_multiplier_list 与 concurrency_list 一一对应，每个并发数对应各自的 multiplier
 declare -A SCENARIOS_DEFAULT
-SCENARIOS_DEFAULT[1]="512|512|1 16 32 48 64|10 10 10 10 10|8192|96|7168|8"
-SCENARIOS_DEFAULT[2]="3584|1536|1 16 32|10 10 10|8192|32|7168|8"
-SCENARIOS_DEFAULT[3]="8192|1024|1 16 32|10 10 10|8192|32|11264|8"
-SCENARIOS_DEFAULT[4]="16384|1536|1 16|10 10|8192|32|32768|8"
-SCENARIOS_DEFAULT[5]="32768|3072|1 8|10 10|8192|24|65536|8"
-SCENARIOS_DEFAULT[6]="65536|6144|1 4|10 10|8192|24|89600|8"
+SCENARIOS_DEFAULT[1]="512|512|1 16 32 48 64|10 10 10 10 10"
+SCENARIOS_DEFAULT[2]="3584|1536|1 16 32|10 10 10"
+SCENARIOS_DEFAULT[3]="8192|1024|1 16 32|10 10 10"
+SCENARIOS_DEFAULT[4]="16384|1536|1 16|10 10"
+SCENARIOS_DEFAULT[5]="32768|3072|1 8|10 10"
+SCENARIOS_DEFAULT[6]="65536|6144|1 4|10 10"
 
-# moe_quant_a3（GLM-5.2-w8a8）运行于 Ascend910(A3)，tp=16、max_num_batched_tokens=8192、A3 专属 max_model_len
+# moe_quant_a3（GLM-5.2-w8a8）运行于 Ascend910(A3)，用 A3 专属服务启动参数（见上方 A3_* 常量）
 declare -A SCENARIOS_A3
-SCENARIOS_A3[1]="3584|1536|1 16 32|8 4 4|8192|32|7168|16"
-SCENARIOS_A3[2]="8192|1024|1 16 32|8 4 4|8192|32|11264|16"
-SCENARIOS_A3[3]="16384|1536|1 16 32|8 4 4|8192|32|22768|16"
+SCENARIOS_A3[1]="3584|1536|1 16 32|8 4 4"
+SCENARIOS_A3[2]="8192|1024|1 16 32|8 4 4"
+SCENARIOS_A3[3]="16384|1536|1 16 32|8 4 4"
 
 # SCENARIOS 在 for model_type 循环内按当前模型选择，使 all/quant 模式下 moe_quant_a3 也使用 A3 专属参数
 declare -A SCENARIOS
@@ -496,85 +485,93 @@ declare -A MODEL_SCENARIO_COUNT
 MODEL_SCENARIO_COUNT[moe]=6
 MODEL_SCENARIO_COUNT[moe_quant]=6
 MODEL_SCENARIO_COUNT[moe_quant_a3]=3
+MODEL_SCENARIO_COUNT[glm5_2_dummy]=6
 
 # 用于存储每个模型的场景测试结果
 declare -A MODEL_TEST_RESULTS
 
 # 遍历所有要测试的模型
 for model_type in "${TEST_MODELS[@]}"; do
-    IFS='|' read -r TEST_MODEL TEST_MODEL_PATH <<< "${MODELS[$model_type]}"
+    IFS='|' read -r TEST_MODEL TEST_MODEL_PATH TEST_N_LAYERS <<< "${MODELS[$model_type]}"
+    TEST_N_LAYERS=${TEST_N_LAYERS:-0}
 
     # 获取当前模型需要测试的场景数量
     MODEL_SCENARIO_LIMIT=${MODEL_SCENARIO_COUNT[$model_type]}
 
     SCENARIOS=()
+    # 模型级服务启动参数与 device_type：moe_quant_a3 用 A3 专属, 其余用 DEFAULT
+    device_type="910B3(A2)"
     if [ "${model_type}" = "moe_quant_a3" ]; then
         for k in "${!SCENARIOS_A3[@]}"; do SCENARIOS[$k]="${SCENARIOS_A3[$k]}"; done
+        MNBT=${A3_MNBT}; MNS=${A3_MNS}; MML=${A3_MML}; TP=${A3_TP}
+        device_type="Ascend910(A3)"
     else
         for k in "${!SCENARIOS_DEFAULT[@]}"; do SCENARIOS[$k]="${SCENARIOS_DEFAULT[$k]}"; done
+        MNBT=${DEFAULT_MNBT}; MNS=${DEFAULT_MNS}; MML=${DEFAULT_MML}; TP=${DEFAULT_TP}
+    fi
+
+    # dummy 分层加载: 经 online_api_server.sh 的 N_LAYERS/LF 环境变量注入。
+    # 在本模型循环内 export, 循环末尾恢复, 避免污染后续模型。
+    SAVED_N_LAYERS="${N_LAYERS:-}"
+    SAVED_LF="${LF:-}"
+    if [ "${TEST_N_LAYERS}" -gt 0 ]; then
+        export N_LAYERS="${TEST_N_LAYERS}"
+        export LF="dummy"
+        echo "[dummy] ${TEST_MODEL}: 只跑前 ${TEST_N_LAYERS} 层"
+    else
+        unset N_LAYERS LF
     fi
 
     echo "======================================"
     echo "开始测试模型：${TEST_MODEL}"
     echo "测试场景数量：${MODEL_SCENARIO_LIMIT}"
+    echo "服务启动参数：mnbt=${MNBT} mns=${MNS} mml=${MML} tp=${TP}"
     echo "======================================"
 
     # 初始化当前模型的测试结果
     MODEL_TEST_RESULTS[$TEST_MODEL]=""
 
-    # 遍历场景执行测试
+    # 服务外提：3 服务各起一次, 每个服务跑完全部场景再 kill。
+    # 服务日志命名 server_<model>_<service>.log（每服务一个, 不再按场景分）。
+    run_service_all_scenarios "xlite_decode_only" "xlite_decode_only" "${TEST_MODEL_PATH}" \
+        "${MNBT}" "${MNS}" "${MML}" "${TP}" "${MAIN_OUTPUT_DIR}"
+    wait_10s "xlite_decode_only 完成，准备 xlite_full_mode"
+
+    run_service_all_scenarios "xlite_full_mode" "xlite_full" "${TEST_MODEL_PATH}" \
+        "${MNBT}" "${MNS}" "${MML}" "${TP}" "${MAIN_OUTPUT_DIR}"
+    wait_10s "xlite_full_mode 完成，准备 aclgraph"
+
+    run_service_all_scenarios "aclgraph" "aclgraph" "${TEST_MODEL_PATH}" \
+        "${MNBT}" "${MNS}" "${MML}" "${TP}" "${MAIN_OUTPUT_DIR}"
+
+    # 最后统一对比：3 服务的 result_input_* 目录此时都已填满, 逐场景生成对比报告。
+    # 此循环位于脚本顶层而非函数内，不可使用 local（set -u 下会因 unbound variable 退出）
     for ((i=1; i<=MODEL_SCENARIO_LIMIT; i++)); do
-        IFS='|' read -r input_len output_len concurrency_list num_prompts_multiplier_list max_num_batched_tokens max_num_seqs max_model_len tensor_parallel_size <<< "${SCENARIOS[$i]}"
-
-        # 记录场景测试结果
-        scenario_result="失败"
-        scenario_duration="N/A"
-
-        # 执行场景测试（捕获错误和耗时）
-        scenario_output=$(run_scenario_test \
-            "${TEST_MODEL}_场景${i}：输入${input_len}token,输出${output_len}token" \
-            "${input_len}" \
-            "${output_len}" \
-            "${concurrency_list}" \
-            "${num_prompts_multiplier_list}" \
-            "${TEST_MODEL_PATH}" \
-            "${max_num_batched_tokens}" \
-            "${max_num_seqs}" \
-            "${max_model_len}" \
-            "${tensor_parallel_size}" \
-            "${MAIN_OUTPUT_DIR}" | tee /dev/tty)
-        scenario_exit_code=${PIPESTATUS[0]}
-
-        # 检查场景测试是否成功
-        if [ ${scenario_exit_code} -ne 0 ]; then
-            echo -e "\n警告：场景${i}测试失败，跳过数据处理，继续下一个场景"
-            continue
-        fi
-
-        # 场景测试成功，标记为成功并提取耗时
-        scenario_result="成功"
-        scenario_duration=$(echo "${scenario_output}" | tail -n 1)
-        scenario_duration_formatted=$(format_duration ${scenario_duration})
-
-        # 处理场景数据（捕获错误）
-        # moe_quant_a3 运行于 Ascend910(A3)，其余默认 910B3(A2)
-        # 此循环位于脚本顶层而非函数内，不可使用 local（set -u 下会因 unbound variable 退出）
-        device_type="910B3(A2)"
-        if [ "${model_type}" = "moe_quant_a3" ]; then
-            device_type="Ascend910(A3)"
-        fi
-        if ! process_scenario_data "${TEST_MODEL}_场景${i}：输入${input_len}token,输出${output_len}token" "${input_len}" "${output_len}" "${TEST_MODEL}" "${tensor_parallel_size}" "${MAIN_OUTPUT_DIR}" "${device_type}"; then
+        IFS='|' read -r input_len output_len concurrency_list num_prompts_multiplier_list <<< "${SCENARIOS[$i]}"
+        if ! process_scenario_data "${TEST_MODEL}_场景${i}：输入${input_len}token,输出${output_len}token" \
+            "${input_len}" "${output_len}" "${TEST_MODEL}" "${TP}" "${MAIN_OUTPUT_DIR}" "${device_type}"; then
             echo -e "\n警告：场景${i}数据处理失败，继续下一个场景"
-            scenario_result="数据处理失败"
+            MODEL_TEST_RESULTS[$TEST_MODEL]="${MODEL_TEST_RESULTS[$TEST_MODEL]}场景${i}：输入${input_len}token,输出${output_len}token,并发数：${concurrency_list},tensor_parallel_size：${TP} - 数据处理失败\n"
+        else
+            MODEL_TEST_RESULTS[$TEST_MODEL]="${MODEL_TEST_RESULTS[$TEST_MODEL]}场景${i}：输入${input_len}token,输出${output_len}token,并发数：${concurrency_list},tensor_parallel_size：${TP} - 数据对比成功\n"
         fi
-
-        # 记录场景测试结果
-        MODEL_TEST_RESULTS[$TEST_MODEL]="${MODEL_TEST_RESULTS[$TEST_MODEL]}场景${i}：输入${input_len}token,输出${output_len}token,并发数：${concurrency_list},tensor_parallel_size：${tensor_parallel_size},耗时：${scenario_duration_formatted} - ${scenario_result}\n"
     done
 
     echo -e "\n======================================"
     echo "模型 ${TEST_MODEL} 的测试场景全部执行完成！"
     echo "======================================"
+
+    # 恢复 dummy 分层加载相关环境变量, 避免污染下一个模型
+    if [ -n "${SAVED_N_LAYERS}" ]; then
+        export N_LAYERS="${SAVED_N_LAYERS}"
+    else
+        unset N_LAYERS
+    fi
+    if [ -n "${SAVED_LF}" ]; then
+        export LF="${SAVED_LF}"
+    else
+        unset LF
+    fi
 done
 
 # 计算和显示总耗时
@@ -615,9 +612,18 @@ date_suffix=$(date +%Y%m%d)
 for model_type in "${TEST_MODELS[@]}"; do
     IFS='|' read -r TEST_MODEL TEST_MODEL_PATH <<< "${MODELS[$model_type]}"
     MODEL_SCENARIO_LIMIT=${MODEL_SCENARIO_COUNT[$model_type]}
+    # 重新选取该模型的场景表与 tp（汇总循环跨多模型，SCENARIOS 是上一轮循环的残留）
+    declare -A _SUMMARY_SCENARIOS=()
+    if [ "${model_type}" = "moe_quant_a3" ]; then
+        for k in "${!SCENARIOS_A3[@]}"; do _SUMMARY_SCENARIOS[$k]="${SCENARIOS_A3[$k]}"; done
+        _SUMMARY_TP=${A3_TP}
+    else
+        for k in "${!SCENARIOS_DEFAULT[@]}"; do _SUMMARY_SCENARIOS[$k]="${SCENARIOS_DEFAULT[$k]}"; done
+        _SUMMARY_TP=${DEFAULT_TP}
+    fi
     for ((i=1; i<=MODEL_SCENARIO_LIMIT; i++)); do
-        IFS='|' read -r input_len output_len concurrency_list num_prompts_multiplier_list max_num_batched_tokens max_num_seqs max_model_len tensor_parallel_size <<< "${SCENARIOS[$i]}"
-        echo "  - ${MAIN_OUTPUT_DIR}/benchmark_comparison_${TEST_MODEL}_input${input_len}_output${output_len}_tp${tensor_parallel_size}_${date_suffix}.log"
+        IFS='|' read -r input_len output_len concurrency_list num_prompts_multiplier_list <<< "${_SUMMARY_SCENARIOS[$i]}"
+        echo "  - ${MAIN_OUTPUT_DIR}/benchmark_comparison_${TEST_MODEL}_input${input_len}_output${output_len}_tp${_SUMMARY_TP}_${date_suffix}.log"
     done
 done
 echo ""

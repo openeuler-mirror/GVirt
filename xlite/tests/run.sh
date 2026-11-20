@@ -259,11 +259,15 @@ function run_deepseek_v3_w8a8()
 
 function run_deepseek_v4_w8a8()
 {
+    # 层数 (离线 bench 可裁剪, 如 10 层只测性能); 默认 43 = 完整模型。
+    local _n_layers=${XLITE_N_LAYERS:-43}
+    # checkpoint 目录名 (不同环境挂载名可能不同); 默认 DeepSeek-V4-Flash-w8a8-mtp。
+    local _ckpt_dir=${XLITE_DEEPSEEK_V4_W8A8_CKPT:-DeepSeek-V4-Flash-w8a8-mtp}
     echo '{
         "vocab_size": 129280,
         "dim": 4096,
         "moe_inter_dim": 2048,
-        "n_layers": 43,
+        "n_layers": '"$_n_layers"',
         "n_hash_layers": 3,
         "n_mtp_layers": 0,
         "n_heads": 64,
@@ -301,7 +305,7 @@ function run_deepseek_v4_w8a8()
         "max_batch_size": 1,
         "max_seq_len": 1024
     }' > $test_config_path
-    torchrun --nproc_per_node=${XLITE_DEVS_PER_NODE:-8} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model deepseek_v4 --ckpt-path $models_base_path/DeepSeek-V4-Flash-w8a8-mtp ${RUN_ARGS[@]}
+    torchrun --nproc_per_node=${XLITE_DEVS_PER_NODE:-8} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model deepseek_v4 --ckpt-path $models_base_path/$_ckpt_dir/ ${RUN_ARGS[@]}
     rm $test_config_path
 }
 

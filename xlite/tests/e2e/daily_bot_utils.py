@@ -29,6 +29,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -45,6 +46,10 @@ E2E_DIR = XLITE_DIR / "tests" / "e2e"
 # ====================== 全局配置 ======================
 # Webhook URL
 WEBHOOK_URL = "http://cid-service.huawei.com/service-ldap/msg/espace"
+# 单条消息实际发送字节数上限 (\\n-></br> 替换后的 UTF-8 字节数)。
+# 超过该上限平台会"发送成功但静默丢弃", 故 send_notification 会按行边界切分。
+# 经验值: ~4300B 安全 (实测 4495B 收到、5055B 丢失)。
+MAX_MESSAGE_BYTES = 4300
 # 机器IP地址
 MACHINE_IP = ""
 # 环境类型: blue 或 yellow，默认 yellow (可用 XLITE_ENV_TYPE 环境变量覆盖，便于传递给
@@ -781,9 +786,147 @@ def load_metrics_json(json_path: Path) -> dict:
 
 
 # ====================== 通知发送函数 ======================
+# 场景标题行: 在线 "N. input=..., output=..." / 离线 "N. ... in=... out=... bs=..."
+# 用作场景块的边界标记 (header 行如 📊/【/⚠️/↳/<font 都不以此开头)。
+_SCENARIO_TITLE_RE = re.compile(r"^\d+\. ")
+
+
+def _wire_bytes(s: str) -> int:
+    """s 经 "\\n"->"</br>" 替换后的 UTF-8 字节数 (平台实际收到的 content 字节数)。"""
+    return len(s.replace("\n", "</br>").encode("utf-8"))
+
+
+def _split_into_atomic_units(message: str) -> list[str]:
+    """把消息切成不可分割的原子单元。
+
+    性能报告 (在线/离线) 有场景结构: 每个场景以 "N. " 开头, 含标题+表头+数据行+
+    前一天子块。此时按场景边界切, 保证一个完整场景不会被劈到两条消息里。
+    无场景结构的消息 (如 failure report) 退回按行切分。
+    """
+    lines = message.split("\n")
+    has_scenarios = any(_SCENARIO_TITLE_RE.match(line) for line in lines)
+    if not has_scenarios:
+        return lines  # 行级原子单元
+    # 场景级: header (第一个场景标题之前的全部行) + 每个场景各成一个块
+    blocks: list[list[str]] = []
+    cur: list[str] = []
+    for line in lines:
+        if _SCENARIO_TITLE_RE.match(line) and cur:
+            blocks.append(cur)
+            cur = [line]
+        else:
+            cur.append(line)
+    if cur:
+        blocks.append(cur)
+    return ["\n".join(b) for b in blocks]
+
+
+def _truncate_to_wire(text: str, budget: int) -> str:
+    """把 text 截断到 wire 字节数 <= budget, 末尾追加 "…(已截断)" 占位。
+
+    用于单行仍超预算的终极兜底: 保证任何内容都能塞进一条消息送达,
+    宁可丢尾部也不让整条消息被平台静默丢弃。截断按 UTF-8 字符边界进行, 不会切碎多字节字符。
+    """
+    suffix = "…(已截断)"
+    suffix_bytes = _wire_bytes(suffix)
+    if _wire_bytes(text) <= budget:
+        return text
+    target = budget - suffix_bytes
+    if target <= 0:
+        return suffix[:budget]  # 极端情况: budget 连后缀都放不下
+    encoded = text.replace("\n", "</br>").encode("utf-8")
+    # 按字节截到 <= target, 再回退到完整 UTF-8 字符边界 (避免半个多字节字符)
+    cut = encoded[:target]
+    # 解码时 errors="ignore" 丢掉可能被截断的末尾多字节字符
+    truncated = cut.decode("utf-8", errors="ignore")
+    return truncated + suffix
+
+
+def _split_oversized_unit(unit: str, budget: int) -> list[str]:
+    """单个原子单元 (一个场景块) 超 budget 时的降级切分, 保证每段 <= budget。
+
+    降级顺序:
+      1. 单元内按行 (\n) 再切, 累积到 budget 即断段;
+      2. 单行仍超 budget 时, 对该行硬截断 + "…(已截断)" 后缀。
+
+    这是分片路径的终极兜底: 宁可拆场景/截断内容, 也不让超限消息被平台
+    "返回成功但静默丢弃"。日常场景块 ~1.5KB 离 4300B 余量充足, 此路径几乎不触发,
+    仅在单场景块异常膨胀时保底送达。
+    """
+    parts: list[str] = []
+    cur: list[str] = []
+    cur_bytes = 0
+    for line in unit.split("\n"):
+        line_bytes = _wire_bytes(line)
+        # cur 非空时加该行需 5B </br> 连接符
+        add = line_bytes + (5 if cur else 0)
+        # 单行本身就超 budget: 先把 cur 冲掉, 再对该行硬截断独占一段
+        if line_bytes > budget:
+            if cur:
+                parts.append("\n".join(cur))
+                cur = []
+                cur_bytes = 0
+            parts.append(_truncate_to_wire(line, budget))
+            continue
+        if cur and cur_bytes + add > budget:
+            parts.append("\n".join(cur))
+            cur = [line]
+            cur_bytes = line_bytes
+        else:
+            cur.append(line)
+            cur_bytes += add
+    if cur:
+        parts.append("\n".join(cur))
+    return parts
+
+
+def _split_message_for_wire(message: str, max_wire_bytes: int) -> list[str]:
+    """把 message 按原子单元边界切成多段, 使每段 (含段标记) 经 "\\n"->"</br>" 替换后的
+    UTF-8 字节数不超过 max_wire_bytes。
+
+    原子单元 = 一个完整场景 (性能报告) 或一行 (无场景结构的报告), 切分点不落在
+    场景内部, 故一个场景不会被劈到两条消息里。单个原子单元超预算时, 降级为单元内按行
+    再切 (仍超则硬截断加省略号), 保证任何内容都能送达, 不出现静默丢弃。
+    """
+    # 段标记 "(第i/N段)</br>" 的 wire 开销预留 (两位段号约 15B), 留余量
+    marker_reserve = 20
+    budget = max_wire_bytes - marker_reserve
+    units = _split_into_atomic_units(message)
+    segments: list[str] = []
+    cur: list[str] = []
+    cur_bytes = 0
+    for unit in units:
+        unit_bytes = _wire_bytes(unit)
+        # 单个原子单元本身超预算: 降级切分 (按行/硬截断), 不整段照发以免被静默丢弃
+        if unit_bytes > budget:
+            if cur:
+                segments.append("\n".join(cur))
+                cur = []
+                cur_bytes = 0
+            log_warning(f"单个原子单元 wire 字节数 {unit_bytes}B 超预算 {budget}B, 降级按行切分")
+            segments.extend(_split_oversized_unit(unit, budget))
+            continue
+        # 若 cur 非空, 加入该单元还需 5B 的 </br> 连接符
+        add = unit_bytes + (5 if cur else 0)
+        if cur and cur_bytes + add > budget:
+            segments.append("\n".join(cur))
+            cur = [unit]
+            cur_bytes = unit_bytes
+        else:
+            cur.append(unit)
+            cur_bytes += add
+    if cur:
+        segments.append("\n".join(cur))
+    return segments
+
+
 def send_notification(message: str, receiver_id: str | None = None):
     """
-    发送通知到
+    发送通知到 (超长时自动按场景边界切分为多条)
+
+    平台对单条消息有字节上限: 超长时返回成功但静默丢弃。故发送前若实际 wire 字节数
+    (\\n-></br> 替换后的 UTF-8 字节数) 超过 MAX_MESSAGE_BYTES, 按场景边界切分为多条
+    逐条发送, 每条加 "(第i/N段)" 标记; 无场景结构的消息退回按行切分。
 
     参数:
         message: 通知消息内容（支持HTML格式）
@@ -800,20 +943,36 @@ def send_notification(message: str, receiver_id: str | None = None):
         import urllib.request
 
         # 构建不使用代理的 opener，避免永久修改 os.environ
-        # ProxyHandler({}) 创建一个不使用任何代理的处理器
         proxy_handler = urllib.request.ProxyHandler({})
         opener = urllib.request.build_opener(proxy_handler)
 
-        # 将换行符转换为HTML换行
-        html_message = message.replace("\n", "</br>")
+        wire_bytes = _wire_bytes(message)
 
-        # 消息格式（支持HTML）
-        data = json.dumps({"content": html_message, "receiver": receiver_id}).encode("utf-8")
+        # 单条发送内容 (超长时切分)
+        if wire_bytes <= MAX_MESSAGE_BYTES:
+            contents = [message.replace("\n", "</br>")]
+        else:
+            segments = _split_message_for_wire(message, MAX_MESSAGE_BYTES)
+            total = len(segments)
+            log_info(f"消息超长 ({wire_bytes}B > {MAX_MESSAGE_BYTES}B), 切分为 {total} 条发送")
+            contents = []
+            for i, seg in enumerate(segments, 1):
+                seg_html = seg.replace("\n", "</br>")
+                if total > 1:
+                    seg_html = f"(第{i}/{total}段)</br>" + seg_html
+                contents.append(seg_html)
 
-        # 发送HTTP POST请求 (使用无代理的 opener)
-        req = urllib.request.Request(WEBHOOK_URL, data=data, headers={"Content-Type": "application/json"})
-        opener.open(req, timeout=60)
-        log_success("通知发送成功!")
+        total = len(contents)
+        for i, content in enumerate(contents, 1):
+            data = json.dumps({"content": content, "receiver": receiver_id}).encode("utf-8")
+            req = urllib.request.Request(WEBHOOK_URL, data=data, headers={"Content-Type": "application/json"})
+            opener.open(req, timeout=60)
+            if i < total:
+                time.sleep(0.3)  # 避免限流
+        if total > 1:
+            log_success(f"通知发送成功! (共 {total} 段)")
+        else:
+            log_success("通知发送成功!")
     except Exception as e:
         log_warning(f"通知发送失败: {e}")
         print("\n" + message)
