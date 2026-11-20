@@ -73,3 +73,30 @@ for weight_nz in [False, True]:
                             print(f"{e}")
                             print(f"torch_npu: {standard}")
                             print(f"xlite: {z}")
+
+# Large-vocab NZ regression: the GM->L1 batched copy's srcGap is uint16 (32B
+# blocks), so an NZ weight row pitch above 65535 blocks (lm_head vocab sizes
+# 98304/151936, and 65552 which overflows only on the 16-wide tail tile) used
+# to wrap around and silently load wrong rows.
+for n in [65552, 98304, 151936]:
+    m, k = 1, 4096
+    x = torch.randn(m, k, dtype=torch.bfloat16, device="npu:0")
+    y = torch.randn(n, k, dtype=torch.bfloat16, device="npu:0")
+    z = torch.zeros(m, n, dtype=torch.bfloat16, device="npu:0")
+    standard = F.linear(x, y, None)
+    y = torch_npu.npu_format_cast(y, 29)
+    torch.npu.synchronize()
+    matmul(rt, x, y, z, weight_nz=True, transpose=False)
+    torch.npu.synchronize()
+    # Own tolerances, not ATOL_RTOL: the error of a k=4096 dot product scales
+    # with the accumulation magnitude (~sqrt(k)), not the output value, so
+    # cancellation-prone outputs exceed the table's relative budget; ~1 abs is
+    # normal bf16 noise here, while the overflow this guards against reads
+    # entirely wrong rows and produces diffs of hundreds.
+    try:
+        torch.testing.assert_close(standard, z, atol=1.0, rtol=0.02)
+        print(f"[{m}, {k}] x [{n}, {k}] large-n NZ matmul executed!")
+    except AssertionError as e:
+        print(f"{e}")
+        print(f"torch_npu: {standard}")
+        print(f"xlite: {z}")

@@ -1330,11 +1330,8 @@ class Qwen3_5MoE(nn.Module):
                             layer.mlp.experts[i].down_proj.weight.data.transpose(0, 1).contiguous()
                         )
 
-        # CopyGmToL1 DataCopyParams strides are uint16: vocab > 65535 overflows; keep lm_head ND.
-        head_nz = self.xlite_weight_nz and self.args.vocab_size <= 65536
         if self.xlite_weight_nz:
-            if head_nz:
-                self.lm_head.weight.data = matrix_nd2nz(self.lm_head.weight)
+            self.lm_head.weight.data = matrix_nd2nz(self.lm_head.weight)
             for layer_id, layer in enumerate(self.layers):
                 if layer.is_full_attention:
                     # q/k/v stay ND until packed as [Q|K|V|Gate] in init_xlite_model.

@@ -155,15 +155,37 @@ __aicore__ inline void CopyGmToL1Nd2Nz(const LocalTensor<Dtype> &dst,
     }
 }
 
-// TODO: DataCopyParams.srcStride is uint16_t. The NZ B-matrix load passes
-// (nStride - nValue), which overflows for n > 65535 + nValue (e.g. a large-vocab
-// lm_head with n = 248320). Split the copy into chunks or fall back to ND until fixed.
+// DataCopyParams fields for GM->L1 are counted in 32-byte blocks, not elements:
+// a burst of `nValue` blocks is `nValue * 32B`, the per-burst GM pitch is
+// `nStride` blocks (`srcGap = nStride - nValue`), and the L1 destination
+// advances `nValue` blocks per burst (dstGap = 0, k-block rows contiguous).
+// The block counts coincide numerically with the element counts the callers
+// pass, for every dtype: one burst is one k-block row, i.e. kBlockSize k rows
+// of nValue elements, and kBlockSize is exactly the element count of a 32B
+// block (32*8/dtypeBits), so a burst is nValue blocks and the row pitch is
+// nStride blocks. srcGap is uint16_t, so a row pitch above 65535 blocks
+// (n > 65535 + nValue elements, e.g. a large-vocab lm_head with n = 151936,
+// or n = 65552 on a 16-wide tail tile) wraps around and the copy silently
+// reads the wrong rows. In that case issue one burst per row instead: each
+// row's GM source address is computed at full width in elements (one 32B
+// block is 32*8/dtypeBits elements, the quantity the callers name kBlockSize),
+// and the L1 row pitch is the burst length, so the L0B load path is
+// unaffected.
 template <typename Dtype>
 __aicore__ inline void CopyGmToL1(const LocalTensor<Dtype> &dst, const GlobalTensor<Dtype> &src,
                                   int nValue, int kBlockNum, int nStride)
 {
-    DataCopyParams repeatParams(kBlockNum, nValue, nStride - nValue, 0);
-    DataCopy(dst, src, repeatParams);
+    if (nStride - nValue > 0xFFFF) {
+        int dtypeBits = std::is_same<Dtype, int4b_t>::value ? 4 : (sizeof(Dtype) * BYTE_BITS);
+        int elemsPerBlock = 32 * BYTE_BITS / dtypeBits;
+        DataCopyParams rowParams(1, nValue, 0, 0);
+        for (int i = 0; i < kBlockNum; i++) {
+            DataCopy(dst[i * nValue * elemsPerBlock], src[i * nStride * elemsPerBlock], rowParams);
+        }
+    } else {
+        DataCopyParams repeatParams(kBlockNum, nValue, nStride - nValue, 0);
+        DataCopy(dst, src, repeatParams);
+    }
 }
 
 template <typename Dtype>

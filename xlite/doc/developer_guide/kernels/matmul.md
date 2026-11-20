@@ -63,6 +63,7 @@ deqScale: GM --MTE2--> L1(C1) --FIX--> C2PIPE2GM(fixpipe buffer)
 ```
 
 - A 矩阵 ND→NZ 转换由 DMA 硬件完成：`CopyGmToL1Nd2Nz` 使用 `DataCopy` 的 `Nd2NzParams`（`csrc/kernels/kernel_macro.h` 的 `CopyGmToL1Nd2Nz`），即 GM→L1 搬运时直接落成 NZ 分形布局；当 `srcDValue > 65535`（K 超过 16bit stride 上限）时退化为按行循环搬运。
+- `CopyGmToL1`（`csrc/kernels/kernel_macro.h` 的 `CopyGmToL1`）的 `DataCopyParams` 字段以 32 字节块为单位计数（burst 长度 `nValue` 块、GM 行距 `nStride` 块、L1 目的行距 `nValue` 块）；`srcGap` 为 uint16，NZ 权重行距超过 65535 块（如大词表 lm_head 的 n = 151936）时会回绕错读，此时退化为每行单独 `DataCopy`（源地址按元素全宽计算，1 块 = 32*8/dtypeBits 个元素），L1 布局不变。
 - B 矩阵按 `(transpose, nz)` 四种组合搬运（`csrc/kernels/matmul.h` 的 `Matmul::RunTileBody`，B GM→L1 四组合分支，关键字 `/* B GM -> L1 */`）：
     - `transpose=0, nz=0`：`CopyGmToL1Nd2Nz`，与 A 相同的 ND→NZ 硬件转换；
     - `transpose=0, nz=1`：`CopyGmToL1` 直接按 NZ 分形块拷贝（源已是 NZ）；

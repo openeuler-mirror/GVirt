@@ -2611,14 +2611,13 @@ void XModel::ForwardGetLogits(XRuntime &rt, XTensor &input, XTensor &indices, XT
     uint32_t batch = rt._batch;
     XTensor localOutput({output.shape[1], output.shape[2]}, output.dtype, output.ptr);
 
-    // TODO: drop the vocabSize cutoff once CopyGmToL1 handles srcStride > 65535 for NZ.
     if (batch < input.shape[0]) {
         XTensor &x = rt.GetTensor({batch, _c.hiddenSize}, input.dtype, DBG_LOC);
         XliteOpEmbed(rt, indices, input, 0, input.shape[0], x);
-        XliteOpMatmul(rt, x, head, localOutput, _c.weightNZ && _c.vocabSize <= 65536);
+        XliteOpMatmul(rt, x, head, localOutput, _c.weightNZ);
         rt.PutTensor(x);
     } else {
-        XliteOpMatmul(rt, input, head, localOutput, _c.weightNZ && _c.vocabSize <= 65536);
+        XliteOpMatmul(rt, input, head, localOutput, _c.weightNZ);
     }
 
     if (_c.defTpSize > 1) {
