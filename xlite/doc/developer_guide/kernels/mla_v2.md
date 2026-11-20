@@ -141,7 +141,7 @@ SFA-C8 在 host 接受独立的 INT8 `kCache[numBlocks, blockSize, 1, kvLoraRank
 
 ### 片上缓冲分配与占用汇总(AIC L1/L0A/L0B/L0C、AIV UB)
 
-AIC 侧 12 个 L1/L0 缓冲由共用的 `MlaAicHelper::Init`(`csrc/kernels/mla_aic_helper.h` 的 `MlaAicHelper::Init`)手动排布:QK 组与 SV 组各自在 L1(`TPosition::A1`)/L0A(`A2`)/L0B(`B2`)/L0C(`CO1`)上从偏移 0 累进 `bufferAddr`,L0 三级物理独立、各自从偏移 0 重新起排;**QK 组与 SV 组复用同一物理空间**——`RunAicQK` 收尾等待 `FIX_M`/`M_MTE1`/`MTE1_MTE2` 全部排空后才切换 `RunAicSV`,两相位在核内严格串行,各存储级物理占用按两相位取 max;`Init` 还用 host 提供的 `zeroGm` 把两份 `aktl1bBuf` 预填零(见上文 nan bug 修复)。AIV 侧 UB 由 softmax 函数在每次调用入口自偏移 0 现场排布,topK=0(全量 `RunAivSoftmaxLong`)与 topK>0(`RunAivSoftmaxPingPong`)两条路径互斥,占用亦取 max。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L1 512KB、L0A 64KB、L0B 64KB,L0C 总容量 256KB(`l0_c_size=262144`)为 CO1/CO2 两区之和,mmad 累加缓冲(`TPosition::CO1`)可用的 CO1 区为 **128KB**,下文 L0C 占用均按 CO1 128KB 计;AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每个 AIV subblock 各持一份独立 UB、布局相同。
+AIC 侧 12 个 L1/L0 缓冲由共用的 `MlaAicHelper::Init`(`csrc/kernels/mla_aic_helper.h` 的 `MlaAicHelper::Init`)手动排布:QK 组与 SV 组各自在 L1(`TPosition::A1`)/L0A(`A2`)/L0B(`B2`)/L0C(`CO1`)上从偏移 0 累进 `bufferAddr`,L0 三级物理独立、各自从偏移 0 重新起排;**QK 组与 SV 组复用同一物理空间**——`RunAicQK` 收尾等待 `FIX_M`/`M_MTE1`/`MTE1_MTE2` 全部排空后才切换 `RunAicSV`,两相位在核内严格串行,各存储级物理占用按两相位取 max;`Init` 还用 host 提供的 `zeroGm` 把两份 `aktl1bBuf` 预填零(见上文 nan bug 修复)。AIV 侧 UB 由 softmax 函数在每次调用入口自偏移 0 现场排布,topK=0(全量 `RunAivSoftmaxLong`)与 topK>0(`RunAivSoftmaxPingPong`)两条路径互斥,占用亦取 max。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L1 512KB、L0A 64KB、L0B 64KB,L0C 总容量 128KB（`l0_c_size=131072`，16 bank × 8KB），Mmad 累加缓冲即 `TPosition::CO1` 且占满整个 L0C;AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每个 AIV subblock 各持一份独立 UB、布局相同。
 
 dtype 记法:mla_v2 仅 BF16 单路径(`csrc/kernels/mla_v2_bfloat16_t.cpp`),`Dtype=bfloat16_t`(2B);几何常量(`MlaAicHelper::Init`)为 `qkk0=256/sizeof(Dtype)=128`、`qkn0=dense?MAX_N0:blockSize`、`svn0=256`、`svk0=64`。典型配置取 DeepSeek-V3 档(`tests/kernels/mla.py` 的 `models` 表):nHeads=16、kvLoraRank=512、ropeHeadDim=64、blockSize=128——AIC 缓冲大小只依赖 `XLITE_MAX_M0`/kvLoraRank/ropeHeadDim,与 nHeads 无关(dense 时 qkn0=MAX_N0=128,与 blockSize=128 同值);AIV 侧按短序列路径上限 maxSeqLen=8192(`tile_size_of_cached_kv` 默认值,超过即路由 flash_mla_v2)与 DSA topK=2048 代入,下表 shape 为逻辑形状(L1/L0 内实际按 Nd2Nz/NZ 分形排布)。
 
@@ -179,7 +179,7 @@ dtype 记法:mla_v2 仅 BF16 单路径(`csrc/kernels/mla_v2_bfloat16_t.cpp`),`Dt
 | **SV 相位小计** | | | | | | **65536** |
 | **合计(峰值 = max(两相位))** | | | | | | **65536** |
 
-**AIC L0C(CO1 区,容量 128KB,总容量 256KB 含 CO2;两相位复用)**
+**AIC L0C(CO1 区,容量 128KB;两相位复用)**
 
 | 变量 | 相位 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
 |---|---|---|---|---|---|---|

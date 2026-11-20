@@ -111,7 +111,7 @@ AIC 在 QK 写完后 `ffts_cross_core_sync(PIPE_FIX, config)`(flagIdx=0,inner-gr
 
 ### 片上缓冲分配与占用汇总(AIC L1/L0A/L0B/L0C、AIV UB)
 
-AIC 侧由 `AicHelper::Init`(`csrc/kernels/attention_aic_helper.h` 的 `AicHelper::Init`)静态排布:L1 上 `l1aBuf`(`TPosition::A1`)与 `l1bBuf`(`TPosition::B1`)同处 512KB 物理存储、`bufferAddr` 连续累进,各持两份乒乓;L0A/L0B/L0C 三级物理独立、各自从偏移 0 重新起排,唯 `l0aBuf[1]` 置于 `l0aSvBytes` 偏移处——QK 的 Q 固定占用 buf0,SV 阶段 buf0/buf1 乒乓,两阶段顺序执行故可复用同一 64KB。AIV 侧无 Init 静态布局:`RunAivSoftmaxLong`(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxLong`)在每次调用入口按运行期参数从偏移 0 排布 UB,函数退出即释放;超长行的中间 exp 走 GM 的 `expBuf`(qk workspace 尾部 4 行),不占 UB。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L0A 64KB、L0B 64KB、L1 512KB,L0C 总容量 256KB(`l0_c_size=262144`)为 CO1/CO2 两区之和,mmad 累加缓冲(`TPosition::CO1`)可用的 CO1 区为 **128KB**,下文 L0C 占用均按 CO1 128KB 计;AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每个 AIV subblock 各持一份独立 UB。
+AIC 侧由 `AicHelper::Init`(`csrc/kernels/attention_aic_helper.h` 的 `AicHelper::Init`)静态排布:L1 上 `l1aBuf`(`TPosition::A1`)与 `l1bBuf`(`TPosition::B1`)同处 512KB 物理存储、`bufferAddr` 连续累进,各持两份乒乓;L0A/L0B/L0C 三级物理独立、各自从偏移 0 重新起排,唯 `l0aBuf[1]` 置于 `l0aSvBytes` 偏移处——QK 的 Q 固定占用 buf0,SV 阶段 buf0/buf1 乒乓,两阶段顺序执行故可复用同一 64KB。AIV 侧无 Init 静态布局:`RunAivSoftmaxLong`(`csrc/kernels/softmax_attn_aiv.h` 的 `RunAivSoftmaxLong`)在每次调用入口按运行期参数从偏移 0 排布 UB,函数退出即释放;超长行的中间 exp 走 GM 的 `expBuf`(qk workspace 尾部 4 行),不占 UB。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L0A 64KB、L0B 64KB、L1 512KB,L0C 总容量 128KB（`l0_c_size=131072`，16 bank × 8KB），Mmad 累加缓冲即 `TPosition::CO1` 且占满整个 L0C;AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每个 AIV subblock 各持一份独立 UB。
 
 dtype 记法:`Dtype` 为 qkv/KV cache/qk 的元素类型,fp16 与 bf16 实例化(见上文)均为 2B,故 AIC 与 UB 占用均与 dtype 无关,下表只给单占用列。典型配置取 llama_7B_TP1 的 MHA:nHeads=nKVHeads=32、headSize=128、blockSize=128(`tests/kernels/attention.py` 的 `models` 列表);`AicHelper` 的 L1/L0 布局只依赖 headSize/blockSize/`XLITE_MAX_M0`/dtype,与 nHeads/nKVHeads 无关,该配置下 `cubeKvTile` 维持 blockSize=128 不收缩。AIV 侧 UB 仅 `max`/`sum` 两槽随行宽变化,下表按最长工作负载(`work` 列表的 `(2, [131071]*2, [1]*2)` decode,qk 行宽 `maxSeqLen=131072`、`outN=131072`)计。
 
@@ -137,7 +137,7 @@ dtype 记法:`Dtype` 为 qkv/KV cache/qk 的元素类型,fp16 与 bf16 实例化
 | `l0bBuf` | `(cubeKvTile, headSize)` | Dtype | 2(事件2/3) | `cubeKvTile*headSize*sizeof(Dtype)` | 65536 |
 | **合计** | | | | | **65536** |
 
-**AIC L0C(CO1 区,容量 128KB;总容量 256KB 含 CO2)**
+**AIC L0C(CO1 区,容量 128KB)**
 
 | 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
 |---|---|---|---|---|---|

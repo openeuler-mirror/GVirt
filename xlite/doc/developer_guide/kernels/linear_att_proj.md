@@ -50,7 +50,7 @@ Python 入口 `linear_att_proj(rt, x, W_qkv, W_z, W_b, W_a, mix_qkv, z, b, a, m,
 
 ### 片上缓冲分配与占用汇总(子算子 AIV UB / AIC L1/L0A/L0B/L0C)
 
-本算子无独立 kernel,片上缓冲按实际调用的三个子算子 kernel 计:`concat_col` 与 `split`(`csrc/kernels/concat.cpp`、`csrc/kernels/split.cpp`,AIV,UB 两半乒乓平分)、`matmul_<dtype>`(`csrc/kernels/matmul.h` 的 `Matmul::Init`,AIC,L1/L0A/L0B/L0C 累进 `bufferAddr`)。三次 launch 在同一 stream 上顺序执行,占用并列呈现、不叠加。硬件容量基准(910B/dav C220,CANN 平台配置):UB 192KB(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`)、L1 512KB、L0A 64KB、L0B 64KB,L0C 总容量 256KB 为 CO1/CO2 两区之和,mmad 累加缓冲(`TPosition::CO1`)可用的 CO1 区为 128KB,下文 L0C 占用按 CO1 128KB 计。dtype 记法:`Dtype` 为 x/权重元素类型(FP16/BF16,均 2B)、`MatDtype` 为 mmad 累加器类型(float,4B)——两条 dtype 路径元素同为 2B,占用一致,单占用列。典型模型配置(取 kernel 测试 `tests/kernels/linear_att_proj.py`):m=4096、k=1024、n+v+h+h=8224(N=6144、V=2048、H=16+16),matmul 经 `PickMatmulTiling`(`csrc/auto_tuner.cpp` 的 `PickMatmulTiling`)选定 m0=128、n0=256、k0=256,无 bias/deqScale。
+本算子无独立 kernel,片上缓冲按实际调用的三个子算子 kernel 计:`concat_col` 与 `split`(`csrc/kernels/concat.cpp`、`csrc/kernels/split.cpp`,AIV,UB 两半乒乓平分)、`matmul_<dtype>`(`csrc/kernels/matmul.h` 的 `Matmul::Init`,AIC,L1/L0A/L0B/L0C 累进 `bufferAddr`)。三次 launch 在同一 stream 上顺序执行,占用并列呈现、不叠加。硬件容量基准(910B/dav C220,CANN 平台配置):UB 192KB(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`)、L1 512KB、L0A 64KB、L0B 64KB,L0C 总容量 128KB（`l0_c_size=131072`，16 bank × 8KB），Mmad 累加缓冲即 `TPosition::CO1` 且占满整个 L0C。dtype 记法:`Dtype` 为 x/权重元素类型(FP16/BF16,均 2B)、`MatDtype` 为 mmad 累加器类型(float,4B)——两条 dtype 路径元素同为 2B,占用一致,单占用列。典型模型配置(取 kernel 测试 `tests/kernels/linear_att_proj.py`):m=4096、k=1024、n+v+h+h=8224(N=6144、V=2048、H=16+16),matmul 经 `PickMatmulTiling`(`csrc/auto_tuner.cpp` 的 `PickMatmulTiling`)选定 m0=128、n0=256、k0=256,无 bias/deqScale。
 
 **concat_col / split(AIV UB,容量 192KB,每 block 一份;两 kernel 布局相同)**
 
@@ -81,7 +81,7 @@ Python 入口 `linear_att_proj(rt, x, W_qkv, W_z, W_b, W_a, mix_qkv, z, b, a, m,
 | `l0bBuf` | (n0, k0/4) = (256, 64) | Dtype | 2(事件 EVENT_ID0/1,M↔MTE1) | `n0*(k0/4)*sizeof(Dtype)` B | 65536 |
 | **合计** | | | | | **65536** |
 
-**matmul(AIC L0C CO1 区,容量 128KB;总容量 256KB 含 CO2)**
+**matmul(AIC L0C CO1 区,容量 128KB)**
 
 | 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
 |---|---|---|---|---|---|

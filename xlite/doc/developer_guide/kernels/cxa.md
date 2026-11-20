@@ -146,7 +146,7 @@ tests/kernels/cxa.py 覆盖 5 种模型配置(base-swa、swa、c128a、c4a-ntok�
 
 ### 片上缓冲分配与占用汇总(AIC L1/L0A/L0B/L0C、AIV UB)
 
-`csrc/kernels/cxa_aic_helper.h` 的 `CxaAicHelper::Init` 手动排布 AIC 侧全部片上缓冲:每级在 `TPosition::A1/A2/B2/CO1` 上累进 `bufferAddr`,且 **QK 段与 SV 段在同级的偏移各自从 0 重新起排**——`RunAic` 中 QK 与 SV 是串行阶段(`RunAicQK` 完全结束、FIX 把分数写回 scores workspace 之后才 `wait_flag_dev(1)` 进入 `RunAicSV`),两段物理上互斥复用同一块地址空间,该级实际占用取两段布局的较大者(下文各表按段分列,汇总按 max 聚合)。AIV 侧 `RunAivSoftmaxLong` / `RunAivSoftmaxPingPong`(`csrc/kernels/softmax_attn_aiv.h`)为函数内联排布:`off` 从 0 顺序累进,每槽按 `VECTOR_MAX_BYTESIZE=256B` 向上对齐。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L1 512KB、L0A 64KB、L0B 64KB,L0C 总容量 256KB(`l0_c_size=262144`)系 CO1/CO2 两区之和,mmad 累加(`TPosition::CO1`)可用的 CO1 区为 **128KB**,下文 L0C 占用均按 CO1 128KB 计;AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`),每个 AIV subblock 各持一份独立 UB。
+`csrc/kernels/cxa_aic_helper.h` 的 `CxaAicHelper::Init` 手动排布 AIC 侧全部片上缓冲:每级在 `TPosition::A1/A2/B2/CO1` 上累进 `bufferAddr`,且 **QK 段与 SV 段在同级的偏移各自从 0 重新起排**——`RunAic` 中 QK 与 SV 是串行阶段(`RunAicQK` 完全结束、FIX 把分数写回 scores workspace 之后才 `wait_flag_dev(1)` 进入 `RunAicSV`),两段物理上互斥复用同一块地址空间,该级实际占用取两段布局的较大者(下文各表按段分列,汇总按 max 聚合)。AIV 侧 `RunAivSoftmaxLong` / `RunAivSoftmaxPingPong`(`csrc/kernels/softmax_attn_aiv.h`)为函数内联排布:`off` 从 0 顺序累进,每槽按 `VECTOR_MAX_BYTESIZE=256B` 向上对齐。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L1 512KB、L0A 64KB、L0B 64KB,L0C 总容量 128KB（`l0_c_size=131072`，16 bank × 8KB），Mmad 累加缓冲即 `TPosition::CO1` 且占满整个 L0C;AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`),每个 AIV subblock 各持一份独立 UB。
 
 dtype 记法:`CXA<Dtype>` 仅以 bfloat16_t 实例化(`csrc/kernels/cxa_bfloat16_t.cpp`),`Dtype`=bf16(2B),L0C mmad 累加器为 float(4B);AIV UB 布局随 `Dtype` 与运行期行宽缩放,单 dtype 无需分列。典型配置取 `tests/kernels/cxa.py` 的 c4a-topk 模型(nHeads=16、headDim=512、windowSize=128,即 `swaSegWidth = windowSize + XLITE_MAX_M0 + K_BLOCK_SIZE_2B = 272`、compressRatio=4、indexTopK=512、swaBlockSize=64、compressBlockSize=128)与 decode 工作负载 `(1, [4096], [1])`(sparse 由 lens 推导 `kvSize = ROUND_UP(4097/4, 4*CXA_SVCK0) = 1024`,`qkStride = 272+1024 = 1296`);tiling 常量为 `qkwn0=swaBlockSize=64`、`qkcn0=dense?MAX_N0:compressBlockSize=128`(dense 模式 host 传 `compressBlockSize=0`,helper 内改取 `MAX_N0=128`,与 sparse 取值一致)、`qkk0=256/sizeof(Dtype)=128`、`svn0=(swaBlockSize<=CXA_SVCK0)?256:128=256`、`svwk0=64`、`svck0=CXA_SVCK0=64`、`svwkMax=max(svwk0,svck0)=64`。下表 shape 为逻辑形状(L1/L0 内实际按 Nd2Nz/NZ 分形排布),占用 = 单份大小 × 乒乓个数。
 
@@ -196,7 +196,7 @@ dtype 记法:`CXA<Dtype>` 仅以 bfloat16_t 实例化(`csrc/kernels/cxa_bfloat16
 | `svl0bBuf` | `(svn0, svwkMax)`=(256, 64) | bf16 | 2(事件0/1) | `svn0*svwkMax*sizeof(Dtype)` | 65536 |
 | **合计** | | | | | **65536** |
 
-**AIC L0C(CO1 区,容量 128KB;总容量 256KB 含 CO2)——QK 段**
+**AIC L0C(CO1 区,容量 128KB)——QK 段**
 
 | 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
 |---|---|---|---|---|---|
@@ -263,7 +263,7 @@ dtype 记法:`CXA<Dtype>` 仅以 bfloat16_t 实例化(`csrc/kernels/cxa_bfloat16
 
 要点:
 
-- **`svl0cBuf` = XLITE_MAX_M0(128)×svn0(256)×4B = 128KB,恰好顶满 CO1 区**——这是「L0C 配置 `l0_c_size=262144` 系 CO1/CO2 两区之和、mmad 累加(`TPosition::CO1`)只能用 CO1 128KB」的直接实证(swaBlockSize≤CXA_SVCK0=64 时 svn0=256);QK 段的 `qkl0cBuf`(64KB)与之各自从 CO1 偏移 0 起排,靠 QK/SV 串行互斥复用同一地址空间、同刻只有一段活跃——若按两段相加(192KB)计将超出 CO1,互斥复用是该布局容得下的前提;
+- **`svl0cBuf` = XLITE_MAX_M0(128)×svn0(256)×4B = 128KB,恰好顶满 CO1 区**——该 128KB tile 仅证 CO1 ≥ 128KB 的下界,与 L0C 总容量 128KB(`l0_c_size=131072`,16 bank × 8KB)相符(swaBlockSize≤CXA_SVCK0=64 时 svn0=256);QK 段的 `qkl0cBuf`(64KB)与之各自从 CO1 偏移 0 起排,靠 QK/SV 串行互斥复用同一地址空间、同刻只有一段活跃——若按两段相加(192KB)计将超出 CO1,互斥复用是该布局容得下的前提;
 - **L0A/L0B 同样顶满 64KB**:QK 段 `qkl0aBuf`/`qkl0bBuf` 乒乓各 64KB,SV 段 `svl0bBuf` 乒乓(svn0=256、svwkMax=64)也恰 64KB;`CxaAicHelper::Init` 中 svn0 的自适应取值(swaBlockSize > CXA_SVCK0 时减半为 128,见代码注释「Halve svn0 … so it fits (64KB)」)正是为保 SV 段 L0B 不溢出;
 - **host 校验 `nHeads <= XLITE_MAX_M0=128` 的容量来源**:AIC 把一个 query token 的全部头(`mSize = queryTaskLen*nHeads` 行)装进 XLITE_MAX_M0 行的 L1 A/L0A 缓冲与 qk workspace(`csrc/op.cpp` 的 `XliteOpCXA` 校验;dense 模式直接 `m0 = nHeads`,一 token 一 tile);L1 的大头是 QK 段的 `ql1aBuf`+`kl1bBuf`(headDim=512 下 Q 整拷 128KB + K 四 tile 预取双缓冲 256KB,共 75%);
 - **AIV UB 双布局**:topk 路径按 `len` 动态排布(典型 decode 仅 31232B),无 topk 路径按 `MAX_SUB_CONTEXT_SIZE=16256` 固定分块(163840B、不随行宽增长、支持任意行宽);两版上限由 `csrc/kernels/softmax_attn_aiv.h` 的 `static_assert` 按 `MAX_SOFTMAX_PINGPONG_LEN=10496`/`MAX_TOPK_NUM=2048`/`MAX_SWA_SEG_WIDTH=4096` 编译期校验,行宽超 `MAX_SOFTMAX_PINGPONG_LEN` 由 Python 侧路由改走 flash_cxa(flash 的行宽 `swaSegWidth + tileSizeOfCachedKV` 另经 `csrc/op.cpp` 的 `XliteOpFlashCXA` 校验 ≤ 10496,另有 `swaSegWidth ≤ MAX_SWA_SEG_WIDTH` 前置校验)。

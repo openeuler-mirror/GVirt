@@ -103,7 +103,7 @@ topkIndices 形状 `[total_tokens, topK]`,按 `topkIndices + topK * queryTaskOff
 
 ### 片上缓冲分配与占用汇总(AIC L1/L0A/L0B/L0C、AIV UB)
 
-AIC 侧与 mla_v2 完全共用 `MlaAicHelper` 的 12 个 L1/L0 缓冲(`csrc/kernels/mla_aic_helper.h` 的 `MlaAicHelper::Init`,flash 的 `Init` 传入同一组几何参数,仅 qkStride 换成 tileSizeOfCachedKV,不影响布局):QK 组与 SV 组各自在 L1(`TPosition::A1`)/L0A(`A2`)/L0B(`B2`)/L0C(`CO1`)上从偏移 0 累进 `bufferAddr`,L0 三级物理独立;**QK 组与 SV 组复用同一物理空间**,两相位在核内经 set/wait_flag 严格串行(KV tile 上先 `RunAicQK` 后 `RunAicSV`),各存储级物理占用按两相位取 max;`Init` 用 `zeroGm` 把两份 `aktl1bBuf` 预填零。AIV 侧 UB 由 softmax 函数在每次调用入口自偏移 0 现场排布,tile softmax(`RunAivSoftmaxPingPong`,saveMaxSum=true)与 online update(`RunAivSoftmaxUpdate`)两个布局串行复用同一 UB,占用取 max。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L1 512KB、L0A 64KB、L0B 64KB,L0C 总容量 256KB 为 CO1/CO2 两区之和,mmad 累加(`TPosition::CO1`)可用的 CO1 区为 **128KB**,下文 L0C 占用均按 CO1 128KB 计;AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每个 AIV subblock 各持一份独立 UB、布局相同。
+AIC 侧与 mla_v2 完全共用 `MlaAicHelper` 的 12 个 L1/L0 缓冲(`csrc/kernels/mla_aic_helper.h` 的 `MlaAicHelper::Init`,flash 的 `Init` 传入同一组几何参数,仅 qkStride 换成 tileSizeOfCachedKV,不影响布局):QK 组与 SV 组各自在 L1(`TPosition::A1`)/L0A(`A2`)/L0B(`B2`)/L0C(`CO1`)上从偏移 0 累进 `bufferAddr`,L0 三级物理独立;**QK 组与 SV 组复用同一物理空间**,两相位在核内经 set/wait_flag 严格串行(KV tile 上先 `RunAicQK` 后 `RunAicSV`),各存储级物理占用按两相位取 max;`Init` 用 `zeroGm` 把两份 `aktl1bBuf` 预填零。AIV 侧 UB 由 softmax 函数在每次调用入口自偏移 0 现场排布,tile softmax(`RunAivSoftmaxPingPong`,saveMaxSum=true)与 online update(`RunAivSoftmaxUpdate`)两个布局串行复用同一 UB,占用取 max。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L1 512KB、L0A 64KB、L0B 64KB,L0C 总容量 128KB（`l0_c_size=131072`，16 bank × 8KB），Mmad 累加缓冲即 `TPosition::CO1` 且占满整个 L0C;AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每个 AIV subblock 各持一份独立 UB、布局相同。
 
 dtype 记法:flash_mla_v2 仅 BF16 单路径(`csrc/kernels/flash_mla_v2_bfloat16_t.cpp`),`Dtype=bfloat16_t`(2B);几何常量(`MlaAicHelper::Init`)为 `qkk0=256/sizeof(Dtype)=128`、`qkn0=dense?MAX_N0:blockSize`、`svn0=256`、`svk0=64`。典型配置:kvLoraRank=512、ropeHeadDim=64、blockSize=128(AIC 缓冲大小只依赖 `XLITE_MAX_M0`/kvLoraRank/ropeHeadDim,与 nHeads 无关);AIV 侧按 tileSizeOfCachedKV=8192(Python 接口默认值,亦为 host 上限内常用档)与 DSA topK=2048 代入,update 的 headSize=kvLoraRank=512;下表 shape 为逻辑形状(L1/L0 内实际按 Nd2Nz/NZ 分形排布)。
 
@@ -141,7 +141,7 @@ dtype 记法:flash_mla_v2 仅 BF16 单路径(`csrc/kernels/flash_mla_v2_bfloat16
 | **SV 相位小计** | | | | | | **32768** |
 | **合计(峰值 = max(两相位))** | | | | | | **65536** |
 
-**AIC L0C(CO1 区,容量 128KB,总容量 256KB 含 CO2;两相位复用)**
+**AIC L0C(CO1 区,容量 128KB;两相位复用)**
 
 | 变量 | 相位 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
 |---|---|---|---|---|---|---|

@@ -74,7 +74,7 @@ tile 遍历顺序由 `GetMNBlockIdx` 按 host 传入的 swizzle(方向 Zn/Nz + �
 
 ### 片上缓冲分配与占用汇总(AIC L1/L0A/L0B/L0C)
 
-`Matmul::Init`(`csrc/kernels/matmul.h` 的 `Matmul::Init`)按 tile 形状静态排布:L1 上 `l1aBuf`(`TPosition::A1`)与 `l1bBuf`(`TPosition::B1`)同处 512KB 物理存储、`bufferAddr` 连续累进,各持两份乒乓(bias/deqScale 的 `l1BiasBuf`/`l1DeqScaleBuf` 与 `l1bBuf` 区段衔接,本算子 `hasBias=hasDeqScale=false` 不占槽位);L0A/L0B/L0C 物理独立、各自从偏移 0 重新起排。host 侧 launch 固定传 `MATMUL_M0_N0_K0_DEFAULT_VALUE`(=(uint64_t)-1,`csrc/kernels/kernel_macro.h` 的 `MATMUL_M0_N0_K0_DEFAULT_VALUE`,调用见 `csrc/op.cpp` 的 `XliteOpEinsumMhtHdtMhd`),kernel 内解析为 `m0=128、n0=256、k0=512*BYTE_BITS/dtypeBits`,并派生 `kDtileSize=2*k0`(A 的 K 方向预取窗)与 `kQtileSize=k0/4`(L1→L0 下搬粒度)。本算子 `KERNEL_TYPE_AIC_ONLY`,无 AIV/UB。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置):L0A 64KB、L0B 64KB、L1 512KB,L0C 总容量 256KB(`l0_c_size=262144`)为 CO1/CO2 两区之和,mmad 累加缓冲(`TPosition::CO1`)可用的 CO1 区为 **128KB**,下文 L0C 占用均按 CO1 128KB 计。
+`Matmul::Init`(`csrc/kernels/matmul.h` 的 `Matmul::Init`)按 tile 形状静态排布:L1 上 `l1aBuf`(`TPosition::A1`)与 `l1bBuf`(`TPosition::B1`)同处 512KB 物理存储、`bufferAddr` 连续累进,各持两份乒乓(bias/deqScale 的 `l1BiasBuf`/`l1DeqScaleBuf` 与 `l1bBuf` 区段衔接,本算子 `hasBias=hasDeqScale=false` 不占槽位);L0A/L0B/L0C 物理独立、各自从偏移 0 重新起排。host 侧 launch 固定传 `MATMUL_M0_N0_K0_DEFAULT_VALUE`(=(uint64_t)-1,`csrc/kernels/kernel_macro.h` 的 `MATMUL_M0_N0_K0_DEFAULT_VALUE`,调用见 `csrc/op.cpp` 的 `XliteOpEinsumMhtHdtMhd`),kernel 内解析为 `m0=128、n0=256、k0=512*BYTE_BITS/dtypeBits`,并派生 `kDtileSize=2*k0`(A 的 K 方向预取窗)与 `kQtileSize=k0/4`(L1→L0 下搬粒度)。本算子 `KERNEL_TYPE_AIC_ONLY`,无 AIV/UB。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置):L0A 64KB、L0B 64KB、L1 512KB,L0C 总容量 128KB（`l0_c_size=131072`，16 bank × 8KB），Mmad 累加缓冲即 `TPosition::CO1` 且占满整个 L0C。
 
 dtype 记法:`Dtype` 为 mht/hdt/mhd 三张量的元素类型,`MatDtype` 为 mmad 累加/偏置类型(实例化 `Matmul<Dtype, float, Dtype>`,见 `csrc/kernels/einsum_mht_hdt_mhd.h` 的 `EINSUM_MHT_HDT_MHD_FUNC_DEFINE`);fp16 与 bf16 均为 2B、dtypeBits=16,即 **k0=256**(`kDtileSize=512`、`kQtileSize=64`),两条路径占用相同,下表只给单占用列。缓冲大小只依赖 m0/n0/k0/dtype,与运行期 (m,h,t,d) 及 weight_nz/transpose 无关,占用列对任意形状成立;典型配置取测试形状 (m,h,t,d)=(5230,4,512,128)(`tests/kernels/einsum_mht_mhd.py`,MLA 输出吸收类调用,t=512、d=128)。
 
@@ -100,7 +100,7 @@ dtype 记法:`Dtype` 为 mht/hdt/mhd 三张量的元素类型,`MatDtype` 为 mma
 | `l0bBuf` | `(256, 64)`(n0 × kQtileSize) | Dtype | 2(事件0/1) | `n0*kQtileSize*dtypeBits/BYTE_BITS` | 65536 |
 | **合计** | | | | | **65536** |
 
-**AIC L0C(CO1 区,容量 128KB;总容量 256KB 含 CO2)**
+**AIC L0C(CO1 区,容量 128KB)**
 
 | 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
 |---|---|---|---|---|---|

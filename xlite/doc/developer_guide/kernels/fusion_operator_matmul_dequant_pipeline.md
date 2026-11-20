@@ -107,7 +107,7 @@ AIV 2b/2b+1:  CrossCoreWaitFlag<0x2>(8)
 
 ### 片上缓冲分配与占用汇总（AIC L1/L0A/L0B/L0C、AIV UB）
 
-编排层 `FusionMatmulDequantPipeline`（`csrc/kernels/fusion_operator_matmul_dequant_pipeline.h` 的 `FusionMatmulDequantPipeline`）无自有片上缓冲，布局完全继承两侧子算子：AIC 侧（`__DAV_C220_CUBE__`）`Matmul::Init`（`csrc/kernels/matmul.h` 的 `Matmul::Init`）——L1 上 `l1aBuf`/`l1bBuf` 两对乒乓自偏移 0 累进，`l1BiasBuf`/`l1DeqScaleBuf` 逻辑位为 C1、共享 `l1bBuf[0]` 槽位，L0A（A2）/L0B（B2）/L0C（CO1）三级物理独立、各自从 0 起排；AIV 侧（`__DAV_C220_VEC__`）`Dequant<half>::Init` 的固定 UB 布局（`csrc/kernels/dequant.h` 的 `Dequant::Init`），行块缩为 m0/GetTaskRatio()=64 不影响 UB 尺寸。MIX 块内 AIC 与 AIV 分属不同物理核，L1/L0 与 UB 互不挤占。硬件容量（910B/dav C220，NpuArch 2201，CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`）：L0A 64KB、L0B 64KB、L1 512KB，L0C 总容量 256KB 为 CO1/CO2 两区之和，mmad 累加（`TPosition::CO1`）可用的 CO1 区为 **128KB**，下文 L0C 占用均按 CO1 128KB 计；AIV UB 预算取 `UB_SIZE=192KB`（`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`，4KB×48 bank），每个 AIV subblock 各持一份独立 UB、布局相同。
+编排层 `FusionMatmulDequantPipeline`（`csrc/kernels/fusion_operator_matmul_dequant_pipeline.h` 的 `FusionMatmulDequantPipeline`）无自有片上缓冲，布局完全继承两侧子算子：AIC 侧（`__DAV_C220_CUBE__`）`Matmul::Init`（`csrc/kernels/matmul.h` 的 `Matmul::Init`）——L1 上 `l1aBuf`/`l1bBuf` 两对乒乓自偏移 0 累进，`l1BiasBuf`/`l1DeqScaleBuf` 逻辑位为 C1、共享 `l1bBuf[0]` 槽位，L0A（A2）/L0B（B2）/L0C（CO1）三级物理独立、各自从 0 起排；AIV 侧（`__DAV_C220_VEC__`）`Dequant<half>::Init` 的固定 UB 布局（`csrc/kernels/dequant.h` 的 `Dequant::Init`），行块缩为 m0/GetTaskRatio()=64 不影响 UB 尺寸。MIX 块内 AIC 与 AIV 分属不同物理核，L1/L0 与 UB 互不挤占。硬件容量（910B/dav C220，NpuArch 2201，CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`）：L0A 64KB、L0B 64KB、L1 512KB，L0C 总容量 128KB（`l0_c_size=131072`，16 bank × 8KB），Mmad 累加缓冲即 `TPosition::CO1` 且占满整个 L0C；AIV UB 预算取 `UB_SIZE=192KB`（`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`，4KB×48 bank），每个 AIV subblock 各持一份独立 UB、布局相同。
 
 dtype 记法（宏 `FUSION_OPERATOR_MATMUL_DEQUANT_PIPELINE_FUNC_DEFINE` 固定）：AIC 侧 `Matmul<int8_t, int32_t, half>`，AIV 侧 `Dequant<half>`。典型配置取 GLM-5.1 TP16 per-rank dense W8A8 线性（`tests/performance/perf_fused_quant_matmul_dequant.py` 的 `MODEL_SIZES` 中 `dense_gate_up`：m=4096、n=1536、k=6144，dyn outScale）：host `PickMatmulTiling` 与独立 matmul 完全同一策略，产出 m0=128、n0=256、k0=512；融合门限（`csrc/op.cpp` 的 `FusedMatmulDeQuantBeneficial`：m≥8192 恒融合，dyn 时 m≥2048 且 k≥2048）保证 m 较大，m0 触顶 128。仅 int8 一个实例化，占用列取单列；占用只由分块决定，与 m/n/k 规模无关。
 
@@ -135,7 +135,7 @@ dtype 记法（宏 `FUSION_OPERATOR_MATMUL_DEQUANT_PIPELINE_FUNC_DEFINE` 固定�
 | `l0bBuf` | `(n0, kQtileSize)`=`(256, 128)` | int8_t | 2（事件0/1，kIdx2） | `n0*kQtileSize*sizeof(Dtype)` | 65536 |
 | **合计** | | | | | **65536** |
 
-**AIC L0C（CO1 区，容量 128KB；总容量 256KB 含 CO2）**
+**AIC L0C（CO1 区，容量 128KB）**
 
 | 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
 |---|---|---|---|---|---|

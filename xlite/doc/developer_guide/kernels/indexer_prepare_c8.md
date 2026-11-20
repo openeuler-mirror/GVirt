@@ -144,7 +144,7 @@ Top-K kernel 本体逐 head 行独立打分(head-generic),heads=64 只需 host �
 
 ### 片上缓冲分配与占用汇总(AIV UB + AIC L1/L0A/L0B/L0C)
 
-本算子为混合核(`KERNEL_TYPE_MIX_AIC_1_2`,1 AIC : 2 AIV)。AIV 侧 `IndexerC8Buffers::Init`(`csrc/kernels/indexer_prepare_c8.h` 的 `IndexerC8Buffers::Init`)自偏移 0 顺序排布全部 UB 槽位,`assert(off <= UB_SIZE)` 收尾,每 AIV(向量 subblock)一份,K、Q 两阶段复用同一布局;AIC 侧复用 `Matmul<bfloat16_t, float, bfloat16_t>`(`csrc/kernels/matmul.h` 的 `Matmul::Init`,调用见 `csrc/kernels/indexer_prepare_c8.h` 的 `indexer_prepare_c8` cube 分支,固定 tile `(m0,n0,k0)=(INDEXER_C8_TILE_ROWS,128,128)=(32,128,128)`,`hasBias=hasDeqScale=false`):L1 上 `l1aBuf`(`TPosition::A1`)与 `l1bBuf`(`TPosition::B1`)同处 512KB 物理存储、`bufferAddr` 连续累进,各持两份乒乓,L0A(`A2`)/L0B(`B2`)/L0C(`CO1`)三级物理独立、各自从偏移 0 重新起排。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L0A 64KB、L0B 64KB、L1 512KB,L0C 总容量 256KB(`l0_c_size=262144`)为 CO1/CO2 两区之和,mmad 累加缓冲(`TPosition::CO1`)可用的 CO1 区为 **128KB**,下文 L0C 占用均按 CO1 128KB 计;AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank)。dtype 记法:仅 BF16 一种实例化;UB 槽位横跨 float/bfloat16_t/half/int32_t/int8_t/int64_t/uint32_t 多种类型,尺寸全部由 `dim=128`、`rope_dim=64`、`rows=INDEXER_C8_TILE_ROWS/2=16`(`csrc/kernels/kernel_param.h` 的 `INDEXER_C8_TILE_ROWS`)三个编译期常量决定,与 token 数、head 数、is_long、freqs 路径、block_size 均无关,单占用列即对全部配置成立。典型配置取 GLM-5.1 LI:heads=32、is_long=1(heads 只改变任务数与 `head_weight` 双缓冲的内容宽度,不改变任何槽位尺寸)。
+本算子为混合核(`KERNEL_TYPE_MIX_AIC_1_2`,1 AIC : 2 AIV)。AIV 侧 `IndexerC8Buffers::Init`(`csrc/kernels/indexer_prepare_c8.h` 的 `IndexerC8Buffers::Init`)自偏移 0 顺序排布全部 UB 槽位,`assert(off <= UB_SIZE)` 收尾,每 AIV(向量 subblock)一份,K、Q 两阶段复用同一布局;AIC 侧复用 `Matmul<bfloat16_t, float, bfloat16_t>`(`csrc/kernels/matmul.h` 的 `Matmul::Init`,调用见 `csrc/kernels/indexer_prepare_c8.h` 的 `indexer_prepare_c8` cube 分支,固定 tile `(m0,n0,k0)=(INDEXER_C8_TILE_ROWS,128,128)=(32,128,128)`,`hasBias=hasDeqScale=false`):L1 上 `l1aBuf`(`TPosition::A1`)与 `l1bBuf`(`TPosition::B1`)同处 512KB 物理存储、`bufferAddr` 连续累进,各持两份乒乓,L0A(`A2`)/L0B(`B2`)/L0C(`CO1`)三级物理独立、各自从偏移 0 重新起排。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L0A 64KB、L0B 64KB、L1 512KB,L0C 总容量 128KB（`l0_c_size=131072`，16 bank × 8KB），Mmad 累加缓冲即 `TPosition::CO1` 且占满整个 L0C;AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank)。dtype 记法:仅 BF16 一种实例化;UB 槽位横跨 float/bfloat16_t/half/int32_t/int8_t/int64_t/uint32_t 多种类型,尺寸全部由 `dim=128`、`rope_dim=64`、`rows=INDEXER_C8_TILE_ROWS/2=16`(`csrc/kernels/kernel_param.h` 的 `INDEXER_C8_TILE_ROWS`)三个编译期常量决定,与 token 数、head 数、is_long、freqs 路径、block_size 均无关,单占用列即对全部配置成立。典型配置取 GLM-5.1 LI:heads=32、is_long=1(heads 只改变任务数与 `head_weight` 双缓冲的内容宽度,不改变任何槽位尺寸)。
 
 **AIV UB(IndexerC8Buffers,每 AIV 一份,预算 192KB)**
 
@@ -202,7 +202,7 @@ Top-K kernel 本体逐 head 行独立打分(head-generic),heads=64 只需 host �
 | `l0bBuf` | `(n0=128, kQtileSize=32)` | bfloat16_t | 2(事件0/1) | `n0*kQtileSize*sizeof(bfloat16_t)` | 16384 |
 | **合计** | | | | | **16384** |
 
-**AIC L0C(CO1 区,容量 128KB;总容量 256KB 含 CO2)**
+**AIC L0C(CO1 区,容量 128KB)**
 
 | 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
 |---|---|---|---|---|---|
