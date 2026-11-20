@@ -65,21 +65,6 @@ wait_10s() {
     sleep 10
 }
 
-# 格式化时间显示（参数：秒数）
-# 返回格式：X小时Y分钟Z秒（如果小时为0则不显示小时）
-format_duration() {
-    local total_seconds=$1
-    local hours=$((total_seconds / 3600))
-    local minutes=$(((total_seconds % 3600) / 60))
-    local seconds=$((total_seconds % 60))
-
-    if [ ${hours} -gt 0 ]; then
-        echo "${hours}小时${minutes}分钟${seconds}秒"
-    else
-        echo "${minutes}分钟${seconds}秒"
-    fi
-}
-
 # 启动服务（参数：服务启动脚本路径 日志文件名名 模型路径 max_num_batched_tokens max_num_seqs max_model_len tensor_parallel_size mode）
 start_server() {
     local server_script=$1
