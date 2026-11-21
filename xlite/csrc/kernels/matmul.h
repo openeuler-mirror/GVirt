@@ -40,7 +40,7 @@ public:
         if (m0 == (uint64_t)-1) {
             m0 = 128;
             n0 = 256;
-            k0 = 512 * BYTE_BITS / dtypeBits;
+            k0 = 128 * BYTE_BITS / dtypeBits;
         }
         if (hasDeqScale && n0 > 256) {
             n0 = 256;  // A2/A3: fixpipe buffer 2k (256 * 8B)
@@ -70,15 +70,18 @@ public:
         }
         this->kBlockSize = 32 * BYTE_BITS / dtypeBits;
 
-        kDtileSize = k0 << 1;
-        kQtileSize = k0 >> 2;
+        // k0 is the K extent of one Mmad. The L1 prefetch windows are whole
+        // reload periods: k8TileSize spans 8 Mmads (kIdx8), k4TileSize spans 4
+        // (kIdx4); each L0A/L0B ping-pong slot (kIdx2) holds one k0.
+        k8TileSize = k0 << 3;
+        k4TileSize = k0 << 2;
 
-        int l1ATileBytes = m0 * kDtileSize * dtypeBits / BYTE_BITS;
-        int l1BTileBytes = n0 * k0 * dtypeBits / BYTE_BITS;
+        int l1ATileBytes = m0 * k8TileSize * dtypeBits / BYTE_BITS;
+        int l1BTileBytes = n0 * k4TileSize * dtypeBits / BYTE_BITS;
         int l1BiasTileBytes = n0 * sizeof(MatDtype);
         int l1DeqScaleTileBytes = n0 * sizeof(uint64_t);
-        int l0ATileBytes = m0 * kQtileSize * dtypeBits / BYTE_BITS;
-        int l0BTileBytes = n0 * kQtileSize * dtypeBits / BYTE_BITS;
+        int l0ATileBytes = m0 * k0 * dtypeBits / BYTE_BITS;
+        int l0BTileBytes = n0 * k0 * dtypeBits / BYTE_BITS;
         uint64_t off = 0;
         for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
             l1aBuf[i].address_.logicPos = static_cast<uint8_t>(TPosition::A1);
@@ -206,8 +209,8 @@ public:
 private:
     __aicore__ inline void RunTileBody(int64_t midx, int64_t nidx)
     {
-        int kQtileBlockNum = kQtileSize / kBlockSize;
-        int kLoop = DIV_ROUND_UP(k, kQtileSize);
+        int kTileBlockNum = k0 / kBlockSize;
+        int kLoop = DIV_ROUND_UP(k, k0);
         int nStride = ROUND_UP(n, nBlockSize);
         int kStride = ROUND_UP(k, kBlockSize);
 
@@ -264,8 +267,9 @@ private:
             // DeqScale L1 -> fbuf
             WaitFlag<HardEvent::MTE2_FIX>(EVENT_ID5);
             // If dst is in C2PIPE2GM(fixpipe Buffer), the size of DataBlock is 128B
-            // fixpipe硬件要求：以uint64_t存储fp32，高位为0，低位为fp32格式的二进制值
-            // Notice: DataCopy from L1 to fbuf is belong to fixpipe barrier
+            // fixpipe hardware requirement: fp32 is stored as uint64_t, with the upper bits being 0
+            // and the lower bits being the binary value in fp32 format. Notice: DataCopy from L1 to
+            // fbuf is belong to fixpipe barrier
             DataCopy(
                 fixpipeBuf, l1DeqScaleBuf,
                 {1,
@@ -286,7 +290,7 @@ private:
 
             /* A GM -> L1 */
             if (kIdx8 == 0) {
-                int kRemSize = kDtileSize;
+                int kRemSize = k8TileSize;
                 if (kOffset + kRemSize > k) {
                     kRemSize = k - kOffset;
                 }
@@ -297,13 +301,13 @@ private:
             }
 
             /* B GM -> L1 */
-            int k0ActualBlockNum;
+            int k4TileActualBlockNum;
             if (kIdx4 == 0) {
-                int kRemSize = k0;
+                int kRemSize = k4TileSize;
                 if (kOffset + kRemSize > k) {
                     kRemSize = k - kOffset;
                 }
-                k0ActualBlockNum = DIV_ROUND_UP(kRemSize, kBlockSize);
+                k4TileActualBlockNum = DIV_ROUND_UP(kRemSize, kBlockSize);
                 WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + pingpongL1B);
                 if (transpose == 0 && nz == 0) {
                     CopyGmToL1Nd2Nz(l1bBuf[pingpongL1B], bGmBuf[nOffset * k + kOffset], nActual,
@@ -311,7 +315,7 @@ private:
                 } else if (transpose == 0 && nz == 1) {
                     CopyGmToL1(l1bBuf[pingpongL1B],
                                bGmBuf[kOffset * nStride + nOffset * kBlockSize], nActual,
-                               k0ActualBlockNum, nStride);
+                               k4TileActualBlockNum, nStride);
                 } else if (transpose == 1 && nz == 0) {
                     CopyGmToL1Nd2Nz(l1bBuf[pingpongL1B], bGmBuf[kOffset * n + nOffset], kRemSize,
                                     nActual, n, ROUND_UP(kRemSize, kBlockSize));
@@ -323,7 +327,7 @@ private:
                 SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpongL1B);
             }
 
-            int kActual = kQtileSize;
+            int kActual = k0;
             if (kOffset + kActual > k) {
                 kActual = k - kOffset;
             }
@@ -336,8 +340,8 @@ private:
             if (kIdx8 == 0) {
                 WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + pingpongL1A);
             }
-            CopyToL0ACol(l0aBuf[kIdx2], l1aBuf[pingpongL1A], mActualBlockNum,
-                         kIdx8 * kQtileBlockNum, kActualBlockNum);
+            CopyToL0ACol(l0aBuf[kIdx2], l1aBuf[pingpongL1A], mActualBlockNum, kIdx8 * kTileBlockNum,
+                         kActualBlockNum);
             if (kIdx8 == 7 || kIdx == (kLoop - 1)) {
                 SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + pingpongL1A);
                 pingpongL1A = 1 - pingpongL1A;
@@ -349,10 +353,10 @@ private:
             }
             if (transpose) {
                 CopyToL0BTCol(l0bBuf[kIdx2], l1bBuf[pingpongL1B], nActualBlockNum,
-                              kIdx4 * kQtileBlockNum, kActualBlockNum, k0ActualBlockNum);
+                              kIdx4 * kTileBlockNum, kActualBlockNum, k4TileActualBlockNum);
             } else {
                 CopyToL0BCol(l0bBuf[kIdx2], l1bBuf[pingpongL1B], nActualBlockNum,
-                             kIdx4 * kQtileBlockNum, kActualBlockNum);
+                             kIdx4 * kTileBlockNum, kActualBlockNum);
             }
             if (kIdx4 == 3 || kIdx == (kLoop - 1)) {
                 SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + pingpongL1B);
@@ -466,8 +470,8 @@ private:
     uint64_t kBlockSize;
     int srcDValue;
     int dstDValue;
-    int kDtileSize;
-    int kQtileSize;
+    int k8TileSize;
+    int k4TileSize;
     uint64_t swizzle;
     int32_t swizzlCount;
     int32_t swizzleDirection;

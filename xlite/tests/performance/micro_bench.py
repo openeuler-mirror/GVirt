@@ -787,10 +787,11 @@ def run_vec(rt, sizes):
 
 # ==================== 实验 5: cube matmul 吞吐(5a 核对/5b 反消解/5c tile sweep) ====================
 
-# kernel 侧 Matmul::Init 的 tile 预算公式(Matmul<half,float,half>, 须同步):
-#   L0A = m0*k0 <= 64KB; L0B = n0*k0 <= 64KB; L0C = 4*m0*n0 <= 64KB; L1 = 4*k0*(2*m0+n0) <= 512KB
+# kernel 侧 Matmul::Init 的 tile 预算公式(Matmul<half,float,half>, 与 op.cpp 同式, 须同步):
+#   L0A = 4*m0*k0 <= 64KB; L0B = 4*n0*k0 <= 64KB; L0C = 4*m0*n0 <= 64KB; L1 = (8*m0+4*n0)*k0*4 <= 512KB
+#   (half: dtypeSize=2B, 即 2 乒乓 × (m0*8*k0 + n0*4*k0) × 2B; k0 即单次 Mmad 的 K 量程, kLoop=1)
 # m0/n0/k0 须为 16 的倍数。tile = (m0, n0, k0), matmul 为 A[m0,k0] @ B[n0,k0].T -> C[m0,n0]
-CUBE_TILES_DEFAULT = [(128, 128, 128), (128, 128, 256), (64, 128, 256), (128, 64, 256), (64, 256, 256)]
+CUBE_TILES_DEFAULT = [(128, 128, 32), (128, 128, 64), (64, 128, 64), (128, 64, 64), (64, 256, 64)]
 CUBE_TICK_SLOTS = 8  # kernel 每 block 写 3 槽 + 5 空位(步距 8 int64)
 CUBE_WARMUP_ITERS = 10  # 反消解/吞吐测量前的 host 下发预热次数
 CUBE_LAUNCH_ITERS = 200  # 反消解/吞吐测量的 host 下发次数
@@ -800,11 +801,12 @@ CUBE_ANTI_DCE_RATIO_HI = 2.4  # iters 翻倍 wall 时间比值上界
 
 def _cube_l0_l1_bytes(m0, n0, k0):
     """L0/L1 字节数(与 op.cpp 同式), 用于 host 侧预检。
-    Matmul<half,float,half>: L0A=m0*k0, L0B=n0*k0, L0C=4*m0*n0, L1=4*k0*(2*m0+n0)。"""
-    l0a = m0 * k0
-    l0b = n0 * k0
+    Matmul<half,float,half>(dtypeSize=2B, 2 乒乓): L0A=4*m0*k0, L0B=4*n0*k0,
+    L0C=4*m0*n0, L1=(8*m0+4*n0)*k0*4。"""
+    l0a = 4 * m0 * k0
+    l0b = 4 * n0 * k0
     l0c = 4 * m0 * n0
-    l1 = 4 * k0 * (2 * m0 + n0)
+    l1 = (8 * m0 + 4 * n0) * k0 * 4
     return l0a, l0b, l0c, l1
 
 
@@ -870,7 +872,7 @@ def _cube_anti_dce(rt):
 
     kernel 内只做一次 Matmul::Run()(不做循环), 依赖链由 host 多次下发实现。
     wall 时间含 host 下发 + kernel 执行 + 同步; 若 kernel 被消解, 比值贴近 1。"""
-    m0, n0, k0 = 128, 128, 256
+    m0, n0, k0 = 128, 128, 64
     a = torch.randn(m0 * k0, dtype=torch.float16, device="npu:0")
     b = torch.randn(n0 * k0, dtype=torch.float16, device="npu:0")
     c = torch.zeros(m0 * n0, dtype=torch.float16, device="npu:0")

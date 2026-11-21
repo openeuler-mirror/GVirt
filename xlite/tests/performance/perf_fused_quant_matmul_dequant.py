@@ -85,7 +85,7 @@ def pick_matmul_tiling(m, n, k):
     """复刻 auto_tuner.cpp PickMatmulTiling 的 int8 无 bias/deq 主路径, 与 C++ 同步维护."""
     m0 = min((m + 31) // 32 * 32, 128)
     n0 = 256
-    k0 = 512
+    k0 = 128
     m_loop = -(-m // m0)
     n_loop = -(-n // n0)
     total = m_loop * n_loop
@@ -115,7 +115,7 @@ def fused_safe(m, n, k):
     m0, n0, k0, launch = pick_matmul_tiling(m, n, k)
     m_loop = -(-m // m0)
     n_loop = -(-n // n0)
-    k_loop = -(-k // (k0 >> 2))
+    k_loop = -(-k // k0)
     tiles = -(-(m_loop * n_loop) // launch)
     return not (k_loop < 8 and tiles * (8 - k_loop) >= 128)
 

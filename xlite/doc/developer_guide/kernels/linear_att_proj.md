@@ -50,7 +50,7 @@ Python 入口 `linear_att_proj(rt, x, W_qkv, W_z, W_b, W_a, mix_qkv, z, b, a, m,
 
 ### 片上缓冲分配与占用汇总(子算子 AIV UB / AIC L1/L0A/L0B/L0C)
 
-本算子无独立 kernel,片上缓冲按实际调用的三个子算子 kernel 计:`concat_col` 与 `split`(`csrc/kernels/concat.cpp`、`csrc/kernels/split.cpp`,AIV,UB 两半乒乓平分)、`matmul_<dtype>`(`csrc/kernels/matmul.h` 的 `Matmul::Init`,AIC,L1/L0A/L0B/L0C 累进 `bufferAddr`)。三次 launch 在同一 stream 上顺序执行,占用并列呈现、不叠加。硬件容量基准(910B/dav C220,CANN 平台配置):UB 192KB(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`)、L1 512KB、L0A 64KB、L0B 64KB,L0C 总容量 128KB（`l0_c_size=131072`，16 bank × 8KB），Mmad 累加缓冲即 `TPosition::CO1` 且占满整个 L0C。dtype 记法:`Dtype` 为 x/权重元素类型(FP16/BF16,均 2B)、`MatDtype` 为 mmad 累加器类型(float,4B)——两条 dtype 路径元素同为 2B,占用一致,单占用列。典型模型配置(取 kernel 测试 `tests/kernels/linear_att_proj.py`):m=4096、k=1024、n+v+h+h=8224(N=6144、V=2048、H=16+16),matmul 经 `PickMatmulTiling`(`csrc/auto_tuner.cpp` 的 `PickMatmulTiling`)选定 m0=128、n0=256、k0=256,无 bias/deqScale。
+本算子无独立 kernel,片上缓冲按实际调用的三个子算子 kernel 计:`concat_col` 与 `split`(`csrc/kernels/concat.cpp`、`csrc/kernels/split.cpp`,AIV,UB 两半乒乓平分)、`matmul_<dtype>`(`csrc/kernels/matmul.h` 的 `Matmul::Init`,AIC,L1/L0A/L0B/L0C 累进 `bufferAddr`)。三次 launch 在同一 stream 上顺序执行,占用并列呈现、不叠加。硬件容量基准(910B/dav C220,CANN 平台配置):UB 192KB(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`)、L1 512KB、L0A 64KB、L0B 64KB,L0C 总容量 128KB（`l0_c_size=131072`，16 bank × 8KB），Mmad 累加缓冲即 `TPosition::CO1` 且占满整个 L0C。dtype 记法:`Dtype` 为 x/权重元素类型(FP16/BF16,均 2B)、`MatDtype` 为 mmad 累加器类型(float,4B)——两条 dtype 路径元素同为 2B,占用一致,单占用列。典型模型配置(取 kernel 测试 `tests/kernels/linear_att_proj.py`):m=4096、k=1024、n+v+h+h=8224(N=6144、V=2048、H=16+16),matmul 经 `PickMatmulTiling`(`csrc/auto_tuner.cpp` 的 `PickMatmulTiling`)选定 m0=128、n0=256、k0=64,无 bias/deqScale。
 
 **concat_col / split(AIV UB,容量 192KB,每 block 一份;两 kernel 布局相同)**
 
@@ -63,22 +63,22 @@ Python 入口 `linear_att_proj(rt, x, W_qkv, W_z, W_b, W_a, mix_qkv, z, b, a, m,
 
 | 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
 |---|---|---|---|---|---|
-| `l1aBuf` | (m0, 2*k0) = (128, 512) | Dtype | 2(事件 EVENT_ID0/1,MTE1↔MTE2) | `m0*(k0*2)*sizeof(Dtype)` B | 262144 |
-| `l1bBuf` | (n0, k0) = (256, 256) | Dtype | 2(事件 EVENT_ID2/3,MTE1↔MTE2) | `n0*k0*sizeof(Dtype)` B | 262144 |
+| `l1aBuf` | (m0, k8TileSize=8*k0) = (128, 512) | Dtype | 2(事件 EVENT_ID0/1,MTE1↔MTE2) | `m0*k8TileSize*sizeof(Dtype)` B | 262144 |
+| `l1bBuf` | (n0, k4TileSize=4*k0) = (256, 256) | Dtype | 2(事件 EVENT_ID2/3,MTE1↔MTE2) | `n0*k4TileSize*sizeof(Dtype)` B | 262144 |
 | **合计** | | | | | **524288** |
 
 **matmul(AIC L0A,容量 64KB)**
 
 | 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
 |---|---|---|---|---|---|
-| `l0aBuf` | (m0, k0/4) = (128, 64) | Dtype | 2(事件 EVENT_ID0/1,M↔MTE1) | `m0*(k0/4)*sizeof(Dtype)` B | 32768 |
+| `l0aBuf` | (m0, k0) = (128, 64) | Dtype | 2(事件 EVENT_ID0/1,M↔MTE1) | `m0*k0*sizeof(Dtype)` B | 32768 |
 | **合计** | | | | | **32768** |
 
 **matmul(AIC L0B,容量 64KB)**
 
 | 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
 |---|---|---|---|---|---|
-| `l0bBuf` | (n0, k0/4) = (256, 64) | Dtype | 2(事件 EVENT_ID0/1,M↔MTE1) | `n0*(k0/4)*sizeof(Dtype)` B | 65536 |
+| `l0bBuf` | (n0, k0) = (256, 64) | Dtype | 2(事件 EVENT_ID0/1,M↔MTE1) | `n0*k0*sizeof(Dtype)` B | 65536 |
 | **合计** | | | | | **65536** |
 
 **matmul(AIC L0C CO1 区,容量 128KB)**
@@ -100,7 +100,7 @@ Python 入口 `linear_att_proj(rt, x, W_qkv, W_z, W_b, W_a, mix_qkv, z, b, a, m,
 
 要点:
 
-- 三个子 kernel 都以"吃满所在存储级"为目标设计:concat/split 的 `dataBuf` 按定义平分 UB(100%);matmul 的 tiling 在 m0=128、n0=256、k0=256 下 L1(2×128KB A 槽 + 2×128KB B 槽)恰好 100%、L0B 2×32KB 100%、L0C 128×256 fp32 100%——L1 与 L0B/CO1 是该配置的实际卡点,任一 tile 再增大即溢出;
+- 三个子 kernel 都以"吃满所在存储级"为目标设计:concat/split 的 `dataBuf` 按定义平分 UB(100%);matmul 的 tiling 在 m0=128、n0=256、k0=64 下 L1(2×128KB A 槽 + 2×128KB B 槽)恰好 100%、L0B 2×32KB 100%、L0C 128×256 fp32 100%——L1 与 L0B/CO1 是该配置的实际卡点,任一 tile 再增大即溢出;
 - 小 m(decode 单 token 等)场景下 `PickMatmulTiling` 会按形状与核数动态缩小 tile(m0 降至 ROUND_UP(m,32)),各段占用显著低于上表;上表是大 m prefill 形态的占用;
 - matmul 内无容量断言,约束隐含在 tiling 选择中(`csrc/op.cpp` 的 `XliteOpMatmul` → `PickMatmulTiling` 对 hasBias/hasDeqScale 时 n0 钳到 256);本融合入口无 bias/deqScale,L1 的 `l1BiasBuf`/`l1DeqScaleBuf`(C1 区,与 `l1bBuf` 别名共享)、L0 的 `l0BiasBuf`(C2 bias 表)与 `fixpipeBuf`(C2PIPE2GM)均不分配;
 - FP16 与 BF16 元素同为 2B,占用一致;占用差异只来自 tiling 随 m/n/k 的选择,而非 dtype。

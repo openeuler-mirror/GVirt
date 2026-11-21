@@ -482,7 +482,7 @@ __aicore__ inline void indexer_prepare_c8(GM_ADDR kw, GM_ADDR weight, GM_ADDR bi
     }
 #ifdef __DAV_C220_CUBE__
     Matmul<bfloat16_t, float, bfloat16_t> mm;
-    mm.Init(INDEXER_C8_TILE_ROWS, 128, 128, false, false, false, false, 0);
+    mm.Init(INDEXER_C8_TILE_ROWS, 128, 32, false, false, false, false, 0);
     mm.SetFlags();
     for (uint32_t i = 0; i < perCore; ++i) {
         uint32_t curr = i % PINGPONG_BUF_NUM;
