@@ -29,7 +29,8 @@ public:
     // Compute tile-shape-derived L1/L0 buffer layout, then set the HF32/mask/atomic
     // modes and the initial flags.  Must be called before TaskTilesInit / RunTileByIdx.
     __aicore__ inline void Init(uint64_t m0, uint64_t n0, uint64_t k0, bool hasBias,
-                                bool hasDeqScale, uint64_t transpose, uint64_t nz, uint64_t swizzle)
+                                bool hasDeqScale, uint64_t transpose, uint64_t nz, uint64_t swizzle,
+                                bool residency = true)
     {
         SetHF32Mode(false);
         SetMaskNorm();
@@ -54,6 +55,7 @@ public:
         this->k0 = k0;
         this->hasBias = hasBias;
         this->hasDeqScale = hasDeqScale;
+        this->residency = residency;
         this->transpose = transpose;
         this->nz = nz;
         this->swizzle = swizzle;
@@ -134,6 +136,8 @@ public:
 
     __aicore__ inline void SetFlags()
     {
+        pingpongL1A = 0;
+        pingpongL1B = 0;
         SetFlag<HardEvent::M_MTE1>(EVENT_ID0);
         SetFlag<HardEvent::M_MTE1>(EVENT_ID1);
         SetFlag<HardEvent::M_MTE1>(EVENT_ID4);
@@ -164,6 +168,13 @@ public:
         this->dstDValue = zDstDValue == -1 ? static_cast<int>(n) : zDstDValue;
         this->nLoop = DIV_ROUND_UP(n, n0);
         this->mLoop = DIV_ROUND_UP(m, m0);
+        for (int i = 0; i < PINGPONG_BUF_NUM; i++) {
+            this->mROffset[i] = -1;
+            this->nROffset[i] = -1;
+            this->kRAOffset[i] = -1;
+            this->kRBOffset[i] = -1;
+        }
+        this->biasROffset = -1;
         return static_cast<int64_t>(nLoop) * mLoop;
     }
 
@@ -214,11 +225,6 @@ private:
         int nStride = ROUND_UP(n, nBlockSize);
         int kStride = ROUND_UP(k, kBlockSize);
 
-        // Ping-pong selectors are tile-local: they start at 0 each tile because the
-        // tile exit releases both L1A/L1B buffers (see the class-level invariant).
-        int pingpongL1A = 0;
-        int pingpongL1B = 0;
-
         int nOffset = nidx * n0;
         int mOffset = midx * m0;
 
@@ -236,49 +242,65 @@ private:
         int nActualBlockPad = ROUND_UP(nActual, nBlockSize);
         int nActualBlockNum = DIV_ROUND_UP(nActual, nBlockSize);
 
+        bool loadBias = false;
+
         GlobalTensor<OutDtype> outGm = cGmBuf[mOffset * dstDValue + nOffset];
 
         if (hasBias) {
-            // Bias GM -> L1
-            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
-            DataCopy(l1BiasBuf, biasGmBuf[nOffset], nActualBlockPad);
-            SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
-
-            WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
             WaitFlag<HardEvent::M_MTE1>(EVENT_ID4);
-            // Bias L1 -> L0
-            // C2(Bias Table Buffer) Size is 1KB
-            // If dst is in C2(Bias Table Buffer), the size of DataBlock is 64B
-            DataCopy(
-                l0BiasBuf, l1BiasBuf,
-                {1, (uint16_t)(DIV_ROUND_UP((nActualBlockPad * sizeof(MatDtype)), C2_DATABLOCK)), 0,
-                 0});
-
-            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
-            SetFlag<HardEvent::MTE1_M>(EVENT_ID4);
         }
         if (hasDeqScale) {
-            // DeqScale GM -> L1
             WaitFlag<HardEvent::FIX_MTE2>(EVENT_ID5);
-            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
-            DataCopy(l1DeqScaleBuf, deqScaleGmBuf[nOffset], nActualBlockPad);
-            SetFlag<HardEvent::MTE2_FIX>(EVENT_ID5);
+        }
+        if (!residency || biasROffset != nOffset) {
+            if (hasBias) {
+                // Bias GM -> L1
+                WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
+                DataCopy(l1BiasBuf, biasGmBuf[nOffset], nActualBlockPad);
+                SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
 
-            // DeqScale L1 -> fbuf
-            WaitFlag<HardEvent::MTE2_FIX>(EVENT_ID5);
-            // If dst is in C2PIPE2GM(fixpipe Buffer), the size of DataBlock is 128B
-            // fixpipe hardware requirement: fp32 is stored as uint64_t, with the upper bits being 0
-            // and the lower bits being the binary value in fp32 format. Notice: DataCopy from L1 to
-            // fbuf is belong to fixpipe barrier
-            DataCopy(
-                fixpipeBuf, l1DeqScaleBuf,
-                {1,
-                 (uint16_t)(DIV_ROUND_UP((nActualBlockPad * sizeof(uint64_t)), FIXPIPE_DATABLOCK)),
-                 0, 0});
-            PipeBarrier<PIPE_FIX>();
-            SetFlag<HardEvent::FIX_MTE1>(EVENT_ID5);
-            WaitFlag<HardEvent::FIX_MTE1>(EVENT_ID5);
-            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
+                WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID4);
+                // Bias L1 -> L0
+                // C2(Bias Table Buffer) Size is 1KB
+                // If dst is in C2(Bias Table Buffer), the size of DataBlock is 64B
+                DataCopy(
+                    l0BiasBuf, l1BiasBuf,
+                    {1, (uint16_t)(DIV_ROUND_UP((nActualBlockPad * sizeof(MatDtype)), C2_DATABLOCK)), 0,
+                    0});
+
+                SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
+                SetFlag<HardEvent::MTE1_M>(EVENT_ID4);
+                loadBias = true;
+            }
+            if (hasDeqScale) {
+                // DeqScale GM -> L1
+                WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
+                DataCopy(l1DeqScaleBuf, deqScaleGmBuf[nOffset], nActualBlockPad);
+                SetFlag<HardEvent::MTE2_FIX>(EVENT_ID5);
+
+                // DeqScale L1 -> fbuf
+                WaitFlag<HardEvent::MTE2_FIX>(EVENT_ID5);
+                // If dst is in C2PIPE2GM(fixpipe Buffer), the size of DataBlock is 128B
+                // fixpipe hardware requirement: fp32 is stored as uint64_t, with the upper bits being 0
+                // and the lower bits being the binary value in fp32 format. Notice: DataCopy from L1 to
+                // fbuf is belong to fixpipe barrier
+                DataCopy(
+                    fixpipeBuf, l1DeqScaleBuf,
+                    {1,
+                    (uint16_t)(DIV_ROUND_UP((nActualBlockPad * sizeof(uint64_t)), FIXPIPE_DATABLOCK)),
+                    0, 0});
+                PipeBarrier<PIPE_FIX>();
+                SetFlag<HardEvent::FIX_MTE1>(EVENT_ID5);
+                WaitFlag<HardEvent::FIX_MTE1>(EVENT_ID5);
+                SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2);
+            }
+            biasROffset = nOffset;
+            // l1BiasBuf / l1DeqScaleBuf alias the head of l1bBuf[0] (see the
+            // L1 layout in Init): staging bias / deqScale through L1 overwrites
+            // buf0's resident B tile, so its residency tracking must be
+            // invalidated — a later B "hit" on buf0 would read the bias bytes
+            // as B fragments.
+            nROffset[0] = -1;
         }
 
         WaitFlag<HardEvent::FIX_M>(EVENT_ID0);
@@ -290,39 +312,50 @@ private:
 
             /* A GM -> L1 */
             if (kIdx8 == 0) {
-                int kRemSize = k8TileSize;
-                if (kOffset + kRemSize > k) {
-                    kRemSize = k - kOffset;
-                }
                 WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID0 + pingpongL1A);
-                CopyGmToL1Nd2Nz(l1aBuf[pingpongL1A], aGmBuf[mOffset * srcDValue + kOffset], mActual,
-                                kRemSize, srcDValue, mActualBlockPad);
+                if (!residency || (residency && (mROffset[pingpongL1A] != mOffset || kRAOffset[pingpongL1A] != kOffset))) {
+                    int kRemSize = k8TileSize;
+                    if (kOffset + kRemSize > k) {
+                        kRemSize = k - kOffset;
+                    }
+                    CopyGmToL1Nd2Nz(l1aBuf[pingpongL1A], aGmBuf[mOffset * srcDValue + kOffset], mActual,
+                                    kRemSize, srcDValue, mActualBlockPad);
+                    if (residency) {
+                        mROffset[pingpongL1A] = mOffset;
+                        kRAOffset[pingpongL1A] = kOffset;
+                    }
+                }
                 SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID0 + pingpongL1A);
             }
 
             /* B GM -> L1 */
-            int k4TileActualBlockNum;
             if (kIdx4 == 0) {
-                int kRemSize = k4TileSize;
-                if (kOffset + kRemSize > k) {
-                    kRemSize = k - kOffset;
-                }
-                k4TileActualBlockNum = DIV_ROUND_UP(kRemSize, kBlockSize);
                 WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + pingpongL1B);
-                if (transpose == 0 && nz == 0) {
-                    CopyGmToL1Nd2Nz(l1bBuf[pingpongL1B], bGmBuf[nOffset * k + kOffset], nActual,
-                                    kRemSize, k, nActualBlockPad);
-                } else if (transpose == 0 && nz == 1) {
-                    CopyGmToL1(l1bBuf[pingpongL1B],
-                               bGmBuf[kOffset * nStride + nOffset * kBlockSize], nActual,
-                               k4TileActualBlockNum, nStride);
-                } else if (transpose == 1 && nz == 0) {
-                    CopyGmToL1Nd2Nz(l1bBuf[pingpongL1B], bGmBuf[kOffset * n + nOffset], kRemSize,
-                                    nActual, n, ROUND_UP(kRemSize, kBlockSize));
-                } else if (transpose == 1 && nz == 1) {
-                    CopyGmToL1(l1bBuf[pingpongL1B],
-                               bGmBuf[nOffset * kStride + kOffset * nBlockSize], kRemSize,
-                               DIV_ROUND_UP(nActual, nBlockSize), kStride);
+                if (!residency || (residency && (nROffset[pingpongL1B] != nOffset || kRBOffset[pingpongL1B] != kOffset))) {
+                    int kRemSize = k4TileSize;
+                    if (kOffset + kRemSize > k) {
+                        kRemSize = k - kOffset;
+                    }
+                    k4TileActualBlockNum = DIV_ROUND_UP(kRemSize, kBlockSize);
+                    if (transpose == 0 && nz == 0) {
+                        CopyGmToL1Nd2Nz(l1bBuf[pingpongL1B], bGmBuf[nOffset * k + kOffset], nActual,
+                                        kRemSize, k, nActualBlockPad);
+                    } else if (transpose == 0 && nz == 1) {
+                        CopyGmToL1(l1bBuf[pingpongL1B],
+                                bGmBuf[kOffset * nStride + nOffset * kBlockSize], nActual,
+                                k4TileActualBlockNum, nStride);
+                    } else if (transpose == 1 && nz == 0) {
+                        CopyGmToL1Nd2Nz(l1bBuf[pingpongL1B], bGmBuf[kOffset * n + nOffset], kRemSize,
+                                        nActual, n, ROUND_UP(kRemSize, kBlockSize));
+                    } else if (transpose == 1 && nz == 1) {
+                        CopyGmToL1(l1bBuf[pingpongL1B],
+                                bGmBuf[nOffset * kStride + kOffset * nBlockSize], kRemSize,
+                                DIV_ROUND_UP(nActual, nBlockSize), kStride);
+                    }
+                    if (residency) {
+                        nROffset[pingpongL1B] = nOffset;
+                        kRBOffset[pingpongL1B] = kOffset;
+                    }
                 }
                 SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + pingpongL1B);
             }
@@ -377,10 +410,11 @@ private:
                 PipeBarrier<PIPE_M>();
             }
             if (hasBias && kIdx == 0) {
-                WaitFlag<HardEvent::MTE1_M>(EVENT_ID4);
+                if (loadBias) {
+                    WaitFlag<HardEvent::MTE1_M>(EVENT_ID4);
+                }
                 CalMmadWithBias(l0cBuf, l0aBuf[kIdx2], l0bBuf[kIdx2], l0BiasBuf, mActualBlockPad,
                                 nActualBlockPad, kActualBlockPad);
-                SetFlag<HardEvent::M_MTE1>(EVENT_ID4);
             } else {
                 CalMmad(l0cBuf, l0aBuf[kIdx2], l0bBuf[kIdx2], mActualBlockPad, nActualBlockPad,
                         kActualBlockPad, kIdx == 0);
@@ -394,6 +428,9 @@ private:
         WaitFlag<HardEvent::M_FIX>(EVENT_ID0);
         CopyToGmWithDequant(outGm, l0cBuf, mActual, nActual, mActualBlockPad, dstDValue,
                             hasDeqScale, fixpipeBuf);
+        if (hasBias) {
+            SetFlag<HardEvent::M_MTE1>(EVENT_ID4);
+        }
         if (hasDeqScale) {
             SetFlag<HardEvent::FIX_MTE2>(EVENT_ID5);
         }
@@ -479,6 +516,16 @@ private:
     int nLoop;
     bool hasBias = false;
     bool hasDeqScale = false;
+    int pingpongL1A;
+    int pingpongL1B;
+
+    bool residency = true;
+    int mROffset[PINGPONG_BUF_NUM];
+    int nROffset[PINGPONG_BUF_NUM];
+    int kRAOffset[PINGPONG_BUF_NUM];
+    int kRBOffset[PINGPONG_BUF_NUM];
+    int biasROffset;
+    int k4TileActualBlockNum;
 };
 
 #define MATMUL_FUNC_DEFINE(dtype)                                                                  \
