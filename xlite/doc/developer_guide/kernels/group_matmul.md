@@ -24,7 +24,7 @@ group_matmul_##dtype(x, ws, z, deqScales, counts, n, kN, kK, m0, n0, k0,
 | n | 标量 | - | uint32 | counts 长度（专家总数上限） |
 | kN | 标量 | - | int64 | moe intermediate size（单专家 GEMM 的 N） |
 | kK | 标量 | - | int64 | hidden size（单专家 GEMM 的 K） |
-| m0, n0, k0 | 标量 | - | uint64 | 分块尺寸；host 固定传 -1（用 kernel 默认，`csrc/op.cpp` 的 `XliteOpGroupMatmul`，关键字 `MATMUL_M0_N0_K0_DEFAULT_VALUE`） |
+| m0, n0, k0 | 标量 | - | uint64 | 分块尺寸（k0 为单次 Mmad 的 K 量程，见 `matmul.md`）；host 固定传 -1（用 kernel 默认，`csrc/op.cpp` 的 `XliteOpGroupMatmul`，关键字 `MATMUL_M0_N0_K0_DEFAULT_VALUE`） |
 | startIdx, endIdx | 标量 | - | uint32 | 本次调用参与的专家索引区间 `[startIdx, endIdx)`（支持分批启动） |
 | weightNZ | 标量 | - | bool | 权重是否 NZ 格式（ws 为指针数组、不携带布局信息，host 侧由调用方从首个本 rank 专家权重的自动检测结果传入（`weights[0].nz`，源自 `InitXTensor` 对 FRACTAL_NZ 的检测）；Python `weight_nz` 参数已废弃，传入值被忽略） |
 | transpose | 标量 | - | bool | 权重是否 `[kK, kN]` 转置存储 |
@@ -90,20 +90,20 @@ int4 的搬运细节（在 matmul.h/kernel_macro.h 中）：`dtypeBits=4` 使 `k
 - 无 bias（`Init(..., false, useDequant, ...)`，`csrc/kernels/group_matmul.h` 的 `group_matmul_kernel`，关键字 `matmul_op.Init(m0, n0, k0, false`）；
 - 多一层"专家循环 + counts 前缀和偏移"的批处理，权重/scale 通过 device 指针数组间接寻址；
 - `coreOffset` 跨专家 tile 均衡；
-- m0/n0/k0 由 kernel 默认值决定（host 传 -1，`csrc/op.cpp` 的 `XliteOpGroupMatmul`，关键字 `MATMUL_M0_N0_K0_DEFAULT_VALUE`），即 `m0=128`、`n0=256`、`k0 = 512*8/dtypeBits`（`csrc/kernels/matmul.h` 的 `Matmul::Init`，关键字 `if (m0 == (uint64_t)-1)`；`hasDeqScale`/`hasBias` 只把 n0 钳到 256 上限，对默认值不生效，即反量化路径同为 n0=256）。
+- m0/n0/k0 由 kernel 默认值决定（host 传 -1，`csrc/op.cpp` 的 `XliteOpGroupMatmul`，关键字 `MATMUL_M0_N0_K0_DEFAULT_VALUE`），即 `m0=128`、`n0=256`、`k0 = 128*8/dtypeBits`（单次 Mmad 的 K 量程，见 `matmul.md`；`csrc/kernels/matmul.h` 的 `Matmul::Init`，关键字 `if (m0 == (uint64_t)-1)`；`hasDeqScale`/`hasBias` 只把 n0 钳到 256 上限，对默认值不生效，即反量化路径同为 n0=256）。
 
 ### 片上缓冲分配与占用汇总（AIC L1/L0A/L0B/L0C）
 
 `group_matmul_kernel`（`csrc/kernels/group_matmul.h` 的 `group_matmul_kernel`）不自建片上缓冲，排布完全复用 `Matmul::Init`（`csrc/kernels/matmul.h` 的 `Matmul::Init`）：L1 上 `l1aBuf`/`l1bBuf` 两对乒乓自偏移 0 顺序累进，`l1DeqScaleBuf`（量化路径）逻辑位为 C1、偏移重置回 `l1bBuf[0]` 起点与其共享槽位；L0A（A2）/L0B（B2）/L0C（CO1）三级物理独立、各自从偏移 0 起排。本算子恒 `hasBias=false`，不使用 C2 Bias Table。硬件容量（910B/dav C220，NpuArch 2201，CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`）：L0A 64KB、L0B 64KB、L1 512KB，L0C 总容量 128KB（`l0_c_size=131072`，16 bank × 8KB），Mmad 累加缓冲即 `TPosition::CO1` 且占满整个 L0C；`KERNEL_TYPE_AIC_ONLY`，不使用 UB。
 
-dtype 记法（模板实参，见宏 `GROUPMATMUL_FUNC_DEFINE`）：浮点路径 `<fp16|bf16|float, float, 同 Dtype>`，int8 路径 `<int8_t, int32_t, half>`（W8A8），int4 路径 `<int4b_t, int32_t, half>`（W4A8 MSD）。典型配置：host 固定传 -1（`csrc/op.cpp` 的 `XliteOpGroupMatmul`，关键字 `MATMUL_M0_N0_K0_DEFAULT_VALUE`），走 `Matmul::Init` 默认分块 m0=128、n0=256、k0=512×8/dtypeBits；占用只由分块决定，与 kM（每专家 token 数）、kN、kK、专家数及 `coreOffset` 均衡完全无关——专家循环复用同一套静态排布，专家维度只改变 `TaskTilesInit` 绑定的 GM 地址与 tile 数。默认 k0 随 dtype 反比缩放使全部四种位宽字节占用一致（单份 K 维深度 fp16/bf16 256、float 128、int8 512、int4 1024，k0×位宽恒 512B），占用列取单列；量化路径另有 fixpipe 用的 C2PIPE2GM 专用区（固定 2KB，CO1 之外）。下表 shape 为逻辑形状（L1/L0 内实际按 Nd2Nz/NZ 分形排布）。
+dtype 记法（模板实参，见宏 `GROUPMATMUL_FUNC_DEFINE`）：浮点路径 `<fp16|bf16|float, float, 同 Dtype>`，int8 路径 `<int8_t, int32_t, half>`（W8A8），int4 路径 `<int4b_t, int32_t, half>`（W4A8 MSD）。典型配置：host 固定传 -1（`csrc/op.cpp` 的 `XliteOpGroupMatmul`，关键字 `MATMUL_M0_N0_K0_DEFAULT_VALUE`），走 `Matmul::Init` 默认分块 m0=128、n0=256、k0=128×8/dtypeBits；占用只由分块决定，与 kM（每专家 token 数）、kN、kK、专家数及 `coreOffset` 均衡完全无关——专家循环复用同一套静态排布，专家维度只改变 `TaskTilesInit` 绑定的 GM 地址与 tile 数。默认 k0（单次 Mmad 的 K 量程）随 dtype 反比缩放使全部四种位宽字节占用一致（`l1bBuf` 单份 K 维深度 `k4TileSize = 4*k0`：fp16/bf16 256、float 128、int8 512、int4 1024，4×k0×位宽恒 512B），占用列取单列；量化路径另有 fixpipe 用的 C2PIPE2GM 专用区（固定 2KB，CO1 之外）。下表 shape 为逻辑形状（L1/L0 内实际按 Nd2Nz/NZ 分形排布）。
 
 **AIC L1（A1/B1/C1，容量 512KB）**
 
 | 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
 |---|---|---|---|---|---|
-| `l1aBuf` | `(m0, kDtileSize)`=`(128, 2×k0)` | Dtype | 2（事件0/1） | `m0*kDtileSize*sizeof(Dtype)` | 262144 |
-| `l1bBuf` | `(n0, k0)`=`(256, k0)` | Dtype | 2（事件2/3） | `n0*k0*sizeof(Dtype)` | 262144 |
+| `l1aBuf` | `(m0, k8TileSize)`=`(128, 8×k0)` | Dtype | 2（事件0/1） | `m0*k8TileSize*sizeof(Dtype)` | 262144 |
+| `l1bBuf` | `(n0, k4TileSize)`=`(256, 4×k0)` | Dtype | 2（事件2/3） | `n0*k4TileSize*sizeof(Dtype)` | 262144 |
 | `l1DeqScaleBuf` | `(n0,)`=`(256,)`，仅量化路径 | uint64_t | 1（事件5） | `n0*sizeof(uint64_t)` | 0（与 `l1bBuf[0]` 共享槽位） |
 | **合计** | | | | | **524288** |
 
@@ -111,14 +111,14 @@ dtype 记法（模板实参，见宏 `GROUPMATMUL_FUNC_DEFINE`）：浮点路径
 
 | 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
 |---|---|---|---|---|---|
-| `l0aBuf` | `(m0, kQtileSize)`=`(128, k0/4)` | Dtype | 2（事件0/1，kIdx2） | `m0*kQtileSize*sizeof(Dtype)` | 32768 |
+| `l0aBuf` | `(m0, k0)`=`(128, k0)` | Dtype | 2（事件0/1，kIdx2） | `m0*k0*sizeof(Dtype)` | 32768 |
 | **合计** | | | | | **32768** |
 
 **AIC L0B（B2，容量 64KB）**
 
 | 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
 |---|---|---|---|---|---|
-| `l0bBuf` | `(n0, kQtileSize)`=`(256, k0/4)` | Dtype | 2（事件0/1，kIdx2） | `n0*kQtileSize*sizeof(Dtype)` | 65536 |
+| `l0bBuf` | `(n0, k0)`=`(256, k0)` | Dtype | 2（事件0/1，kIdx2） | `n0*k0*sizeof(Dtype)` | 65536 |
 | **合计** | | | | | **65536** |
 
 **AIC L0C（CO1 区，容量 128KB）**

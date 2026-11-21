@@ -68,7 +68,7 @@ site-packages 中的旧 xlite wheel 会遮蔽源码树构建，必须用 `PYTHON
 | `--mte-only` | 只跑实验 3 | timed；与另两个 only 互斥 |
 | `--vec-sizes 64,256,2k,...` | 实验 4 elems 档位；对齐 repeat 量子并钳 UB 上限 | timed |
 | `--vec-only` | 只跑实验 4 | 同上 |
-| `--cube-sizes '128,128,128;...'` | 实验 5 tile 列表，分号分隔，每项 `m0,n0,k0` | timed；须满足 L0/L1 预算 |
+| `--cube-sizes '128,128,32;...'` | 实验 5 tile 列表，分号分隔，每项 `m0,n0,k0` | timed；须满足 L0/L1 预算 |
 | `--cube-only` | 只跑实验 5 | 同上 |
 | `--analyze <csv> ...` | 读取 profiler CSV 输出分析报告 | 必须为第一个参数 |
 
@@ -203,9 +203,11 @@ sqrt 不在依赖链上，差分量是“mul 链上再加一条超越指令”�
 
 每次下发执行一次完整 `Matmul::Run()`，复用 `matmul.h`。kernel 内不循环：flag
 生命周期在 `kLoop <= 4` 的 tile 上不能干净重置，几轮后 L0A/L0B 读写冲突；依赖链
-由 host 多次下发实现。`blockNum` 恒 1，未分到 tile 的核早退。tile 约束（m0/n0/k0
-为 16 的倍数）：`L0A=m0*k0≤64KB`、`L0B=n0*k0≤64KB`、`L0C=4*m0*n0≤64KB`、
-`L1=4*k0*(2*m0+n0)≤512KB`。
+由 host 多次下发实现。`blockNum` 恒 1，未分到 tile 的核早退。bench 的 k0 为被测 tile 的 K 量程：
+`cube_mmad_body` 直接以 `k0` 作为 `Matmul::Init` 的 `k0` 下发（GEMM 的 `k` 同为 `k0`，
+`kLoop=1`，单次 Mmad）。tile 约束（m0/n0/k0 为 16 的倍数）：`L0A=4*m0*k0≤64KB`、
+`L0B=4*n0*k0≤64KB`、`L0C=4*m0*n0≤64KB`、`L1=(8*m0+4*n0)*k0*4≤512KB`（half：2 乒乓
+× (m0×8k0 + n0×4k0) × 2B）。
 
 **数据说明**：5a 与 numpy `A@Bᵀ` 比对；5b 用 host 下发次数翻倍检查未消解；5c 输出
 `wall us/launch`（含 host）、`issue / compl / drain` 与
@@ -272,28 +274,28 @@ GM（UB 搬运 intrinsic 在 cube 通道不可用，见 3.3/3.7），MIX 档仅 
 | `tmp` | 255 repeat × 256B（UB 偏移 2*bytes） | float | 1（仅 sqrt_f32 / exp_f32） | `BENCH_VEC_TMP_BYTES=255*256` | —（不分配） | 65280 |
 | **合计** | | | | | **131072** | **196352** |
 
-**实验 5（Cube 档，AIC，复用 `Matmul<half,float,half>`；典型档位取缺省五档中 L1 最深的 (m0,n0,k0)=(128,128,256)，hasBias=hasDeqScale=false）**
+**实验 5（Cube 档，AIC，复用 `Matmul<half,float,half>`；典型档位取缺省五档中 L1 最深的 (m0,n0,k0)=(128,128,64)，hasBias=hasDeqScale=false）**
 
 AIC L1（A1/B1，容量 512KB）：
 
 | 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
 |------|---------------|-------|----------|----------|------------|
-| `l1aBuf` | `(m0, kDtileSize=2*k0=512)`（K 方向预取窗） | half | 2（事件0/1） | `m0*kDtileSize*sizeof(half)` | 262144 |
-| `l1bBuf` | `(n0, k0)` | half | 2（事件2/3） | `n0*k0*sizeof(half)` | 131072 |
+| `l1aBuf` | `(m0, k8TileSize=8*k0=512)`（K 方向预取窗） | half | 2（事件0/1） | `m0*k8TileSize*sizeof(half)` | 262144 |
+| `l1bBuf` | `(n0, k4TileSize=4*k0=256)` | half | 2（事件2/3） | `n0*k4TileSize*sizeof(half)` | 131072 |
 | **合计** | | | | | **393216** |
 
 AIC L0A（A2，容量 64KB）：
 
 | 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
 |------|---------------|-------|----------|----------|------------|
-| `l0aBuf` | `(m0, kQtileSize=k0/4=64)` | half | 2（事件0/1） | `m0*kQtileSize*sizeof(half)` | 32768 |
+| `l0aBuf` | `(m0, k0=64)`（`Matmul::Init` 的 k0，即单次 Mmad 的 K 量程） | half | 2（事件0/1） | `m0*k0*sizeof(half)` | 32768 |
 | **合计** | | | | | **32768** |
 
 AIC L0B（B2，容量 64KB）：
 
 | 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
 |------|---------------|-------|----------|----------|------------|
-| `l0bBuf` | `(n0, kQtileSize=64)` | half | 2（事件0/1） | `n0*kQtileSize*sizeof(half)` | 32768 |
+| `l0bBuf` | `(n0, k0=64)` | half | 2（事件0/1） | `n0*k0*sizeof(half)` | 32768 |
 | **合计** | | | | | **32768** |
 
 AIC L0C（CO1 区，容量 128KB）：
@@ -310,7 +312,7 @@ AIC L0C（CO1 区，容量 128KB）：
 | AIV UB | 192 KB | MTE read / copy | 196608 B | 100% |
 | AIV UB | 192 KB | MTE write / chase | 98304 B / 64 B | 50% / <0.1% |
 | AIV UB | 192 KB | VEC 最大档（二元链 / 载体） | 131072 B / 196352 B | 66.7% / 99.9% |
-| AIC L1 | 512 KB | Cube (128,128,256) | 393216 B | 75% |
+| AIC L1 | 512 KB | Cube (128,128,64) | 393216 B | 75% |
 | AIC L0A | 64 KB | 同上 | 32768 B | 50% |
 | AIC L0B | 64 KB | 同上 | 32768 B | 50% |
 | AIC L0C（CO1） | 128 KB | 同上 | 65536 B | 50% |
@@ -321,9 +323,9 @@ AIC L0C（CO1 区，容量 128KB）：
   乒乓恰好 2×96KB=192KB 顶满 UB；VEC 的 host 预算 `2*elems*sz + BENCH_VEC_TMP_BYTES
   (65280) ≤ UB_SIZE`（`csrc/op.cpp` 的 `XliteOpBenchVec`）即由此而来——4B 上限
   16384 elems、2B 上限 32768，两者 bytes 相同（65536），最大档仅余 256B；
-- Cube 档占用随 tile 参数线性走：`L1=4*k0*(2*m0+n0)`、`L0A=m0*k0`、`L0B=n0*k0`、
+- Cube 档占用随 tile 参数线性走：`L1=(8*m0+4*n0)*k0*4`、`L0A=4*m0*k0`、`L0B=4*n0*k0`、
   `L0C=4*m0*n0`（host 校验 L0A/L0B/L0C≤64KB、L1≤512KB，见 2.5）；缺省五档中
-  (128,128,256) 与 (64,256,256) 的 L1 最深（393216B，75%），m0=n0=128 的 tile 把
+  (128,128,64) 与 (64,256,64) 的 L1 最深（393216B，75%），m0=n0=128 的 tile 把
   L0C 恰好顶到 64KB 校验上限——按 CO1 128KB 硬件容量仅 50%，host 校验口径严于硬件；
 - 空/标量/MIX 档无任何片上缓冲（见上文），全档位里只有 MTE/VEC/Cube 三族占 UB 或
   L1/L0；

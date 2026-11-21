@@ -220,7 +220,7 @@ void PickMatmulTiling(uint32_t aicNum, uint64_t m, uint64_t n, uint64_t k, uint6
             m0 = 128;
         }
         n0 = 256;
-        k0 = 4096 / weightDtypeBits;
+        k0 = 1024 / weightDtypeBits;
 
         uint64_t mLoop = DIV_ROUND_UP(m, m0);
         uint64_t nLoop = DIV_ROUND_UP(n, n0);

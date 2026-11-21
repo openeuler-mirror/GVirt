@@ -3680,14 +3680,24 @@ uint32_t XliteOpBenchCube(XRuntime &rt, const std::string &variant, const XTenso
         throw std::runtime_error("bench_cube: unknown variant '" + variant +
                                  "', expected 'cube_mmad_aic'");
     }
-    // L0/L1 budget (derived from Matmul::Init for Matmul<half,float,half>):
-    //   L0A = m0*k0 (2 bufs * m0*(k0/4)*2B),  L0B = n0*k0,  each <= 64KB
-    //   L0C = 4*m0*n0 (FP32 accumulate),       L0C <= 64KB
-    //   L1  = 4*k0*(2*m0+n0) (2 bufs * (m0*2*k0 + n0*k0)*2B), L1 <= 512KB
-    uint64_t l0a = m0 * k0;
-    uint64_t l0b = n0 * k0;
-    uint64_t l0c = 4 * m0 * n0;
-    uint64_t l1Bytes = 4 * k0 * (2 * m0 + n0);
+    if (a.dtype != b.dtype || a.dtype != c.dtype) {
+        throw std::runtime_error(DBG_PREFIX + XT_STR(a) + XT_STR(b) + XT_STR(c) +
+                                 "bench_cube expects matching dtypes");
+    }
+    uint64_t dtypeSize = XDtypeBit(a.dtype) / 8;
+    // L0/L1 budget (derived from Matmul::Init for Matmul<half,float,half>;
+    // cube_mmad_body passes the bench k0 to Matmul::Init unchanged as its k0
+    // and runs the GEMM with the same k0 (kLoop=1, a single Mmad), so the
+    // budget formulas below are all in terms of the bench k0):
+    //   L0A = 2 bufs * m0*k0*dtypeSize,  L0B = 2 bufs * n0*k0*dtypeSize,
+    //   each <= 64KB
+    //   L0C = m0*n0*sizeof(fp32/int32 accumulate) <= 64KB
+    //   L1  = 2 bufs * (m0*k8TileSize + n0*k4TileSize)*dtypeSize
+    //       = (8*m0 + 4*n0)*k0*dtypeSize*2 <= 512KB
+    uint64_t l0a = m0 * k0 * dtypeSize * PINGPONG_BUF_NUM;
+    uint64_t l0b = n0 * k0 * dtypeSize * PINGPONG_BUF_NUM;
+    uint64_t l0c = m0 * n0 * 4;  // sizeof(float) or sizeof(int32_t) for the accumulate buffer
+    uint64_t l1Bytes = (8 * m0 + 4 * n0) * k0 * dtypeSize * PINGPONG_BUF_NUM;
     if (l0a > 64 * 1024 || l0b > 64 * 1024 || l0c > 64 * 1024 || l1Bytes > 512 * 1024) {
         std::stringstream ss;
         ss << "bench_cube: tile " << m0 << "x" << n0 << "x" << k0
