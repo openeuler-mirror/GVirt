@@ -51,7 +51,7 @@ Python 入口 `fused_quant_matmul_dequant(rt, x, quant_scale_rec, quant_offset, 
 
 ### 片上缓冲分配与占用汇总（AIC L1/L0A/L0B/L0C、AIV UB）
 
-`Init`（`csrc/kernels/fused_quant_matmul_dequant.h` 的 `FusedQuantMatmulDequant::Init`）按核型分派：AIC 侧（`__DAV_C220_CUBE__`）复用 `Matmul::Init`（`csrc/kernels/matmul.h` 的 `Matmul::Init`）的 L1/L0 静态排布（L1 上 `l1aBuf`/`l1bBuf` 两对乒乓自 0 累进，`l1BiasBuf`/`l1DeqScaleBuf` 共享 `l1bBuf[0]` 槽位，L0A/L0B/L0C 各自从 0 起排）；AIV 侧（`__DAV_C220_VEC__`）两阶段串行复用同一 UB——量化阶段 `QuantDyn`/`Quant` 的布局在 `TaskTilesInit` 中按 k/行数动态推导（`csrc/kernels/quant_dyn.h` 的 `QuantDyn::TaskTilesInitMultiRow`、`csrc/kernels/quant.h` 的 `Quant::TaskTilesInitMultiRow`），反量化阶段 `Dequant` 的布局在 `Init` 中固定（`csrc/kernels/dequant.h` 的 `Dequant::Init`），两阶段基址都从 UB 0 起、SyncAll 锁步保证不共存。MIX 块内 AIC 与 AIV 分属不同物理核，L1/L0 与 UB 互不挤占。硬件容量（910B/dav C220，NpuArch 2201，CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`）：L0A 64KB、L0B 64KB、L1 512KB，L0C 总容量 256KB 为 CO1/CO2 两区之和，mmad 累加（`TPosition::CO1`）可用的 CO1 区为 **128KB**，下文 L0C 占用均按 CO1 128KB 计；AIV UB 预算取 `UB_SIZE=192KB`（`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`，4KB×48 bank），每个 AIV subblock 各持一份独立 UB、布局相同。
+`Init`（`csrc/kernels/fused_quant_matmul_dequant.h` 的 `FusedQuantMatmulDequant::Init`）按核型分派：AIC 侧（`__DAV_C220_CUBE__`）复用 `Matmul::Init`（`csrc/kernels/matmul.h` 的 `Matmul::Init`）的 L1/L0 静态排布（L1 上 `l1aBuf`/`l1bBuf` 两对乒乓自 0 累进，`l1BiasBuf`/`l1DeqScaleBuf` 共享 `l1bBuf[0]` 槽位，L0A/L0B/L0C 各自从 0 起排）；AIV 侧（`__DAV_C220_VEC__`）两阶段串行复用同一 UB——量化阶段 `QuantDyn`/`Quant` 的布局在 `TaskTilesInit` 中按 k/行数动态推导（`csrc/kernels/quant_dyn.h` 的 `QuantDyn::TaskTilesInitMultiRow`、`csrc/kernels/quant.h` 的 `Quant::TaskTilesInitMultiRow`），反量化阶段 `Dequant` 的布局在 `Init` 中固定（`csrc/kernels/dequant.h` 的 `Dequant::Init`），两阶段基址都从 UB 0 起、SyncAll 锁步保证不共存。MIX 块内 AIC 与 AIV 分属不同物理核，L1/L0 与 UB 互不挤占。硬件容量（910B/dav C220，NpuArch 2201，CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`）：L0A 64KB、L0B 64KB、L1 512KB，L0C 总容量 128KB（`l0_c_size=131072`，16 bank × 8KB），Mmad 累加缓冲即 `TPosition::CO1` 且占满整个 L0C；AIV UB 预算取 `UB_SIZE=192KB`（`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`，4KB×48 bank），每个 AIV subblock 各持一份独立 UB、布局相同。
 
 dtype 记法（宏 `FUSED_QUANT_MATMUL_DEQUANT_FUNC_DEFINE` 固定 `FusedQuantMatmulDequant<int8_t, int32_t, half, bfloat16_t>`）：AIC 侧 `Matmul<int8_t, int32_t, half>`；AIV 侧量化 `QuantDyn<bfloat16_t>`/`Quant<bfloat16_t>`（XDtype=bfloat16_t）、反量化 `Dequant<half>`。典型配置取 GLM-5.1 TP16 per-rank dense/shared-expert 动态 W8A8（`tests/performance/perf_fused_quant_matmul_dequant.py` 的 `MODEL_SIZES` 中 `dense_gate_up`：m=4096、n=1536、k=6144，dyn outScale、无 bias）：host `PickMatmulTiling` 产出 m0=128、n0=256、k0=512；AIV 量化阶段 k=6144、总 AIV 数=2×AIC_NUM（本机 AIC_NUM=25）→ tileRows=82>1 走多行路径，`QuantDyn` 行数 rows=2；反量化阶段 `nTile` 固定 12288、AIV 行块 m0/GetTaskRatio()=64。仅 int8 一个实例化，占用列取单列。
 
@@ -79,7 +79,7 @@ dtype 记法（宏 `FUSED_QUANT_MATMUL_DEQUANT_FUNC_DEFINE` 固定 `FusedQuantMa
 | `l0bBuf` | `(n0, kQtileSize)`=`(256, 128)` | int8_t | 2（事件0/1，kIdx2） | `n0*kQtileSize*sizeof(Dtype)` | 65536 |
 | **合计** | | | | | **65536** |
 
-**AIC L0C（CO1 区，容量 128KB；总容量 256KB 含 CO2）**
+**AIC L0C（CO1 区，容量 128KB）**
 
 | 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
 |---|---|---|---|---|---|

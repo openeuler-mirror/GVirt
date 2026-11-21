@@ -182,7 +182,7 @@ C8 的 fp32 scores 直接搬入 `mrgSortBuf0`,`in[0]/in[1]` 交替暂存 fp16 K 
 
 ### 片上缓冲分配与占用汇总(AIC L1/L0A/L0B/L0C、AIV UB)
 
-`Init`(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Init`)手动排布全部片上缓冲:AIC 侧(`__DAV_C220_CUBE__`)依次在 L1(`TPosition::A1`)/L0A(`A2`)/L0B(`B2`)/L0C(`CO1`)上累进 `bufferAddr` 偏移,L1 四个缓冲连续排布,L0A/L0B/L0C 三级物理独立、各自从偏移 0 重新起排;AIV 侧(`__DAV_C220_VEC__`)在 UB 上排布,低地址区自 0 顺序累进、`mrgSortBuf0` 钉在顶端,`assert(off <= invoff)` 保证低区不越界。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L0A 64KB、L0B 64KB、L1 512KB,L0C 总容量 256KB(`l0_c_size=262144`)为 CO1/CO2 两区之和,mmad 累加缓冲(`TPosition::CO1`)可用的 CO1 区为 **128KB**,下文 L0C 占用均按 CO1 128KB 计;AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每个 AIV subblock 各持一份独立 UB、布局相同。
+`Init`(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::Init`)手动排布全部片上缓冲:AIC 侧(`__DAV_C220_CUBE__`)依次在 L1(`TPosition::A1`)/L0A(`A2`)/L0B(`B2`)/L0C(`CO1`)上累进 `bufferAddr` 偏移,L1 四个缓冲连续排布,L0A/L0B/L0C 三级物理独立、各自从偏移 0 重新起排;AIV 侧(`__DAV_C220_VEC__`)在 UB 上排布,低地址区自 0 顺序累进、`mrgSortBuf0` 钉在顶端,`assert(off <= invoff)` 保证低区不越界。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L0A 64KB、L0B 64KB、L1 512KB,L0C 总容量 128KB（`l0_c_size=131072`，16 bank × 8KB），Mmad 累加缓冲即 `TPosition::CO1` 且占满整个 L0C;AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每个 AIV subblock 各持一份独立 UB、布局相同。
 
 dtype 记法(模板实参,见 `INDEXER_TOPK_FUNC_DEFINE` / `INDEXER_TOPK_C8_FUNC_DEFINE`):`Dtype` 为 q/KCache 元素类型,`WeightDtype` 为 weight 与 per-head QK 得分类型,`MatDtype` 为 mmad 累加器类型——浮点路径为 `<fp16|bf16, float, fp16|bf16, fp16|bf16>`(2B/2B/4B),C8 路径为 `<int8_t, int32_t, half, float>`(1B/2B/4B);`WeightDtype` 在所有路径恒为 2B,故 UB 布局与 dtype 无关。下表 shape 为逻辑形状(L1/L0 内实际按 Nd2Nz/NZ 分形排布),单份大小列为与代码一致的字节数公式;占用列为典型模型配置下该变量的实际字节数(含乒乓份数)——两条路径同取 nHeads=64、headDim=128、blockSize=128,占用差异仅来自 dtype。
 
@@ -212,7 +212,7 @@ dtype 记法(模板实参,见 `INDEXER_TOPK_FUNC_DEFINE` / `INDEXER_TOPK_C8_FUNC
 | `kql0bBuf` | `(blockSize, nHeads)` | WeightDtype | 2(事件2/3) | `blockSize*nHeads*sizeof(WeightDtype)` | 32768 | 32768 |
 | **合计** | | | | | **65536** | **49152** |
 
-**AIC L0C(CO1 区,容量 128KB;总容量 256KB 含 CO2)**
+**AIC L0C(CO1 区,容量 128KB)**
 
 | 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 浮点占用(B) | C8 占用(B) |
 |---|---|---|---|---|---|---|

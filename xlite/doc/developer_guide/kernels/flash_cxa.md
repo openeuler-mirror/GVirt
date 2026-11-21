@@ -131,7 +131,7 @@ host 侧约束(`csrc/op.cpp` 的 `XliteOpFlashCXA`(约束校验段,关键字 `MA
 
 ### 片上缓冲分配与占用汇总(AIC L1/L0A/L0B/L0C、AIV UB)
 
-AIC 侧与 cxa 完全共用 `csrc/kernels/cxa_aic_helper.h` 的 `CxaAicHelper::Init` 布局(flash 恒 sparse,tiling 常量与典型配置下的数值均与 cxa 一致,排布机制与逐表解读见 [cxa.md](cxa.md) 的同名小节):QK 段与 SV 段在同级的 `bufferAddr` 各自从 0 重新起排、串行互斥复用,该级实际占用取两段较大者。AIV 侧为 `RunAivSoftmaxPingPong` + `RunAivSoftmaxUpdate`(`csrc/kernels/softmax_attn_aiv.h`)函数内联排布,`off` 从 0 顺序累进、每槽按 `VECTOR_MAX_BYTESIZE=256B` 向上对齐。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L1 512KB、L0A 64KB、L0B 64KB,L0C 总容量 256KB(`l0_c_size=262144`)系 CO1/CO2 两区之和,mmad 累加(`TPosition::CO1`)可用的 CO1 区为 **128KB**,下文 L0C 占用均按 CO1 128KB 计;AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`),每个 AIV subblock 各持一份独立 UB。
+AIC 侧与 cxa 完全共用 `csrc/kernels/cxa_aic_helper.h` 的 `CxaAicHelper::Init` 布局(flash 恒 sparse,tiling 常量与典型配置下的数值均与 cxa 一致,排布机制与逐表解读见 [cxa.md](cxa.md) 的同名小节):QK 段与 SV 段在同级的 `bufferAddr` 各自从 0 重新起排、串行互斥复用,该级实际占用取两段较大者。AIV 侧为 `RunAivSoftmaxPingPong` + `RunAivSoftmaxUpdate`(`csrc/kernels/softmax_attn_aiv.h`)函数内联排布,`off` 从 0 顺序累进、每槽按 `VECTOR_MAX_BYTESIZE=256B` 向上对齐。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L1 512KB、L0A 64KB、L0B 64KB,L0C 总容量 128KB（`l0_c_size=131072`，16 bank × 8KB），Mmad 累加缓冲即 `TPosition::CO1` 且占满整个 L0C;AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`),每个 AIV subblock 各持一份独立 UB。
 
 dtype 记法:`FlashCXA<Dtype>` 仅以 bfloat16_t 实例化(`csrc/kernels/flash_cxa_bfloat16_t.cpp`),`Dtype`=bf16(2B),L0C mmad 累加器为 float(4B)。典型配置取 `tests/kernels/cxa.py` 的 c4a-topk 模型(nHeads=16、headDim=512、windowSize=128 → `swaSegWidth=272`、compressRatio=4、indexTopK=512、swaBlockSize=64、compressBlockSize=128)与长序列工作负载 `(1, [131071], [1])`(`tileSizeOfCachedKV=8192`:`compressTotalLen = 131072/4 = 32768` → `kvNum=4`,SWA 段只挂首 tile,`qkStride = 272+8192 = 8464`)。AIC 表与 cxa.md 相同(swaBlockSize=64、compressBlockSize=128、headDim=512),占用 = 单份大小 × 乒乓个数。
 
@@ -179,7 +179,7 @@ dtype 记法:`FlashCXA<Dtype>` 仅以 bfloat16_t 实例化(`csrc/kernels/flash_c
 | `svl0bBuf` | `(svn0, svwkMax)`=(256, 64) | bf16 | 2(事件0/1) | `svn0*svwkMax*sizeof(Dtype)` | 65536 |
 | **合计** | | | | | **65536** |
 
-**AIC L0C(CO1 区,容量 128KB;总容量 256KB 含 CO2)——QK 段**
+**AIC L0C(CO1 区,容量 128KB)——QK 段**
 
 | 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
 |---|---|---|---|---|---|
@@ -245,7 +245,7 @@ flash 路径 `saveMaxSum` 恒为 true(`max[curr]`/`sum[curr]` 工作区非空,`m
 
 要点:
 
-- AIC 侧各级占用与 cxa 完全一致:`svl0cBuf` = XLITE_MAX_M0(128)×svn0(256)×4B = 128KB 恰好顶满 CO1 区(CO1/CO2 两区各 128KB 的实证),L0A/L0B 顶满 64KB,排布机制(QK/SV 互斥复用、svn0 自适应)详见 [cxa.md](cxa.md) 的同名小节;
+- AIC 侧各级占用与 cxa 完全一致:`svl0cBuf` = XLITE_MAX_M0(128)×svn0(256)×4B = 128KB 恰好顶满 CO1 区(CO1 ≥ 128KB 的下界旁证,非 L0C 总量证明),L0A/L0B 顶满 64KB,排布机制(QK/SV 互斥复用、svn0 自适应)详见 [cxa.md](cxa.md) 的同名小节;
 - **flash 独有的 UB 大头是 `RunAivSoftmaxPingPong`**(典型 132608B、67.4%):行宽 `len` 的上界是 `qkStride = swaSegWidth + tileSizeOfCachedKV`,host 校验 `swaSegWidth + tileSizeOfCachedKV <= MAX_SOFTMAX_PINGPONG_LEN=10496`(`csrc/op.cpp` 的 `XliteOpFlashCXA`,另有 `swaSegWidth <= MAX_SWA_SEG_WIDTH=4096` 与 `tileSizeOfCachedKV <= 10496` 两道前置校验)正是该布局的容量来源;SWA 段只挂首 tile 使首 tile 成为最宽行(8464),后续纯压缩 tile 行宽 8192、且无 sink 槽;`maxOut`/`sumOut` 因 flash 恒传 max/sum 工作区(`saveMaxSum=true`)而占位,与 cxa(恒传 nullptr)不同;
 - **`indexTopK <= MAX_TOPK_NUM=2048` 的 host 校验**约束 topk 槽位(`indices`/`inTopK`/`currIndices` 等),与 `tileSizeOfCachedKV` 校验共同构成 PingPong UB 上界的双重来源;
 - 跨核 RingSync 的标量 `val`(`SetNextCore`/`WaitPrevCore`/`ResetPrevCore`)固定借用 UB 偏移 0 的 4 字节,与 `in[0]` 首元素别名——`SetNextCore` 前先 `set_flag/wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0)` 等 MTE3 队列排空,且下一 tile 的 `in` 会被重新搬入覆写,不占独立槽位(与 [indexer_topk](indexer_topk.md) 的跨核接力同模式)。

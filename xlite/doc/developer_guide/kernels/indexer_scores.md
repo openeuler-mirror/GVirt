@@ -105,7 +105,7 @@ query tile 划分:`queryTileSize = MAX_M0 / nHeads`(`csrc/kernels/indexer_scores
 
 ### 片上缓冲分配与占用汇总(AIC L1/L0A/L0B/L0C)
 
-`Init`(`csrc/kernels/indexer_scores.h` 的 `IndexerScores::Init`)手动排布全部片上缓冲:L1(`TPosition::A1`)上四个缓冲连续累进 `bufferAddr`,L0A(`A2`)/L0B(`B2`)/L0C(`CO1`)三级物理独立、各自从偏移 0 重新起排。本算子为纯 Cube 核(`KERNEL_TASK_TYPE_AIC_ONLY`),无 AIV/UB 分配,实际使用的存储级即 L1/L0A/L0B/L0C 四级。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L0A 64KB、L0B 64KB、L1 512KB,L0C 总容量 256KB(`l0_c_size=262144`)为 CO1/CO2 两区之和,mmad 累加缓冲(`TPosition::CO1`)可用的 CO1 区为 **128KB**,下文 L0C 占用均按 CO1 128KB 计。dtype 记法:`Dtype` 为 q/kCache/weight/scores 的元素类型(fp16/bf16 实例化,`l0cBuf` 固定 `LocalTensor<float>`);两条路径均为 2B、`k0=256/sizeof(Dtype)=128`,占用完全相同,下表只给单占用列。缓冲大小只依赖编译期上限(`MAX_M0=MAX_N0=128`、`k0`)与 nHeads/headDim/blockSize,与 batch、序列长度无关;典型配置取测试配置(`tests/kernels/indexer_scores.py`)nHeads=64、headDim=128、blockSize=128——此时 `queryTileSize=MAX_M0/nHeads=2`,两级 mmad 的分块上界 `mBlockPad`(`ROUND_UP(kvLen,MBLOCKSIZE)`≤blockSize)、`nBlockPad`(`ROUND_UP(queryTileSize*nHeads,NBLOCKSIZE)`)与 `wnBlockPad`(`ROUND_UP(kvLen,NBLOCKSIZE)`)均取满 128。
+`Init`(`csrc/kernels/indexer_scores.h` 的 `IndexerScores::Init`)手动排布全部片上缓冲:L1(`TPosition::A1`)上四个缓冲连续累进 `bufferAddr`,L0A(`A2`)/L0B(`B2`)/L0C(`CO1`)三级物理独立、各自从偏移 0 重新起排。本算子为纯 Cube 核(`KERNEL_TASK_TYPE_AIC_ONLY`),无 AIV/UB 分配,实际使用的存储级即 L1/L0A/L0B/L0C 四级。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L0A 64KB、L0B 64KB、L1 512KB,L0C 总容量 128KB（`l0_c_size=131072`，16 bank × 8KB），Mmad 累加缓冲即 `TPosition::CO1` 且占满整个 L0C。dtype 记法:`Dtype` 为 q/kCache/weight/scores 的元素类型(fp16/bf16 实例化,`l0cBuf` 固定 `LocalTensor<float>`);两条路径均为 2B、`k0=256/sizeof(Dtype)=128`,占用完全相同,下表只给单占用列。缓冲大小只依赖编译期上限(`MAX_M0=MAX_N0=128`、`k0`)与 nHeads/headDim/blockSize,与 batch、序列长度无关;典型配置取测试配置(`tests/kernels/indexer_scores.py`)nHeads=64、headDim=128、blockSize=128——此时 `queryTileSize=MAX_M0/nHeads=2`,两级 mmad 的分块上界 `mBlockPad`(`ROUND_UP(kvLen,MBLOCKSIZE)`≤blockSize)、`nBlockPad`(`ROUND_UP(queryTileSize*nHeads,NBLOCKSIZE)`)与 `wnBlockPad`(`ROUND_UP(kvLen,NBLOCKSIZE)`)均取满 128。
 
 **AIC L1(A1,容量 512KB)**
 
@@ -131,7 +131,7 @@ query tile 划分:`queryTileSize = MAX_M0 / nHeads`(`csrc/kernels/indexer_scores
 | `l0bBuf` | `(MAX_N0, k0)` | Dtype | 2(事件0/1) | `MAX_N0*k0*sizeof(Dtype)` | 65536 |
 | **合计** | | | | | **65536** |
 
-**AIC L0C(CO1 区,容量 128KB;总容量 256KB 含 CO2)**
+**AIC L0C(CO1 区,容量 128KB)**
 
 | 变量 | shape(每份) | dtype | 乒乓个数 | 单份大小 | 占用(B) |
 |---|---|---|---|---|---|

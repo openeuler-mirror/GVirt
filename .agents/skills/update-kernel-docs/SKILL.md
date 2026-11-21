@@ -64,7 +64,7 @@ description: Generate or refresh operator implementation-principle docs in xlite
 - **列**:变量、shape(每份)、dtype(模板参数名 + 各 dtype 路径的实例化映射)、乒乓个数(标注所属事件族)、单份大小(与代码一致的字节公式,如 `blockSize*headDim*sizeof(Dtype)`)、典型模型配置占用字节数(= 单份大小 × 乒乓个数,含对齐垫片时按槽位计)。两条 dtype 路径同取一组典型配置(具体值写在小节引言),使占用差异仅来自 dtype;UB 布局与 dtype 无关时单占用列即可
 - **合计行**:每张表末尾加粗「合计」行,给出该存储级总占用
 - **占用汇总表**:各表占用列之和 vs 硬件容量 + 占比;再以要点列出关键结论(哪级最紧、哪个缓冲是大头、断言/host 校验的容量来源)
-- **硬件容量基准**(910B/dav C220,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L1 512KB、L0A 64KB、L0B 64KB、L0C 总容量 256KB 系 CO1/CO2 两区之和(mmad 累加可用的 CO1 区 **128KB**)、UB 192KB(`kernel_macro.h` 的 `UB_SIZE`)
+- **硬件容量基准**(910B/dav C220,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L1 512KB、L0A 64KB、L0B 64KB、L0C 128KB(`l0_c_size=131072`)、UB 192KB(`kernel_macro.h` 的 `UB_SIZE`)
 - **数值自检**:各表占用列之和必须与占用汇总表逐级严格一致,建议写一次性脚本复核后再提交
 
 ## 信息来源(按优先级)
@@ -124,5 +124,5 @@ for f in $(ls *.md | grep -v '^README.md$'); do grep -q "片上缓冲分配与�
 - **dtype 实例化文件 vs 算子**:文件名匹配 `<name>_*.cpp` 时注意 `cast_float_bfloat16_t.cpp` 这类双 dtype 文件,不要误拆成两个算子
 - **shape 推断**:优先以 `_C.pyi` docstring 和测试代码为准,kernel 签名中的裸指针参数(如 `GM_ADDR q`)需结合 host 侧封装还原 shape
 - **文档语言**:文档为中文,代码注释是中英混合,统一用中文表述;术语(算子名、指令名、宏名)保留英文原文
-- **L0C 容量按 CO1 区计**:CANN 平台配置 `l0_c_size=262144` 是 L0C 总容量(CO1/CO2 两区之和),`TPosition::CO1` 的 mmad 累加缓冲只能用 CO1 区 **128KB**——容量说明中 L0C 的占用与占比一律按 CO1 128KB 计算,勿把配置文件的总量当可用容量(旁证:`csrc/kernels/cxa_aic_helper.h` 的 `svl0cBuf` = 128×256×4B 恰好顶满 CO1)
+- **L0C 容量**:CANN 平台配置 `l0_c_size=131072`(16 bank × 8KB)即 L0C 总容量 **128KB**,`TPosition::CO1` 的 mmad 累加缓冲占满整个 L0C——容量说明中 L0C 的占用与占比一律按 128KB 计算(旁证:`csrc/kernels/cxa_aic_helper.h` 的 `svl0cBuf` = 128×256×4B 恰好顶满 L0C)
 - **容量小节必备**:存量文档缺「片上缓冲分配与占用汇总」小节时,刷新该算子必须按「片上缓冲容量说明」补齐,不能只改过时的参数/引用

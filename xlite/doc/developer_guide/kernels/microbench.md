@@ -245,8 +245,7 @@ sqrt 不在依赖链上，差分量是“mul 链上再加一条超越指令”�
 `BENCH_VEC_CARRIER_BODY`），实验 5 的 Cube 档复用 `csrc/kernels/matmul.h` 的
 `Matmul::Init`（`Matmul<half, float, half>`，见 3.7）按 tile 形状排布 L1/L0A/L0B/L0C。
 硬件容量（910B/dav C220，NpuArch 2201，CANN 平台配置）：L0A 64KB、L0B 64KB、
-L1 512KB，L0C 总容量 256KB 为 CO1/CO2 两区之和，mmad 累加缓冲（`TPosition::CO1`）
-可用的 CO1 区为 **128KB**；AIV UB 预算取 `UB_SIZE=192KB`（`csrc/kernels/kernel_macro.h`
+L1 512KB，L0C 总容量 128KB（`l0_c_size=131072`，16 bank × 8KB），Mmad 累加缓冲即 `TPosition::CO1` 且占满整个 L0C；AIV UB 预算取 `UB_SIZE=192KB`（`csrc/kernels/kernel_macro.h`
 的 `UB_SIZE`，4KB×48 bank），每 AIV block 一份。
 
 **空档与标量档无片上缓冲**：实验 1（`empty_{aiv,aic,mix}`）与实验 2
@@ -297,7 +296,7 @@ AIC L0B（B2，容量 64KB）：
 | `l0bBuf` | `(n0, kQtileSize=64)` | half | 2（事件0/1） | `n0*kQtileSize*sizeof(half)` | 32768 |
 | **合计** | | | | | **32768** |
 
-AIC L0C（CO1 区，容量 128KB；总容量 256KB 含 CO2）：
+AIC L0C（CO1 区，容量 128KB）：
 
 | 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
 |------|---------------|-------|----------|----------|------------|

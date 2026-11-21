@@ -80,7 +80,7 @@ deqScale: GM --MTE2--> L1(C1) --FIX--> C2PIPE2GM(fixpipe buffer)
 - tile 划分：`mLoop = ceil(m/m0)`，`nLoop = ceil(n/n0)`（`csrc/kernels/matmul.h` 的 `Matmul::TaskTilesInit`，关键字 `mLoop = DIV_ROUND_UP(m, m0)`），`TaskTilesInit` 返回 `mLoop * nLoop` 个 tile；多核按 `for (idx = GetBlockIdx(); idx < tiles; idx += GetBlockNum())` 交错认领（`csrc/kernels/matmul.h` 的 `Matmul::Run`，关键字 `for (int64_t idx = GetBlockIdx()`）。
 - 默认分块（`m0 == -1` 时）：`m0=128`，`n0=256`，`k0 = 512*8/dtypeBits`；hasBias/hasDeqScale 时钳制 `n0 ≤ 256` 以留出 fixpipe/bias buffer 空间（`csrc/kernels/matmul.h` 的 `Matmul::Init`，关键字 `if (m0 == (uint64_t)-1)`）。host 侧默认逻辑在 `csrc/auto_tuner.cpp` 的 `PickMatmulTiling`：`m0 = min(ROUND_UP(m,32), 128)`、`n0 = 256`（needExtraSpace 即 hasBias/hasDeqScale 时钳制 `n0 ≤ 256`）、`k0 = 4096/dtypeBits`，并在 `totalLoops < 3*aicNum` 且尾核负载不均时进一步缩小 n0（64/128/256/384）并可能减半 k0、缩 m0 到 64，以保证各 AICore 均载。
 - K 维两级量化：L1 中 A 的 tile 覆盖 `kDtileSize = 2*k0`（8 个 L0 量化片），L0A/L0B 的单次 Mmad 片为 `kQtileSize = k0/4`（`csrc/kernels/matmul.h` 的 `Matmul::Init`，关键字 `kDtileSize = k0 << 1`），即 A 的 GM→L1 每 8 次 K 循环做一次（`kIdx8`），B 每 4 次一次（`kIdx4`），L0A/L0B 乒乓每 2 次一次（`kIdx2`）。
-- 分形块尺寸：`mBlockSize=16`；`nBlockSize=16`（transpose 且量化类型时为 `32*8/dtypeBits`，即 int8 为 32、int4 为 64，对应 B 转置分形单元 32x32x1B）；`kBlockSize = 32*8/dtypeBits`（fp16 为 32、int8 为 32、int4 为 64，`csrc/kernels/matmul.h` 的 `Matmul::Init`，关键字 `mBlockSize = 16`）。边界 tile 用 `mActual/nActual` 与对应 `ROUND_UP(..., xBlockSize)` 的 pad 值处理（`csrc/kernels/matmul.h` 的 `Matmul::RunTileBody`，关键字 `mActual = m - mOffset`）。
+- 分形块尺寸：`mBlockSize=16`；`nBlockSize=16`，transpose 时 `nBlockSize = 32*8/dtypeBits`（float 8、fp16/bf16 16、int8 32、int4 64，int8/int4 转置对应 32x32x1B 分形单元）；`kBlockSize = 32*8/dtypeBits`，取值同为 float 8、fp16/bf16 16、int8 32、int4 64，`csrc/kernels/matmul.h` 的 `Matmul::Init`，关键字 `mBlockSize = 16`）。边界 tile 用 `mActual/nActual` 与对应 `ROUND_UP(..., xBlockSize)` 的 pad 值处理（`csrc/kernels/matmul.h` 的 `Matmul::RunTileBody`，关键字 `mActual = m - mOffset`）。
 - swizzle 重排：`GetMNBlockIdx`（`csrc/kernels/matmul.h` 的 `Matmul::GetMNBlockIdx`）支持两种方向——`swizzleDirection=0`（Zn：沿 M 方向按 `swizzlCount` 分组、组间 N 序蛇形遍历）与 `=1`（Nz：沿 N 方向分组、组间 M 序蛇形遍历）——调整 tile 遍历顺序以提升 cache 命中。host 侧 `XlitePickSwizzle` 按 (n, k) 查表（实测 910B3 上 `{6144,2048}` 与 `{2048,6144}` 均取 `0xe01`，即 count=14、direction=1，`csrc/swizzle.cpp` 的 `XlitePickSwizzle`，关键字 `BestSwizzles` 表）。
 
 ### L1/L0 缓冲布局
@@ -126,7 +126,7 @@ bias 从 L1 到 C2 的搬运以 64B 数据块为单位（`C2_DATABLOCK`），deq
 
 ### 片上缓冲分配与占用汇总（AIC L1/L0A/L0B/L0C）
 
-`Init`（`csrc/kernels/matmul.h` 的 `Matmul::Init`）按分块尺寸手动排布全部片上缓冲：L1 上 `l1aBuf`/`l1bBuf` 两对乒乓自偏移 0 顺序累进，`l1BiasBuf` 与 `l1DeqScaleBuf` 逻辑位为 C1、偏移重置回 `l1bBuf[0]` 起点与其共享槽位（bias/deqScale 在 B 的首次 GM→L1 之前用毕释放，时序互斥，见 `Init` 的 `shared with l1bBuf` 注释）；L0A（A2）、L0B（B2）、L0C（CO1）三级物理独立、各自从偏移 0 重新起排；bias 表与 deqScale 分别落在 CO1 之外的固定专用区 C2 Bias Table（1KB）与 C2PIPE2GM fixpipe buffer（2KB）。硬件容量（910B/dav C220，NpuArch 2201，CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`）：L0A 64KB、L0B 64KB、L1 512KB，L0C 总容量 256KB（`l0_c_size=262144`）为 CO1/CO2 两区之和，mmad 累加缓冲（`TPosition::CO1`）可用的 CO1 区为 **128KB**，下文 L0C 占用均按 CO1 128KB 计；本算子为 `KERNEL_TYPE_AIC_ONLY`，不使用 UB。
+`Init`（`csrc/kernels/matmul.h` 的 `Matmul::Init`）按分块尺寸手动排布全部片上缓冲：L1 上 `l1aBuf`/`l1bBuf` 两对乒乓自偏移 0 顺序累进，`l1BiasBuf` 与 `l1DeqScaleBuf` 逻辑位为 C1、偏移重置回 `l1bBuf[0]` 起点与其共享槽位（bias/deqScale 在 B 的首次 GM→L1 之前用毕释放，时序互斥，见 `Init` 的 `shared with l1bBuf` 注释）；L0A（A2）、L0B（B2）、L0C（CO1）三级物理独立、各自从偏移 0 重新起排；bias 表与 deqScale 分别落在 CO1 之外的固定专用区 C2 Bias Table（1KB）与 C2PIPE2GM fixpipe buffer（2KB）。硬件容量（910B/dav C220，NpuArch 2201，CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`）：L0A 64KB、L0B 64KB、L1 512KB，L0C 总容量 **128KB**（`l0_c_size=131072`，16 bank × 8KB），Mmad 累加缓冲即 `TPosition::CO1` 且占满整个 L0C；本算子为 `KERNEL_TYPE_AIC_ONLY`，不使用 UB。
 
 dtype 记法（模板实参，见宏 `MATMUL_FUNC_DEFINE`）：`Dtype` 为 x/y 元素类型，`MatDtype` 为 bias/L0C 累加类型，`OutDtype` 为 z 类型——浮点路径 `<fp16|bf16|float, float, 同 Dtype>`，int8 路径 `<int8_t, int32_t, half>`（W8A8），int4 路径 `<int4b_t, int32_t, half>`（W4A4/W4A8）。典型配置取 GLM-5.1 TP16 per-rank dense W8A8 线性（`tests/performance/perf_fused_quant_matmul_dequant.py` 的 `MODEL_SIZES` 中 `dense_gate_up`：m=4096、n=1536、k=6144，带 deqScale），host `PickMatmulTiling`（`csrc/auto_tuner.cpp` 的 `PickMatmulTiling`）产出 m0=128、n0=256、k0=512（int8）/256（fp16/bf16）/1024（int4）。默认 `k0 = 512*8/dtypeBits` 随 dtype 反比缩放，三条路径的字节占用完全一致（差异仅在单份 shape 的 K 维深度：fp16 256、int8 512、int4 1024），占用列故取单列；占用只由分块决定，与问题规模 m/n/k 无关（尾部 tile 只会更小）。下表 shape 为逻辑形状（L1/L0 内实际按 Nd2Nz/NZ 分形排布）。
 
@@ -156,7 +156,7 @@ dtype 记法（模板实参，见宏 `MATMUL_FUNC_DEFINE`）：`Dtype` 为 x/y �
 | `l0bBuf` | `(n0, kQtileSize)`=`(256, k0/4)` | Dtype | 2（事件0/1，kIdx2） | `n0*kQtileSize*sizeof(Dtype)` | 65536 |
 | **合计** | | | | | **65536** |
 
-**AIC L0C（CO1 区，容量 128KB；总容量 256KB 含 CO2）**
+**AIC L0C（`TPosition::CO1`，容量 128KB）**
 
 | 变量 | shape（每份） | dtype | 乒乓个数 | 单份大小 | 占用（B） |
 |---|---|---|---|---|---|
@@ -172,7 +172,7 @@ bias 链路的 `l0BiasBuf`（C2 Bias Table，固定 1KB，64B 数据块）与 de
 | L1 | 512 KB | 524288 B | 100% |
 | L0A | 64 KB | 32768 B | 50% |
 | L0B | 64 KB | 65536 B | 100% |
-| L0C（CO1） | 128 KB | 131072 B | 100% |
+| L0C | 128 KB | 131072 B | 100% |
 
 要点：
 
