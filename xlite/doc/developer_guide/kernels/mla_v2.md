@@ -51,6 +51,8 @@ mla_v2(
 )
 ```
 
+调用块中的 `weight_nz` 即 Python 绑定的 `nz` 关键字参数(测试以局部变量 `nz=weight_nz` 传入):该参数已废弃并将被移除,传入值被忽略(`csrc/_C.cpp` 的 `MLAV2`,关键字 `(void)weightNz` 的 deprecated no-op 注释),`wuk_t`/`wuv` 的 FRACTAL_NZ 存储格式由 `InitXTensor` 自动检测。
+
 host 封装 `MLAV2`(`csrc/_C.cpp` 的 `MLAV2`)的 `qAbsorb = einsum(q_nope, wukT)` 与 `output = einsum(oAbsorb, wuv)` 在 paged / dense 两条路径**均无条件执行**(对应 `XliteOpEinsumMhtHtdMhd` 分别位于 `if (dense)` 之前与所有分支之后);两条路径唯一区别是 dense(`dense=True`)在吸收前多一步 `gather_sparse_kv_cache` 收集 top-k token 到连续 `kDense`/`peDense`(见 `csrc/_C.cpp` 的 `MLAV2` `dense` 分支,关键字 `XliteOpGatherSparseKVCache`),随后以 `topK` 为 `maxSeqLen`、内核 `topK=0` 调 `XliteOpMLAV2`,输入/输出契约与 paged 相同。接口完整 docstring 见 `xlite/_C.pyi` 的 `mla_v2`(注意 Python API 不含 `max_seq_len`,host 取 `maxSeqLen = block_tables.shape[1] * blockSize`(`shape[1]` 为运行期宽度:V2 持久表由 PrepareAttn 收窄,standalone 由 lens 推导收窄),再传给 kernel)。kernel 签名(`csrc/kernels/mla_v2.h` 的 `mla_v2_<dtype>` 入口,宏 `MLA_V2_FUNC_DEFINE`):
 
 ```cpp

@@ -27,7 +27,7 @@ fusion_operator_matmul_dequant_pipeline_##dtype(x, weight, out, bias, weightScal
 | weightNz / transposeWeight | 标量 | - | uint64_t | 同 matmul 的 nz / transpose |
 | m0, n0, k0 | 标量 | - | uint64_t | host 侧 `PickMatmulTiling` 自动选择的分块（`csrc/op.cpp` 的 `XliteOpFusionOperatorMatmulDequantPipeline`，关键字 `PickMatmulTiling`），与独立 matmul 完全同一策略 |
 
-Python 调用方式（`tests/kernels/fusion_operator_matmul_dequant_pipeline.py` 的 `run_case`，调用 `fusion_operator_matmul_dequant_pipeline`，关键字 `fused_out`）：`fusion_operator_matmul_dequant_pipeline(rt, x, weight, out, bias, scale, weight_nz, transpose, out_scale, num)`。host 侧 `XliteOpFusionOperatorMatmulDequantPipeline`（`csrc/op.cpp` 的 `XliteOpFusionOperatorMatmulDequantPipeline`）做 dtype/shape/参数完整性校验后直接 launch，不经过任何 dtype 视图转换。
+Python 调用方式（`tests/kernels/fusion_operator_matmul_dequant_pipeline.py` 的 `run_case`，调用 `fusion_operator_matmul_dequant_pipeline`，关键字 `fused_out`）：`fusion_operator_matmul_dequant_pipeline(rt, x, weight, out, bias, scale, weight_nz, transpose, out_scale, num)`。`weight_nz` 已废弃并将被移除：传入值被忽略，`weight` 的 FRACTAL_NZ 存储格式由 `InitXTensor` 自动检测（host 侧取 `weight.nz` 传入 kernel，见 `csrc/op.cpp` 的 `XliteOpFusionOperatorMatmulDequantPipeline`，关键字 `const bool weightNZ`）。host 侧 `XliteOpFusionOperatorMatmulDequantPipeline`（`csrc/op.cpp` 的 `XliteOpFusionOperatorMatmulDequantPipeline`）做 dtype/shape/参数完整性校验后直接 launch，不经过任何 dtype 视图转换。
 
 模型路径开关：`XliteOpMatmulDeQuant`（`csrc/op.cpp`）按 shape **自动**决定走融合还是串行路径，不再由环境变量控制。判定条件为收益门限 `FusedMatmulDeQuantBeneficial(m, k, dynQuant)`（替代原 `XLITE_FUSED_DENSE_W8A8` 全局开关，门限来自 910B3 气泡校准的单算子收益实测——融合 MIX 核有 ~3µs 固定气泡，小 shape 收益为负）：`m ≥ 8192` 恒融合；动态量化（outScale 非空，per-token dequant）时 `m ≥ 2048 && k ≥ 2048` 融合；静态量化时 `m ≥ 6144 && k ≥ 1024` 融合。
 

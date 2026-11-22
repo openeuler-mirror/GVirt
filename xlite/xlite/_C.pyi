@@ -155,7 +155,7 @@ class ModelConfig:
         weight_nz (bool): Deprecated: ignored (nz is auto-detected); will be removed.
         experts_weight_transpose (bool): Whether expert weights are transposed.
         experts_weight_nz (bool): Deprecated: ignored (nz is auto-detected); will be removed.
-        gate_captured (bool): Deprecated: ignored (nz is auto-detected); will be removed.
+        gate_captured (bool): Deprecated: ignored; will be removed.
         mla_wuv_weight_nz (bool): Deprecated: ignored (nz is auto-detected); will be removed.
         mla_wukt_weight_nz (bool): Deprecated: ignored (nz is auto-detected); will be removed.
         qkv_bias (bool): Whether MHA QKV has bias.
@@ -290,7 +290,7 @@ class ModelConfig:
     experts_weight_nz: bool = ...
     """Deprecated: ignored (nz is auto-detected); will be removed."""
     gate_captured: bool = ...
-    """Deprecated: ignored (nz is auto-detected); will be removed."""
+    """Deprecated: ignored; will be removed."""
     mla_wuv_weight_nz: bool = ...
     """Deprecated: ignored (nz is auto-detected); will be removed."""
     mla_wukt_weight_nz: bool = ...
@@ -3573,7 +3573,7 @@ def mla_v2(
             ``max_seq_len`` (block-table width narrowed by the lens) must not
             exceed 10496 (``MAX_SOFTMAX_PINGPONG_LEN``) and ``top_k`` must be
             <= 2048 (``MAX_TOPK_NUM``).
-        nz (bool): Whether to use nz weights.
+        nz (bool): Deprecated: ignored (nz is auto-detected); will be removed.
         enable_flash_attention (bool): Whether to use the flash MLA v2 kernel
             (ignored when ``dense=True``).
         tile_size_of_cached_kv (int): Tile size for cached KV in flash MLA v2;
