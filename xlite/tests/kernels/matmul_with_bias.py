@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 import torch_npu  # noqa: F401
 
+from tests.models.weight_utils import nd2nz_or_skip
 from xlite._C import Runtime, matmul_with_bias
 
 torch.npu.set_option({"ALLOW_INTERNAL_FORMAT": True})
@@ -31,7 +32,9 @@ for weight_nz in [False, True]:
                     standard = F.linear(x, y_standard, bias).to(dtype)
 
                     if weight_nz and dtype != torch.float:
-                        y = torch_npu.npu_format_cast(y, 29)
+                        y = nd2nz_or_skip(y, f"[{m}, {k}] x [{n}, {k}] {dtype} weight_nz True")
+                        if y is None:
+                            continue
 
                     torch.npu.synchronize()
                     matmul_with_bias(rt, x, y, z, bias, weight_nz=weight_nz and dtype != torch.float)

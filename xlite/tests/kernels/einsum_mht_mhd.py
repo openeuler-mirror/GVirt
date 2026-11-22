@@ -9,7 +9,7 @@
 import torch
 import torch_npu  # noqa: F401
 
-from tests.models.weight_utils import matrix_nd2nz
+from tests.models.weight_utils import nd2nz_or_skip
 from xlite._C import Runtime, einsum_mht_hdt_mhd, einsum_mht_htd_mhd
 
 rt = Runtime(0, size=500)
@@ -70,7 +70,9 @@ def run_case(einsum_op, weight_layout, dtype, m, h, t, d, weight_nz):
         y = htd.transpose(-1, -2).contiguous()
 
     if weight_nz:
-        y = matrix_nd2nz(y)
+        y = nd2nz_or_skip(y, f"[m={m}, h={h}, t={t}, d={d}, {dtype}, layout={weight_layout}]")
+        if y is None:
+            return True
 
     torch.npu.synchronize()
     einsum_op(rt, mht, y, mhd, m, h, t, d, weight_nz=weight_nz)

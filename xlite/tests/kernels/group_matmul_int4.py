@@ -9,6 +9,7 @@
 import torch
 import torch_npu
 
+from tests.models.weight_utils import nd2nz_or_skip, require_nz_format
 from xlite._C import Runtime, group_matmul, msd_merge_dequant, unpack_activation
 
 # allow weight_nz
@@ -95,6 +96,9 @@ for weight_nz in [True, False]:
         deq_scales = []  # per-channel fp32 antiquant scale
         deq_scales_fixpipe = []  # fixpipe TF32 layout [2n] fp32
         scale_biases = []  # per-expert [n] fp32 = 8 * sum(W * deq_scale)
+        # all experts share the environment, so probe the tag once per case
+        # (on the first cast weight) and skip the whole case when it is missing
+        nz_tag_ok = True
         for i in range(group_num):
             if transpose:
                 # weight stored as [k, n] (matches group_matmul_dequant.py convention);
@@ -127,9 +131,38 @@ for weight_nz in [True, False]:
 
             w_for_pack = weight.contiguous()
             if weight_nz:
-                ACL_FORMAT_FRACTAL_NZ = 29
-                w_for_pack = torch_npu.npu_format_cast(w_for_pack, ACL_FORMAT_FRACTAL_NZ)
-            weights_packed.append(torch_npu.npu_convert_weight_to_int4pack(w_for_pack))
+                if nz_tag_ok:
+                    # sentinel-protected cast; the kernel judges NZ by the tag
+                    # of the tensor it receives — the int4pack output
+                    # (csrc/_C.cpp:2526 IsNpuNzFormat(weights[0])) — so the
+                    # tag check sits after the pack below
+                    w_for_pack = nd2nz_or_skip(
+                        w_for_pack,
+                        f"group_matmul_dequant_int4 (int4, transpose={transpose}, nz={weight_nz})",
+                    )
+                    if w_for_pack is None:
+                        # sentinel failure or silent no-op: the notice is
+                        # printed; drop the case via the flag
+                        nz_tag_ok = False
+                    else:
+                        packed = torch_npu.npu_convert_weight_to_int4pack(w_for_pack)
+                        # an untagged packed weight would fake ND coverage;
+                        # require_nz_format prints the SKIPPED notice
+                        nz_tag_ok = require_nz_format(
+                            packed,
+                            f"group_matmul_dequant_int4 (int4, transpose={transpose}, nz={weight_nz})",
+                        )
+                        if nz_tag_ok:
+                            weights_packed.append(packed)
+                if not nz_tag_ok:
+                    # first expert already reported; the remaining ones share
+                    # the environment and the case-level check below drops it
+                    continue
+            else:
+                weights_packed.append(torch_npu.npu_convert_weight_to_int4pack(w_for_pack))
+
+        if weight_nz and not nz_tag_ok:
+            continue
 
         # ---------- torch W4A8 MSD reference (CPU) ----------
         # Concatenate per-expert per-token scales into [m] following counts order

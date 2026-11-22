@@ -7,8 +7,9 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import torch
-import torch_npu
+import torch_npu  # noqa: F401
 
+from tests.models.weight_utils import nd2nz_or_skip
 from xlite._C import Runtime, matmul_dequant
 
 # allow weight_nz
@@ -89,8 +90,11 @@ for weight_nz in [True, False]:
                 y_in = y.transpose(0, 1).contiguous().reshape(n, k)
 
             if weight_nz:
-                ACL_FORMAT_FRACTAL_NZ = 29
-                y_in = torch_npu.npu_format_cast(y_in, ACL_FORMAT_FRACTAL_NZ)
+                y_in = nd2nz_or_skip(
+                    y_in, f"[{m}, {k}] x [{k}, {n}] {dtype} weight_nz:{weight_nz} transpose:{transpose}"
+                )
+                if y_in is None:
+                    continue
 
             bias = torch.randn(n, dtype=torch.int32, device=f"npu:{dev_id}")
             # deqscale 从 bf16 到 tf32 可以无损转换，因此可以确保 bf16 随机数的 cpu 计算的结果与 npu 一致
