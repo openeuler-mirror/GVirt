@@ -42,6 +42,16 @@ test_cases = [
     # so the chunked traversal is disarmed and the legacy round-robin runs
     # with mLoop >= 2 (kLoop = 9: the third B window recycles slot 0)
     (5230, 4, 576, 128),
+    # 4*k0 < t < 8*k0 and t not a multiple of 4*k0 (bf16/fp16 k0=64 ->
+    # t=384): one tile holds two UNEQUAL B windows (k-block counts 16/8),
+    # so the window block count must be tracked per L1 slot — a member
+    # shared by both slots carries the second window's count into a
+    # first-window residency hit, and the transpose consumer
+    # (CopyToL0BTCol srcStride) then reads L1 at the wrong n-fractal
+    # stride. mLoop=3 x nLoop=1 x h=64 -> totalTiles=192 > aicNum, so the
+    # chunked traversal really produces in-group hits (regression anchor:
+    # hit tiles failed with ~1e2 garbage before the per-slot fix).
+    (257, 64, 384, 128),
 ]
 
 

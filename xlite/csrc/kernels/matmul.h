@@ -388,14 +388,14 @@ private:
                     if (kOffset + kRemSize > k) {
                         kRemSize = k - kOffset;
                     }
-                    k4TileActualBlockNum = DIV_ROUND_UP(kRemSize, kBlockSize);
+                    k4TileActualBlockNum[pingpongL1B] = DIV_ROUND_UP(kRemSize, kBlockSize);
                     if (transpose == 0 && nz == 0) {
                         CopyGmToL1Nd2Nz(l1bBuf[pingpongL1B], bGmBuf[nOffset * k + kOffset], nActual,
                                         kRemSize, k, nActualBlockPad);
                     } else if (transpose == 0 && nz == 1) {
                         CopyGmToL1(l1bBuf[pingpongL1B],
                                    bGmBuf[kOffset * nStride + nOffset * kBlockSize], nActual,
-                                   k4TileActualBlockNum, nStride);
+                                   k4TileActualBlockNum[pingpongL1B], nStride);
                     } else if (transpose == 1 && nz == 0) {
                         CopyGmToL1Nd2Nz(l1bBuf[pingpongL1B], bGmBuf[kOffset * n + nOffset],
                                         kRemSize, nActual, n, ROUND_UP(kRemSize, kBlockSize));
@@ -438,7 +438,8 @@ private:
             }
             if (transpose) {
                 CopyToL0BTCol(l0bBuf[kIdx2], l1bBuf[pingpongL1B], nActualBlockNum,
-                              kIdx4 * kTileBlockNum, kActualBlockNum, k4TileActualBlockNum);
+                              kIdx4 * kTileBlockNum, kActualBlockNum,
+                              k4TileActualBlockNum[pingpongL1B]);
             } else {
                 CopyToL0BCol(l0bBuf[kIdx2], l1bBuf[pingpongL1B], nActualBlockNum,
                              kIdx4 * kTileBlockNum, kActualBlockNum);
@@ -577,16 +578,17 @@ private:
     int kRAOffset[PINGPONG_BUF_NUM];
     int kRBOffset[PINGPONG_BUF_NUM];
     int biasROffset;
-    // Invariant: only recomputed on a B residency miss (the window-load
-    // branch above).  A hit necessarily carries the same (nOffset, kOffset)
-    // key as the load that last wrote this member, and kRemSize is a pure
-    // function of kOffset, so the stale value is exactly the value a reload
-    // would recompute — the member is a safe implicit channel across tiles.
-    // RebindGm / TaskTilesInit reset the residency trackers, so the first B
-    // access after either is guaranteed to miss and recompute it; no
-    // explicit reset is needed there.  Consumers: CopyToL0BTCol on the
-    // transpose path and the nz == 1 CopyGmToL1.
-    int k4TileActualBlockNum;
+    // Per-L1-slot k-block count of the B window resident in that slot
+    // (DIV_ROUND_UP of the window's kRemSize).  Written by the load that
+    // establishes the slot's (nOffset, kOffset) key; a residency hit reads
+    // the same slot, so the entry always matches the slot's layout even
+    // when one tile's two windows have different widths (partial second
+    // window: 4*k0 < k < 8*k0 and k not a multiple of 4*k0 — a single
+    // member shared by both slots would carry the other window's count
+    // into a hit and the transpose path would read L1 at the wrong
+    // n-fractal stride).  Consumers: CopyToL0BTCol on the transpose path
+    // (srcStride) and the nz == 1 CopyGmToL1 (block count).
+    int k4TileActualBlockNum[PINGPONG_BUF_NUM];
 };
 
 #define MATMUL_FUNC_DEFINE(dtype)                                                                  \
