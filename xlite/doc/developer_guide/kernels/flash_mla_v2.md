@@ -6,7 +6,7 @@ MLA 吸收式注意力的 flash(在线 softmax)版本,是 mla_v2 的长序列路
 
 ## 输入输出参数
 
-Python 侧经 `mla_v2(..., enable_flash_attention=True)` 进入 host 分支(规范签名见 `xlite/_C.pyi` 的 `mla_v2`,关键字参数 `nz: bool = False`、`enable_flash_attention: bool = False`、`tile_size_of_cached_kv: int = 8192`、`dense: bool = False`;`tests/kernels/mla.py` 以局部变量 `enable_flash`/`tile_size`/`weight_nz` 按位置传入,关键字 `enable_flash = True`/`tile_size = 8192`):
+Python 侧经 `mla_v2(..., enable_flash_attention=True)` 进入 host 分支(规范签名见 `xlite/_C.pyi` 的 `mla_v2`,关键字参数 `nz: bool = False`——已废弃,传入值被忽略,NZ 由 `InitXTensor` 自动检测——、`enable_flash_attention: bool = False`、`tile_size_of_cached_kv: int = 8192`、`dense: bool = False`;`tests/kernels/mla.py` 以局部变量按关键字传入 `enable_flash_attention=enable_flash`/`tile_size_of_cached_kv=tile_size`/`nz=weight_nz`):
 
 ```python
 mla_v2(

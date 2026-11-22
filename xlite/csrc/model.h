@@ -95,7 +95,7 @@ struct XModelConfig {
     bool expertsWeightTrans = false;
     // Deprecated no-op: ignored (nz is auto-detected); will be removed.
     bool expertsWeightNZ = false;
-    // Deprecated no-op: ignored (nz is auto-detected); will be removed.
+    // Deprecated no-op: ignored; will be removed.
     bool gateCaptured = true;
 
     // Deprecated no-op: ignored (nz is auto-detected); will be removed.

@@ -108,11 +108,28 @@ bias 从 L1 到 C2 的搬运以 64B 数据块为单位（`C2_DATABLOCK`），deq
 - `MTE1_MTE2` EVENT_ID0/1（+乒乓位）：L1A 缓冲释放/占用，A 的 GM→L1 用；
 - `MTE1_MTE2` EVENT_ID2/3（+乒乓位）：L1B 缓冲，B 的 GM→L1 用；
 - `M_MTE1` EVENT_ID0/1（+`kIdx2`）：L0A/L0B 就绪，Mmad 消费后释放；
-- `M_MTE1`/`MTE1_M` EVENT_ID4：bias 的 L1↔C2 链路独占；
+- `M_MTE1`/`MTE1_M` EVENT_ID4：bias 的 C2 Bias Table（`l0BiasBuf`）生命周期，按 tile 配对：tile 入口无条件 `WaitFlag(M_MTE1)`（等上一 tile 的 Mmad 放行），本 tile 实际装载 bias 时 L1→C2 完成后 `SetFlag(MTE1_M)`，首个 Mmad 仅在装载发生时（局部量 `loadBias`）等待该旗标，释放统一在 tile 末尾 fixpipe 搬出之后——residency 命中跳过装载时（见「L1 residency」）旗标依然逐 tile 平衡；
 - `FIX_MTE2`/`MTE2_FIX` EVENT_ID5：deqScale 的 L1↔fixpipe 链路（属于 fixpipe barrier，`csrc/kernels/matmul.h` 的 `Matmul::RunTileBody`，关键字 `belong to fixpipe barrier` 注释）；
 - `M_FIX`/`FIX_M` EVENT_ID0：L0C 就绪与 fixpipe 搬出完成。
 
-乒乓选择器是 tile 内局部变量（每 tile 从 0 开始），因为 tile 退出时两级缓冲都已释放（`csrc/kernels/matmul.h` 的 `Matmul::RunTileBody`，关键字 `Ping-pong selectors are tile-local` 注释）。L1A 的乒乓在 `kIdx8==7` 或末轮翻转（`csrc/kernels/matmul.h` 的 `Matmul::RunTileBody`，关键字 `kIdx8 == 7`），L1B 在 `kIdx4==3` 或末轮翻转（`csrc/kernels/matmul.h` 的 `Matmul::RunTileBody`，关键字 `kIdx4 == 3`）。
+乒乓选择器 `pingpongL1A`/`pingpongL1B` 是类成员、跨 tile 持久（`SetFlags` 时归零，`csrc/kernels/matmul.h` 的 `Matmul::SetFlags`）：L1 residency（见下节）让 L1 内容跨 tile 存活，「tile 退出时两级缓冲都已释放」的旧前提不再成立，tile 退出只归还事件旗标、不失效驻留数据。L1A 的乒乓在 `kIdx8==7` 或末轮翻转（`csrc/kernels/matmul.h` 的 `Matmul::RunTileBody`，关键字 `kIdx8 == 7`），L1B 在 `kIdx4==3` 或末轮翻转（`csrc/kernels/matmul.h` 的 `Matmul::RunTileBody`，关键字 `kIdx4 == 3`）。
+
+### L1 residency（跨 tile 驻留）
+
+`Init` 增设 `residency` 开关（默认 true，`csrc/kernels/matmul.h` 的 `Matmul::Init`）：开启时 GM→L1 的 A/B/bias/deqScale 装载都带驻留跟踪，tile 重复访问相同数据时跳过搬运、直接复用 L1 旧内容。这是一核多 tile 的 GEMM（如带 bias 的多 tile 遍历）与 einsum 逐头批处理 chunked 遍历（见 einsum_mht_hdt_mhd / einsum_mht_htd_mhd 文档）省 MTE2 带宽的来源。
+
+跟踪器（均为类成员，`csrc/kernels/matmul.h` 的 `Matmul` 私有段）：
+
+- **A**：`mROffset[i]`/`kRAOffset[i]` 记录 `l1aBuf[i]` 当前驻留的 `(mOffset, kOffset)`，`kIdx8==0` 的窗口装载前比对，命中（两个偏移都相等）则跳过 `CopyGmToL1Nd2Nz`；
+- **B**：`nROffset[i]`/`kRBOffset[i]` 同理跟踪 `l1bBuf[i]` 的 `(nOffset, kOffset)`（`kIdx4==0` 的窗口）；
+- **bias/deqScale**：`biasROffset` 跟踪唯一一份 C2 bias 表 / fixpipe buffer 的 `nOffset`，命中时跳过整段 GM→L1→C2/fbuf 装载（事件链也随之不触发，见上文 EVENT_ID4 生命周期）；
+- **`k4TileActualBlockNum[i]`**：`l1bBuf[i]` 当前驻留 B 窗口的 K 分形块数（`DIV_ROUND_UP(kRemSize, kBlockSize)`），由建立该槽位驻留的装载写入；transpose 路径的 `CopyToL0BTCol`（作 srcStride）与 `transpose=0, nz=1` 的 `CopyGmToL1`（作块数）消费。必须按槽位记录：一个 tile 的两个 B 窗口宽度可能不等（`4*k0 < k < 8*k0` 且 k 非 `4*k0` 倍数时的部分尾窗），单一共享计数会把第二窗口的块数带进第一窗口的 residency 命中，转置路径即按错误的 n 分形步距读 L1（回归锚点：`tests/kernels/einsum_mht_mhd.py` 的 (m,h,t,d)=(257,64,384,128) 用例）。
+
+失效与重置：
+
+- `TaskTilesInit` 与 `RebindGm` 重置全部驻留键跟踪器（`mROffset/nROffset/kRAOffset/kRBOffset/biasROffset`，不含 `k4TileActualBlockNum`）——跟踪键是 tile 偏移而非 GM 基址，换批次（einsum 换头）后旧驻留键会对上一头的数据"假命中"；`k4TileActualBlockNum` 不重置亦无害：驻留键置 -1 后任何比对必 miss，miss 进入装载块时会先于一切拷贝无条件重写块数；
+- bias/deqScale 经 L1 中转的装载会覆写 `l1bBuf[0]` 头部（`l1BiasBuf`/`l1DeqScaleBuf` 与其共享槽位，见「片上缓冲分配与占用汇总」），装载后必须把 `nROffset[0]` 置失效，否则 B 后续命中 buf0 会把 bias 的 fp32 字节当 B 分形读出（回归锚点：`tests/kernels/matmul_with_bias.py` 的 `BIAS_RESIDENCY_SHAPES` 与 `tests/kernels/fused_quant_matmul_dequant.py` 的 residency 用例）；
+- `!residency`（关闭）时驻留判据恒假，每次装载都执行，等价于无驻留的原始行为——A/B 键跟踪器不再写入；`biasROffset`/`nROffset[0]` 的维护性写入仍在，但不参与任何判断。
 
 ### 量化路径（int8 / int4）
 

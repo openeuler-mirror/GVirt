@@ -6,19 +6,19 @@
 
 ## 输入输出参数
 
-Python 接口:`einsum_mht_hdt_mhd(rt, mht, hdt, mhd, m, h, t, d, weight_nz=False)`(`XliteOpEinsumMhtHdtMhd`,见 `csrc/op.cpp` 的 `XliteOpEinsumMhtHdtMhd`)。
+Python 接口:`einsum_mht_hdt_mhd(rt, mht, hdt, mhd, m, h, t, d, weight_nz=False)`(`XliteOpEinsumMhtHdtMhd`,见 `csrc/op.cpp` 的 `XliteOpEinsumMhtHdtMhd`)。`weight_nz` 已废弃并将被移除:传入值被忽略,`hdt` 的 FRACTAL_NZ 存储格式由 `InitXTensor` 自动检测(host 侧取 `hdt.nz` 传入 kernel,见 `csrc/op.cpp` 的 `XliteOpEinsumMhtHdtMhd`,关键字 `const bool weightNZ`)。
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
 | mht | 输入 | `[m, h, t]`(逻辑上 `[m, h*T]` 连续存储,T 为对齐后的行宽) | float16 / bfloat16 | 左操作数,按头切出 `[m, t]` 子矩阵作为 GEMM 的 A |
-| hdt | 输入 | `[h, d, t]` | 同上 | 右操作数(权重),非转置布局;`weight_nz=True` 时为 ND2NZ 后的 NZ 分形布局 |
+| hdt | 输入 | `[h, d, t]` | 同上 | 右操作数(权重),非转置布局;FRACTAL_NZ 分形布局自动检测(`weight_nz` 已废弃,传入值被忽略) |
 | mhd | 输出 | `[m, h, d]`(逻辑上 `[m, h*D]`) | 同上 | 逐头 GEMM 结果 C = A·Bᵀ |
 | m | 标量 | - | uint32 | token 数(GEMM 的 M 维),测试覆盖 3 ~ 5230 |
 | h | 标量 | - | uint32 | 头数(GEMM 批次数) |
 | t | 标量 | - | uint32 | 收缩维(GEMM 的 K 维),如 MLA 的 nopeHeadDim/kvLoraRank |
 | d | 标量 | - | uint32 | 输出维(GEMM 的 N 维) |
-| weight_nz | 标量 | - | bool | 右操作数是否为 NZ 分形布局 |
-| T / D | 标量(可选) | - | int | mht 行宽 / mhd 行宽的对齐覆盖;缺省(`-1`)时取 t / d。MLA 流程中传入 `nopeHeadDim + ropeHeadDim` 以跳过 head 中不参与计算的 rope 区(见 `csrc/model.cpp` 的 `XModel::ForwardAttnMLACommonV2`,关键字 `_c.nopeHeadDim + _c.ropeHeadDim`,对 htd 变体的用法) |
+| weight_nz | 标量 | - | bool | 已废弃:传入值被忽略(NZ 自动检测);将被移除 |
+| T / D | 标量(可选) | - | int | mht 行宽 / mhd 行宽的对齐覆盖;缺省(`-1`)时取 t / d。MLA 流程中传入 `nopeHeadDim + ropeHeadDim` 以跳过 head 中不参与计算的 rope 区(见 `csrc/_C.cpp` 的 `MLAV2`,关键字 `nopeHeadDim + ropeHeadDim`) |
 
 host 侧 swizzle 策略由 `XlitePickSwizzle(d, t, ...)` 依据 N/K 形状挑选(见 `csrc/op.cpp` 的 `XliteOpEinsumMhtHdtMhd`,关键字 `XlitePickSwizzle`);`m0/n0/k0` 取 `MATMUL_M0_N0_K0_DEFAULT_VALUE`(即 128/256/按 dtype)。
 
@@ -72,7 +72,7 @@ tile 遍历顺序由 `GetMNBlockIdx` 按 host 传入的 swizzle(方向 Zn/Nz + �
 
 ### 测试参考
 
-[tests/kernels/einsum_mht_mhd.py](../../../tests/kernels/einsum_mht_mhd.py):fp16/bf16 × weight_nz {False, True} × (m,h,t,d) ∈ {(3,4,192,512), (5230,4,512,128), (963,8,512,128), (257,64,128,128), (257,32,128,512), (5230,4,576,128), ...},`hdt` 用 `htd.transpose(-1,-2).contiguous()` 生成,与 `torch.einsum("mht,htd->mhd")` 对比。m=3 覆盖 mLoop==1 解码路径;m=257/h=64 与 m=257/h=32 覆盖 chunked 路径上单核跨多头（多次 `RebindGm` 头切换）与 midx/nidx 进位回绕;t=576 > 8*k0 覆盖 chunked 门槛外的大 k round-robin 路径。
+[tests/kernels/einsum_mht_mhd.py](../../../tests/kernels/einsum_mht_mhd.py):fp16/bf16 × weight_nz {False, True} × (m,h,t,d) ∈ {(3,4,192,512), (5230,4,512,128), (963,8,512,128), (257,64,128,128), (257,32,128,512), (5230,4,576,128), (257,64,384,128), ...},`hdt` 用 `htd.transpose(-1,-2).contiguous()` 生成,与 `torch.einsum("mht,htd->mhd")` 对比。m=3 覆盖 mLoop==1 解码路径;m=257/h=64 与 m=257/h=32 覆盖 chunked 路径上单核跨多头（多次 `RebindGm` 头切换）与 midx/nidx 进位回绕;t=576 > 8*k0 覆盖 chunked 门槛外的大 k round-robin 路径;t=384（`4*k0 < t < 8*k0` 且非 `4*k0` 倍数）覆盖单 tile 双不等宽 B 窗口,锚定 `Matmul` 的 per-slot 窗口块数跟踪（`k4TileActualBlockNum`,见 [matmul.md](matmul.md) 的「L1 residency」）。
 
 ### 片上缓冲分配与占用汇总(AIC L1/L0A/L0B/L0C)
 
