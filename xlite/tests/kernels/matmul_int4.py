@@ -9,6 +9,7 @@
 import torch
 import torch_npu
 
+from tests.models.weight_utils import nd2nz_or_skip, require_nz_format
 from xlite._C import Runtime, matmul, matmul_dequant, matmul_with_bias
 
 # allow weight_nz
@@ -130,10 +131,26 @@ for M, N, K in test_cases:
             standard = npu_quant_matmul_cpu(x, weight_int32, deq_scale=antiquant_scale, bias=bias, transpose=transpose)
 
             if weight_nz:
-                ACL_FORMAT_FRACTAL_NZ = 29
-                weight_int32 = torch_npu.npu_format_cast(weight_int32, ACL_FORMAT_FRACTAL_NZ)
-
-            weight_int4pack = torch_npu.npu_convert_weight_to_int4pack(weight_int32)
+                # sentinel-protected cast (a GE-less environment raises at the
+                # cast before any probe could run); the kernel judges NZ by
+                # the tag of the tensor it receives — the int4pack output
+                # wrapped through matmul_dequant's InitXTensor (csrc/_C.cpp:2824
+                # -> xlite.h out.nz = IsNpuNzFormat(in)) — so the tag check
+                # sits after the pack below
+                weight_int32 = nd2nz_or_skip(
+                    weight_int32, f"[{M}, {K}] x [{K}, {N}](transpose = {transpose}) int4 weight_nz: {weight_nz}"
+                )
+                if weight_int32 is None:
+                    continue
+                weight_int4pack = torch_npu.npu_convert_weight_to_int4pack(weight_int32)
+                # an untagged packed weight would fake ND coverage
+                if not require_nz_format(
+                    weight_int4pack,
+                    f"[{M}, {K}] x [{K}, {N}](transpose = {transpose}) int4 weight_nz: {weight_nz}",
+                ):
+                    continue
+            else:
+                weight_int4pack = torch_npu.npu_convert_weight_to_int4pack(weight_int32)
             x_int4_pack = torch_npu.npu_convert_weight_to_int4pack(x_i32)
             z = torch.zeros(M, N, dtype=torch.float16, device=f"npu:{dev_id}")
 

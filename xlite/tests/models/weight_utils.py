@@ -51,6 +51,82 @@ def matrix_nd2nz(matrix):
     return torch_npu.npu_format_cast(matrix, ACL_FORMAT_FRACTAL_NZ)
 
 
+def is_nz_format(tensor):
+    """Whether the tensor actually carries the ACL FRACTAL_NZ format tag.
+
+    Some containers' npu_format_cast silently no-ops (returns the input
+    unchanged, tag stays ND); post !703 the kernels detect NZ solely by
+    this tag, so an untagged "NZ" case would silently exercise ND."""
+    return torch_npu.get_npu_format(tensor) == ACL_FORMAT_FRACTAL_NZ
+
+
+def require_nz_format(tensor, context):
+    """Verify the tag right after an NZ cast; report the skip loudly otherwise.
+
+    Composes the is_nz_format probe with the one shared SKIPPED notice for the
+    tests/kernels NZ cases: when npu_format_cast silently no-oped (tag stays
+    ND) the case would exercise the ND path and read green without covering
+    NZ, so callers pass their own print-style context label and use the
+    return value to skip the case."""
+    if is_nz_format(tensor):
+        return True
+    print(f"{context} SKIPPED: FRACTAL_NZ tag unavailable (npu_format_cast silent no-op) — would fake ND coverage")
+    return False
+
+
+# One-shot matrix_nd2nz availability sentinel. Two environment shapes leave
+# an "NZ" case unable to actually cover NZ: npu_format_cast either silently
+# no-ops (internal-format option unset; caught per case by is_nz_format) or,
+# with the GE op-compile infrastructure missing (te/tbe not importable),
+# raises RuntimeError (AclSetCompileopt ... error code 500001) for every
+# dtype x option combination — before any tag probe could run. The sentinel
+# probes that second shape lazily, once per process, with a dedicated small
+# tensor whose only failure mode is environmental; per-case casts after a
+# passing sentinel are deliberately NOT wrapped, so genuine non-compile
+# exceptions still propagate.
+_nd2nz_unavailable_reason: str | None = None
+_nd2nz_probe_done = False
+
+
+def _nd2nz_sentinel_reason():
+    """Probe matrix_nd2nz availability once per process; None when it works."""
+    global _nd2nz_probe_done, _nd2nz_unavailable_reason
+    if not _nd2nz_probe_done:
+        _nd2nz_probe_done = True
+        try:
+            matrix_nd2nz(torch.zeros(32, 32, dtype=torch.float16, device="npu"))
+        except Exception as e:  # environment failure by construction; cache the reason
+            first_line = str(e).strip().splitlines()
+            _nd2nz_unavailable_reason = f"{type(e).__name__}: {first_line[0]}" if first_line else type(e).__name__
+    return _nd2nz_unavailable_reason
+
+
+def nd2nz_or_skip(tensor, context):
+    """Cast tensor to FRACTAL_NZ, or loudly report the skip and return None.
+
+    Wraps the two NZ-unavailable shapes described at the sentinel above: a
+    cached sentinel failure prints the environmental reason (so the test file
+    does not crash at the cast line on a GE-less container), and a successful
+    cast whose tag did not land prints the silent-no-op notice (same wording
+    as require_nz_format). Post !703 the kernels detect NZ solely by the tag
+    of the tensor they actually receive, so either shape would otherwise
+    fake ND coverage while weight_nz says True.
+
+    Returns the tagged NZ tensor, or None when the case must be skipped (the
+    SKIPPED notice has already been printed with the caller's context)."""
+    reason = _nd2nz_sentinel_reason()
+    if reason is not None:
+        print(
+            f"{context} SKIPPED: FRACTAL_NZ cast unavailable ({reason}) — skipping instead of crashing at npu_format_cast"
+        )
+        return None
+    nz = matrix_nd2nz(tensor)
+    if is_nz_format(nz):
+        return nz
+    print(f"{context} SKIPPED: FRACTAL_NZ tag unavailable (npu_format_cast silent no-op) — would fake ND coverage")
+    return None
+
+
 def load_tensor(path: str):
     data = torch.jit.load(path)
     return data.state_dict()["0"].to("npu")

@@ -7,8 +7,9 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import torch
-import torch_npu
+import torch_npu  # noqa: F401
 
+from tests.models.weight_utils import nd2nz_or_skip
 from xlite._C import Runtime, group_matmul
 
 # allow weight_nz
@@ -71,6 +72,9 @@ for weight_nz in [True, False]:
         weights = []
         deq_scales = []
         deq_scales_fixpipe = []
+        # all experts share the environment, so probe the tag once per case
+        # (on the first cast weight) and skip the whole case when it is missing
+        nz_tag_ok = True
         for i in range(group_num):
             if transpose:
                 weight = torch.randn(k, n, dtype=dtype, device=npu_dev)
@@ -78,8 +82,17 @@ for weight_nz in [True, False]:
                 weight = torch.randn(n, k, dtype=dtype, device=npu_dev)
 
             if weight_nz:
-                ACL_FORMAT_FRACTAL_NZ = 29
-                weight = torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
+                if nz_tag_ok:
+                    # sentinel-protected cast; the first expert reports the
+                    # environment/cast problem, the remaining ones stay quiet
+                    weight = nd2nz_or_skip(
+                        weight, f"group_matmul_dequant ({dtype}, transpose={transpose}, nz={weight_nz})"
+                    )
+                    nz_tag_ok = weight is not None
+                if not nz_tag_ok:
+                    # first expert already reported; the others share the
+                    # environment and the case-level check below drops the case
+                    continue
             deq_scale = torch.randn(n, dtype=torch.bfloat16, device=npu_dev)
             deq_scale = deq_scale.to(torch.float32).contiguous().clone()
             # fixpipe硬件要求：以uint64_t存储fp32，高位为0，低位为fp32格式的二进制值
@@ -89,6 +102,9 @@ for weight_nz in [True, False]:
             deq_scales.append(deq_scale)
             deq_scales_fixpipe.append(scale)
             weights.append(weight)
+
+        if weight_nz and not nz_tag_ok:
+            continue
 
         # standard
         start = 0

@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 import torch_npu  # noqa: F401
 
+from tests.models.weight_utils import nd2nz_or_skip
 from xlite._C import Runtime, matmul
 
 rt = Runtime(0, size=500)
@@ -51,7 +52,11 @@ for weight_nz in [False, True]:
                         standard = F.linear(x, y_standard, None)
 
                         if weight_nz and dtype != torch.float:
-                            y = torch_npu.npu_format_cast(y, 29)
+                            y = nd2nz_or_skip(
+                                y, f"[{m}, {k}] x [{n}, {k}] {dtype} weight_nz True transpose:{transpose}"
+                            )
+                            if y is None:
+                                continue
 
                         torch.npu.synchronize()
                         matmul(rt, x, y, z, weight_nz=weight_nz and dtype != torch.float, transpose=transpose)
@@ -84,7 +89,9 @@ for n in [65552, 98304, 151936]:
     y = torch.randn(n, k, dtype=torch.bfloat16, device="npu:0")
     z = torch.zeros(m, n, dtype=torch.bfloat16, device="npu:0")
     standard = F.linear(x, y, None)
-    y = torch_npu.npu_format_cast(y, 29)
+    y = nd2nz_or_skip(y, f"[{m}, {k}] x [{n}, {k}] large-n NZ")
+    if y is None:
+        continue
     torch.npu.synchronize()
     matmul(rt, x, y, z, weight_nz=True, transpose=False)
     torch.npu.synchronize()

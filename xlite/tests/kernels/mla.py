@@ -34,7 +34,7 @@ from collections.abc import Iterable
 import torch
 import torch_npu  # noqa: F401
 
-from tests.models.weight_utils import matrix_nd2nz
+from tests.models.weight_utils import nd2nz_or_skip
 from xlite._C import Runtime, mla_v2
 from xlite._C import print as xlite_print
 
@@ -296,9 +296,29 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
             # wuv  shape: (n_heads, kv_lora_rank, v_head_dim)  — htd layout for einsum
             wukT_xlite = wkvb[:, :nope_head_dim].reshape(n_heads, nope_head_dim, kv_lora_rank).contiguous()
             wuv_xlite = wkvb[:, -v_head_dim:].transpose(1, 2).contiguous()
+            # post !703 the kernels detect NZ solely by the format tag; when
+            # the cast silently no-ops, every mla_v2 call below would fake ND
+            # coverage, so the SKIPPED notice fires once per case and the v2
+            # calls/comparisons are gated. The standard reference consumes
+            # wkvb (not these weights) and still runs.
+            run_v2 = True
             if weight_nz:
-                wukT_xlite = matrix_nd2nz(wukT_xlite.reshape(n_heads * nope_head_dim, kv_lora_rank))
-                wuv_xlite = matrix_nd2nz(wuv_xlite.reshape(n_heads * kv_lora_rank, v_head_dim))
+                wukT_xlite = nd2nz_or_skip(
+                    wukT_xlite.reshape(n_heads * nope_head_dim, kv_lora_rank),
+                    f"mla_v2 {name} work (batch={batch}, cached_lens={cached_lens_list}, "
+                    f"query_lens={query_len_list}) wukT",
+                )
+                # second weight only attempted when the first landed: at most
+                # one SKIPPED notice per case (same and-shortcut as before)
+                if wukT_xlite is not None:
+                    wuv_xlite = nd2nz_or_skip(
+                        wuv_xlite.reshape(n_heads * kv_lora_rank, v_head_dim),
+                        f"mla_v2 {name} work (batch={batch}, cached_lens={cached_lens_list}, "
+                        f"query_lens={query_len_list}) wuv",
+                    )
+                    run_v2 = wuv_xlite is not None
+                else:
+                    run_v2 = False
             output_xlite_v2 = torch.zeros(total_query_len, n_heads, v_head_dim)
 
         # standard MLA forward: process each sample with its own query_len and cached_len
@@ -396,58 +416,69 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
                 dst_pe[:total_len] = current_pe.flatten(0, 1)
 
         # ----- mla_v2 kernel (wuk einsum + mla_v2 + wuv einsum) -----
-        torch.npu.synchronize()
-        mla_v2(
-            rt,
-            qWithQr_xlite,
-            qr_xlite,
-            k_cache_xlite,
-            pe_cache_xlite,
-            wukT_xlite,
-            wuv_xlite,
-            output_xlite_v2,
-            query_start_loc,
-            query_lens,
-            cached_lens,
-            block_tables,
-            n_heads,
-            rope_head_dim,
-            nope_head_dim,
-            v_head_dim,
-            kv_lora_rank,
-            BLOCK_SIZE,
-            batch,
-            scale,
-            topk_indices_empty,
-            top_k=0,
-            nz=weight_nz,
-            enable_flash_attention=enable_flash,
-            tile_size_of_cached_kv=tile_size,
-        )
+        if not run_v2:
+            logging.info(
+                "mla_v2 %s work (%d batch, cached_lens=%s, query_lens=%s, pitched=%s) "
+                "skipped: FRACTAL_NZ tag unavailable",
+                name,
+                batch,
+                cached_lens_list,
+                query_len_list,
+                pitched,
+            )
+        else:
+            torch.npu.synchronize()
+            mla_v2(
+                rt,
+                qWithQr_xlite,
+                qr_xlite,
+                k_cache_xlite,
+                pe_cache_xlite,
+                wukT_xlite,
+                wuv_xlite,
+                output_xlite_v2,
+                query_start_loc,
+                query_lens,
+                cached_lens,
+                block_tables,
+                n_heads,
+                rope_head_dim,
+                nope_head_dim,
+                v_head_dim,
+                kv_lora_rank,
+                BLOCK_SIZE,
+                batch,
+                scale,
+                topk_indices_empty,
+                top_k=0,
+                nz=weight_nz,
+                enable_flash_attention=enable_flash,
+                tile_size_of_cached_kv=tile_size,
+            )
 
-        logging.info(
-            "mla_v2 %s (%d heads, %d rope_head_dim, %d nope_head_dim, %d v_head_dim, "
-            "%d kv_lora_rank, %s) work (%d batch, cached_lens=%s, query_lens=%s, "
-            "pitched=%s) executed!",
-            name,
-            n_heads,
-            rope_head_dim,
-            nope_head_dim,
-            v_head_dim,
-            kv_lora_rank,
-            test_dtype,
-            batch,
-            cached_lens_list,
-            query_len_list,
-            pitched,
-        )
+            logging.info(
+                "mla_v2 %s (%d heads, %d rope_head_dim, %d nope_head_dim, %d v_head_dim, "
+                "%d kv_lora_rank, %s) work (%d batch, cached_lens=%s, query_lens=%s, "
+                "pitched=%s) executed!",
+                name,
+                n_heads,
+                rope_head_dim,
+                nope_head_dim,
+                v_head_dim,
+                kv_lora_rank,
+                test_dtype,
+                batch,
+                cached_lens_list,
+                query_len_list,
+                pitched,
+            )
 
-        try:
-            torch.testing.assert_close(output_xlite_v2, output_standard, atol=1e-5, rtol=5e-02)
-        except AssertionError as e:
-            logging.error(f"{e}")
-            logging.error(f"torch_npu: {output_standard}")
-            logging.error(f"xlite: {output_xlite_v2}")
+            try:
+                torch.testing.assert_close(output_xlite_v2, output_standard, atol=1e-5, rtol=5e-02)
+            except AssertionError as e:
+                logging.error(f"{e}")
+                logging.error(f"torch_npu: {output_standard}")
+                logging.error(f"xlite: {output_xlite_v2}")
 
         # Test MLA with topkIndices: verify that MLA with topkIndices produces the same output
         # as standard MLA with -inf mask applied before softmax
@@ -532,7 +563,7 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
 
             # ----- xlite sparse path: mla_v2 with topkIndices (paged KV cache,
             # -inf mask applied inside the kernel's softmax) -----
-            if run_sparse_topk:
+            if run_sparse_topk and run_v2:
                 output_xlite_with_topk_v2 = torch.zeros(
                     total_query_len, n_heads, v_head_dim, device="npu", dtype=test_dtype
                 )
@@ -591,6 +622,16 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
                     logging.error(f"mla_v2 with topkIndices test failed: {e}")
                     logging.error(f"Standard mla_v2 with topk mask: {output_standard_with_topk}")
                     logging.error(f"xlite mla_v2 with topkIndices: {output_xlite_with_topk_v2}")
+            elif run_sparse_topk:
+                logging.info(
+                    "mla_v2 with topkIndices %s work (%d batch, cached_lens=%s, "
+                    "query_lens=%s, topk=%d) skipped: FRACTAL_NZ tag unavailable",
+                    name,
+                    batch,
+                    cached_lens_list,
+                    query_len_list,
+                    topk,
+                )
             else:
                 logging.info(
                     "mla_v2 with topkIndices %s work (%d batch, cached_lens=%s, "
@@ -621,6 +662,16 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
                     query_len_list,
                     topk,
                     MAX_DENSE_QUERY_LEN,
+                )
+            elif not run_v2:
+                logging.info(
+                    "mla_v2 dense %s work (%d batch, cached_lens=%s, query_lens=%s, topk=%d) "
+                    "skipped: FRACTAL_NZ tag unavailable",
+                    name,
+                    batch,
+                    cached_lens_list,
+                    query_len_list,
+                    topk,
                 )
             else:
                 output_xlite_dense = torch.zeros(total_query_len, n_heads, v_head_dim, device="npu", dtype=test_dtype)

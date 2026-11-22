@@ -7,8 +7,9 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 # ===============================================================================
 import torch
-import torch_npu
+import torch_npu  # noqa: F401
 
+from tests.models.weight_utils import nd2nz_or_skip
 from xlite._C import (
     Runtime,
     dequant,
@@ -60,8 +61,12 @@ def run_case(m, n, k, weight_nz, transpose, has_out_scale):
     else:
         y_in = weight_ref
     if weight_nz:
-        ACL_FORMAT_FRACTAL_NZ = 29
-        y_in = torch_npu.npu_format_cast(y_in, ACL_FORMAT_FRACTAL_NZ)
+        y_in = nd2nz_or_skip(
+            y_in,
+            f"[{m}, {k}] x [{k}, {n}] weight_nz:{weight_nz} transpose:{transpose} has_out_scale:{has_out_scale}",
+        )
+        if y_in is None:
+            return
 
     bias = torch.randint(-64, 64, (n,), dtype=torch.int32, device=f"npu:{dev_id}")
     # deqscale 从 bf16 转换来的 fp32 可被 fixpipe 无损消费
