@@ -31,6 +31,27 @@ test_cases = [
     (5230, 4, 128, 512),
     (5230, 4, 512, 128),
     (963, 8, 512, 128),
+    # chunked-traversal coverage (mLoop >= 2 path): with aicNum = 24 cores,
+    # h = 64 makes one core's contiguous chunk span ~2.7 whole heads (several
+    # RebindGm head transitions inside a single core's range), h = 32 with
+    # nLoop = 2 exercises the midx/nidx wrap inside a chunk; m = 257 adds a
+    # 1-row tail m-tile
+    (257, 64, 128, 128),
+    (257, 32, 128, 512),
+    # t > 8 * k0 (= 512): the B ping-pong slots cannot hold the whole K range,
+    # so the chunked traversal is disarmed and the legacy round-robin runs
+    # with mLoop >= 2 (kLoop = 9: the third B window recycles slot 0)
+    (5230, 4, 576, 128),
+    # 4*k0 < t < 8*k0 and t not a multiple of 4*k0 (bf16/fp16 k0=64 ->
+    # t=384): one tile holds two UNEQUAL B windows (k-block counts 16/8),
+    # so the window block count must be tracked per L1 slot — a member
+    # shared by both slots carries the second window's count into a
+    # first-window residency hit, and the transpose consumer
+    # (CopyToL0BTCol srcStride) then reads L1 at the wrong n-fractal
+    # stride. mLoop=3 x nLoop=1 x h=64 -> totalTiles=192 > aicNum, so the
+    # chunked traversal really produces in-group hits (regression anchor:
+    # hit tiles failed with ~1e2 garbage before the per-slot fix).
+    (257, 64, 384, 128),
 ]
 
 
@@ -55,19 +76,17 @@ def run_case(einsum_op, weight_layout, dtype, m, h, t, d, weight_nz):
     einsum_op(rt, mht, y, mhd, m, h, t, d, weight_nz=weight_nz)
 
     # torch.einsum and the kernel both accumulate in fp32 but in different
-    # orders (the kernel splits K into 64-wide Mmad chunks), so a small
-    # fraction of elements straddles a bf16 rounding midpoint and the two
-    # bf16 outputs land on adjacent values: every observed mismatch is
-    # exactly 1 bf16 ULP (abs diff a power of two, rel diff in
-    # [2^-8, 2^-7]). atol=1e-5/rtol=1e-3 sits below the bf16 output
-    # resolution and cannot hold for two independently rounded fp32->bf16
-    # GEMMs. (1e-3, 1e-2) accepts any 1-ULP flip (ulp/|y| <= 2^-7 < 1e-2)
-    # while a real kernel bug (wrong tile / garbage) still fails loudly.
-    # fp16 keeps the tight bound: its 1-ULP relative error 2^-10 < 1e-3.
+    # orders (the kernel splits K into 64-wide Mmad chunks), so a rounded
+    # output can land 1 ULP away from torch's. bf16: a 1-ULP flip is a
+    # relative diff up to 2^-7, needing rtol=1e-2. fp16: 1-ULP flips
+    # (rel diff 2^-10) stay within rtol=1e-3, but at large t catastrophic
+    # cancellation leaves near-zero outputs where only absolute noise
+    # remains (measured <5e-5 across 5 seeds), hence atol=5e-5. A real
+    # bug (wrong tile / garbage, O(1) magnitude) still fails loudly.
     if dtype == torch.bfloat16:
         atol, rtol = 1e-3, 1e-2
     else:
-        atol, rtol = 1e-5, 1e-3
+        atol, rtol = 5e-5, 1e-3
     try:
         torch.testing.assert_close(standard, mhd, atol=atol, rtol=rtol)
     except AssertionError as e:

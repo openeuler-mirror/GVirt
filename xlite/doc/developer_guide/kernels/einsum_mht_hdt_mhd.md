@@ -35,22 +35,24 @@ host 侧 swizzle 策略由 `XlitePickSwizzle(d, t, ...)` 依据 N/K 形状挑选
 
 ### 逐头批处理与跨头负载均衡
 
+所有头的 GEMM 几何相同,`TaskTilesInit` 只在头 0 上执行一次,后续头仅通过 `Matmul::RebindGm`(换 A/B/C 基址并重置 residency 跟踪器,见 `csrc/kernels/matmul.h` 的 `Matmul::RebindGm`)移动基址。按 `mLoop` 分两条调度路径(见 `csrc/kernels/einsum_mht_hdt_mhd.h` 的 `einsum_mht_hdt_mhd` 模板函数,关键字 `MLoop() >= 2`):
+
+**mLoop >= 2 且 t ≤ 8*k0(prefill)**:全部 `h × mLoop × nLoop` 个 tile 按 `头 -> nidx -> midx` 内层排序后,切成每核连续的 chunk(每核 `ceil(totalTiles/blockNum)` 个 tile,`Matmul::RunTileByMN` 直接按 (midx, nidx) 寻址绕过 swizzle 重排)。`t ≤ 8*k0` 即 B 的两个 l1bBuf 乒乓槽(各 `k4TileSize = 4*k0`)能同时容纳整个 K 范围,是头内跨 tile B 复用成立的前提(`Matmul::BWholeKResident`);更大的 k 下 k 乒乓会回收槽位、覆写跟踪键,跨 tile 复用衰减到只剩最后两个窗口,chunked 分组无重载可省:
+
 ```text
-for hIdx in 0..h:
-    x = mht + hIdx * T * sizeof(Dtype)        // A: 头内 [m, t],行距 T
-    y = hdt + hIdx * d * t * sizeof(Dtype)    // B: 头内 [d, t]
-    z = mhd + hIdx * D * sizeof(Dtype)        // C: 头内 [m, d],行距 D
-    tiles = matmul_op.TaskTilesInit(x, y, z, ..., m, d, t, srcDStride=h*T, dstDStride=h*D)
-    for idx in (blockIdx + blockNum - coreOffset) % blockNum .. tiles step blockNum:
-        matmul_op.RunTileByIdx(idx)
-    coreOffset = (coreOffset + tiles) % blockNum
+tiles = TaskTilesInit(mht, hdt, mhd, ..., m, d, t, srcDStride=h*T, dstDStride=h*D)  // 头 0
+totalTiles = tiles * h; chunk = ceil(totalTiles / blockNum)
+for idx in blockIdx*chunk .. min((blockIdx+1)*chunk, totalTiles):
+    (hIdx, nidx, midx) = 按 idx = (hIdx*nLoop + nidx)*mLoop + midx 分解
+    hIdx 变化时 RebindGm(mht + hIdx*xStride, hdt + hIdx*yStride, mhd + hIdx*zStride)
+    RunTileByMN(midx, nidx)   // midx 先耗尽再进位 nidx,nidx 耗尽进位 hIdx
 ```
 
-(见 `csrc/kernels/einsum_mht_hdt_mhd.h` 的 `einsum_mht_hdt_mhd` 模板函数,关键字 `coreOffset`)
-
-- 每头的 GEMM 被切成 `ceil(m/m0) × ceil(d/n0)` 个输出 tile,`TaskTilesInit` 返回 tile 总数;
-- 头与头之间用 `coreOffset` 累计错开起始 block:每个头处理完后把该头 tile 数累加到偏移,使下一头的第一个 tile 落到"轮到"的核上,避免按头整块切分造成的小头尾负载不均;
+- 目的:让每核只连续接触 ~2-3 个头而非全部 h 个头。B 权重的 GM→L1 重载按 (头, 核) 对发生(`RebindGm` 重置跟踪器,跨头不能复用),prefill 时该对数从 h × blockNum 缩到 ~h/chunk × blockNum,即约缩小 blockNum 倍;头内则因 midx 连续被 matmul 的 L1 residency 跟踪器持续命中。chunk 边界切开的头由相邻两核各加载一次(matmul 的 flag/跟踪器均为核内私有状态);
+- 代价:chunked 路径忽略 host 传入的 swizzle(其 L2 局部性职责由组内连续遍历接管),A 流量主导且头较少的形状可能回退;
 - `srcDStride = h*T`、`dstDStride = h*D` 把 A 的行距与 C 的行距从逻辑 k/n 改写为含跨头跳步的物理行距,使 matmul 搬运时直接跳到正确的头内子矩阵。
+
+**mLoop == 1(decode)**:保留原来的头间错峰轮转(每头 tile 数不变,`coreOffset` 累计错开起始 block),但头 1..h-1 用 `RebindGm` 替代逐头完整的 `TaskTilesInit`(省去每头每核 5 次 `SetGlobalBuffer` 与形状除法标量开销;decode 时每核每头至多 1 个 tile,residency 无跨 tile 复用可言)。
 
 ### 单 tile 数据流(Matmul 类)
 
@@ -70,7 +72,7 @@ tile 遍历顺序由 `GetMNBlockIdx` 按 host 传入的 swizzle(方向 Zn/Nz + �
 
 ### 测试参考
 
-[tests/kernels/einsum_mht_mhd.py](../../../tests/kernels/einsum_mht_mhd.py):fp16/bf16 × weight_nz {False, True} × (m,h,t,d) ∈ {(3,4,192,512), (5230,4,512,128), (963,8,512,128), ...},`hdt` 用 `htd.transpose(-1,-2).contiguous()` 生成,与 `torch.einsum("mht,htd->mhd")` 对比。
+[tests/kernels/einsum_mht_mhd.py](../../../tests/kernels/einsum_mht_mhd.py):fp16/bf16 × weight_nz {False, True} × (m,h,t,d) ∈ {(3,4,192,512), (5230,4,512,128), (963,8,512,128), (257,64,128,128), (257,32,128,512), (5230,4,576,128), ...},`hdt` 用 `htd.transpose(-1,-2).contiguous()` 生成,与 `torch.einsum("mht,htd->mhd")` 对比。m=3 覆盖 mLoop==1 解码路径;m=257/h=64 与 m=257/h=32 覆盖 chunked 路径上单核跨多头（多次 `RebindGm` 头切换）与 midx/nidx 进位回绕;t=576 > 8*k0 覆盖 chunked 门槛外的大 k round-robin 路径。
 
 ### 片上缓冲分配与占用汇总(AIC L1/L0A/L0B/L0C)
 

@@ -91,6 +91,12 @@ opt_sizes = [
     [512, 1024, 2048, False, False, True, True, True, 0],
     # small n: nActual < n0 boundary inside the fused matmul/dequant tiles
     [64, 64, 1024, False, False, True, True, True, None],
+    # L1-residency regression (see tests/kernels/matmul_with_bias.py): m and
+    # n above the tile size engage cross-tile residency on one core; k=256
+    # (kLoop=2 <= 4) keeps one B load per tile. deqScale staging through L1
+    # aliases the head of l1bBuf[0] and must invalidate buf0's resident B.
+    [640, 512, 256, False, False, True, True, True, None],
+    [2048, 1024, 256, False, False, True, True, True, None],
 ]
 
 

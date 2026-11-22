@@ -61,3 +61,34 @@ for weight_nz in [False, True]:
                         print(f"{e}")
                         print(f"torch_npu: {standard}")
                         print(f"xlite: {z}")
+
+# L1-residency regression guard (hard assert on purpose, unlike the loop
+# above). Two failure modes need m > m0 and n > n0 so a core processes
+# several output tiles and the L1 residency path actually engages — the
+# loop above (m <= 8) never leaves single-tile-per-dim territory:
+#   1. bias/deqScale residency must track the single l0BiasBuf / fixpipeBuf,
+#      not the ping-pong l1bBuf state (distance-2 nOffset revisits);
+#   2. l1BiasBuf / l1DeqScaleBuf alias the head of l1bBuf[0]: staging bias
+#      through L1 overwrites buf0's resident B tile, so a later B residency
+#      "hit" on buf0 reads the bias fp32 bytes as B fragments (~1e32 garbage
+#      in a scatter of rows/cols, not an O(1) bias error).
+# k <= 4 * k0 keeps one B load per tile so a core's tile subsequence forms
+# the revisit pattern. Shapes picked by sweeping m/n on a kernel with the
+# bugs reproduced (agent_log_scripts/sweep_bias_residency.py).
+BIAS_RESIDENCY_SHAPES = [
+    (640, 384, 256),
+    (640, 512, 256),
+    (1024, 256, 256),
+    (2048, 1024, 256),
+]
+for m, n, k in BIAS_RESIDENCY_SHAPES:
+    x = torch.randn(m, k, dtype=torch.bfloat16, device="npu:0")
+    y = torch.randn(n, k, dtype=torch.bfloat16, device="npu:0")
+    z = torch.zeros(m, n, dtype=torch.bfloat16, device="npu:0")
+    bias = torch.randn(n, dtype=torch.float, device="npu:0")
+    standard = F.linear(x, y, bias).to(torch.bfloat16)
+    torch.npu.synchronize()
+    matmul_with_bias(rt, x, y, z, bias, weight_nz=False)
+    torch.npu.synchronize()
+    torch.testing.assert_close(standard, z, atol=1e-2, rtol=1.6e-2)
+    print(f"[{m}, {k}] x [{n}, {k}] bias-residency regression matmul passed!")
