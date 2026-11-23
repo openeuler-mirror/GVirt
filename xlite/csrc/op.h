@@ -122,7 +122,7 @@ void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, 
                   XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                   uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t maxSeqLen,
                   float scale, uint32_t topK = 0, const XTensor &topkIndices = XTensor(),
-                  bool dense = false, bool densePerQuery = true);
+                  bool dense = false, bool densePerQuery = true, uint32_t topkStride = 0);
 void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache,
                        XTensor &peCache, XTensor &qk, XTensor &sv, XTensor &max, XTensor &sum,
                        XTensor &lastMax, XTensor &lastSum, XTensor &sync, XTensor &oAbsorb,
@@ -130,7 +130,8 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
                        XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                        uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, float scale,
                        uint32_t tileSizeOfCachedKV = MAX_KV_TILE_SIZE, uint32_t topK = 0,
-                       const XTensor &topkIndices = XTensor(), bool dense = false);
+                       const XTensor &topkIndices = XTensor(), bool dense = false,
+                       uint32_t topkStride = 0);
 // C8 supports sequential expansion with null indices.
 void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &peCache,
                                 XTensor &blockTables, XTensor &topkIndices, XTensor &queryStartLoc,
@@ -278,7 +279,8 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                         XTensor &blockTables, XTensor &sync, uint32_t nHeads, uint32_t headDim,
                         uint32_t blockSize, uint32_t batch, uint32_t topK,
                         uint8_t skipDenseTopk = 0, const XTensor &kScaleCache = XTensor(),
-                        uint32_t compressRatio = 1, uint8_t kvSplit = 0, uint8_t qTile = 0);
+                        uint32_t compressRatio = 1, uint8_t kvSplit = 0, uint8_t qTile = 0,
+                        uint8_t packTail = 0, uint8_t reluQk = 1, uint32_t outStride = 0);
 void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output,
                  uint32_t calcOffset = 0, uint32_t calcNum = UINT32_MAX);
 void XliteOpExpertsCountsSum(XRuntime &rt, XTensor &expertsCountsInput, XTensor &tokensPerEpgroup,
@@ -289,7 +291,8 @@ void XliteOpTranspose_1_2(XRuntime &rt, XTensor &input, XTensor &output);
 void XliteOpConv1dAndSiLUPaged(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
                                XTensor &output, XTensor &stateIndices,
                                XTensor *cachedLens = nullptr, uint32_t stateBlockSize = 0,
-                               bool aligned = false);
+                               bool aligned = false, uint32_t stateLayout = 1,
+                               uint32_t chanOffset = 0);
 void XliteOpBetaDecay(XRuntime &rt, XTensor &b, XTensor &a, XTensor &A_log, XTensor &dt_bias,
                       XTensor &beta, XTensor &g, uint32_t bsz, uint32_t seqlen,
                       uint32_t num_v_heads);
@@ -345,7 +348,8 @@ uint32_t XliteOpBenchCube(XRuntime &rt, const std::string &variant, const XTenso
 void XliteOpSiluGateMul(XRuntime &rt, XTensor &normed, XTensor &gate, XTensor &out);
 void XliteOpConv1dAndSiLUPrefillPaged(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
                                       XTensor &output, XTensor &indices, XTensor &starts,
-                                      XTensor &initial);
+                                      XTensor &initial, uint32_t stateLayout = 1,
+                                      uint32_t chanOffset = 0);
 void XliteOpRecurrentGatedDeltaRulePrefillPaged(XRuntime &rt, XTensor &query, XTensor &key,
                                                 XTensor &value, XTensor &beta, XTensor &g,
                                                 XTensor &state, XTensor &out, XTensor &indices,

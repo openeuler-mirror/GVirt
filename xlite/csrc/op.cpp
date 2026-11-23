@@ -33,6 +33,20 @@ inline uint64_t HcMeanUbNeed(uint32_t hcMult, uint32_t hidden, uint32_t dtypeSiz
            ROUND_UP((uint64_t)hidden * 4, UB_BUF_ALIGN_SIZE);
 }
 
+inline uint64_t SoftmaxPingPongUbNeed(uint32_t len, uint32_t topK)
+{
+    const uint32_t v = VECTOR_MAX_BYTESIZE;
+    len = len > topK ? len : topK;
+    uint64_t need = ROUND_UP((uint64_t)len * 2, v) * 4 + ROUND_UP((uint64_t)len * 4, v) +
+                    (((uint64_t)len * 4 + v - 1) / v / 2) * v + (uint64_t)v * 5;
+    if (topK != 0) {
+        need += ROUND_UP((uint64_t)topK * 4, v) * 4 +  // indices0/1 + fp32 + currIndices
+                ROUND_UP((uint64_t)topK * 2, v) + (uint64_t)v * 5 +
+                ((topK + SOFTMAX_MASK_CHUNK - 1) / SOFTMAX_MASK_CHUNK) * SOFTMAX_MASK_CHUNK / 8 * 2;
+    }
+    return need;
+}
+
 // Kernels read these as dense ND raw pointers; reject stride mismatch on size>1 dims.
 inline void RequireContiguous(const XTensor &t, const char *name)
 {
@@ -1234,6 +1248,16 @@ void XliteOpCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &compressK
         throw std::runtime_error(std::string(__func__) +
                                  ": dense=True requires indexTopK > 0 (dense cache length)");
     }
+    if (indexTopK > MAX_TOPK_NUM) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": indexTopK should be less than or "
+                                 "equal to " +
+                                 std::to_string(MAX_TOPK_NUM));
+    }
+    if (!dense && indexTopK != 0 && indexTopK % TOPK_RUN_ALIGN != 0) {
+        throw std::runtime_error(std::string(__func__) + ": indexTopK must be a multiple of " +
+                                 std::to_string(TOPK_RUN_ALIGN) + " in the sparse top-k path");
+    }
     if (windowSize != 0) {
         // The topK>0 path runs RunAivSoftmaxPingPong with an inTopK buffer of
         // topK + swaSegWidth elements; keep the SWA segment inside the
@@ -1284,22 +1308,43 @@ void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, 
                   XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                   uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t maxSeqLen,
                   float scale, uint32_t topK, const XTensor &topkIndices, bool dense,
-                  bool densePerQuery)
+                  bool densePerQuery, uint32_t topkStride)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
+    uint32_t effectiveTopkStride = topK == 0 ? 0 : (topkStride != 0 ? topkStride : topK);
     if (!dense || (topK != 0 && topkIndices.ptr != nullptr)) {
         if (topK != 0 && maxSeqLen > MAX_SOFTMAX_PINGPONG_LEN) {
             throw std::runtime_error(
                 std::string(__func__) + ": topK > 0 is not supported when maxSeqLen (" +
                 std::to_string(maxSeqLen) + ") > " + std::to_string(MAX_SOFTMAX_PINGPONG_LEN));
         }
-        if (topK > MAX_TOPK_NUM) {
+        if (effectiveTopkStride < topK) {
             throw std::runtime_error(std::string(__func__) +
-                                     ": topK should be less than or equal to " +
-                                     std::to_string(MAX_TOPK_NUM));
+                                     ": topkStride must be >= topK (logical top-k width)");
         }
+        // topkStride is the physical topk-buffer row width; the GLM5 kpool path
+        // widens it past MAX_TOPK_NUM (PKI causal tail + 128-slot padding).
+        if (effectiveTopkStride > MAX_TOPK_RUN_NUM) {
+            throw std::runtime_error(std::string(__func__) +
+                                     ": topkStride should be less than or equal to " +
+                                     std::to_string(MAX_TOPK_RUN_NUM));
+        }
+        if (effectiveTopkStride % TOPK_RUN_ALIGN != 0) {
+            throw std::runtime_error(std::string(__func__) + ": topkStride must be a multiple of " +
+                                     std::to_string(TOPK_RUN_ALIGN));
+        }
+        if (topK != 0 && topkIndices.ptr != nullptr && topkIndices.shape.size() > 1 &&
+            topkIndices.shape[1] != effectiveTopkStride) {
+            throw std::runtime_error(std::string(__func__) + ": topkIndices.shape[1] must equal " +
+                                     std::to_string(effectiveTopkStride));
+        }
+    }
+    // topK-gated: topK == 0 runs RunAivSoftmax without the pingpong carve.
+    if (topK != 0 && SoftmaxPingPongUbNeed(std::max(maxSeqLen, effectiveTopkStride),
+                                           effectiveTopkStride) > UB_SIZE) {
+        throw std::runtime_error(std::string(__func__) + ": softmax pingpong UB budget exceeded");
     }
     // The cube tiles the query dimension as mSize = queryTaskLen * nHeads rows into an
     // XLITE_MAX_M0-row L1 A buffer / qk workspace (see XliteFitM0ToHeads), so a single
@@ -1316,8 +1361,8 @@ void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, 
             qk.ptr, oAbsorb.ptr, queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr,
             nHeads, ropeHeadDim, kvLoraRank, blockSize, batch,
             dense ? 0u : static_cast<uint32_t>(blockTables.stride[0]), maxSeqLen, scale, topK,
-            kCache.stride[0], peCache.stride[0], dense ? 1u : 0u, densePerQuery ? 1u : 0u,
-            rt._attnZeroBuffer.ptr);
+            effectiveTopkStride, kCache.stride[0], peCache.stride[0], dense ? 1u : 0u,
+            densePerQuery ? 1u : 0u, rt._attnZeroBuffer.ptr);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(qAbsorb) + XT_STR(qr) + XT_STR(kCache) +
                               XT_STR(peCache) + XT_STR(oAbsorb);
@@ -1332,7 +1377,7 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
                        XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                        uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, float scale,
                        uint32_t tileSizeOfCachedKV, uint32_t topK, const XTensor &topkIndices,
-                       bool dense)
+                       bool dense, uint32_t topkStride)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1342,9 +1387,29 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
                                  std::to_string(tileSizeOfCachedKV) + " > " +
                                  std::to_string(MAX_SOFTMAX_PINGPONG_LEN));
     }
-    if (topK > MAX_TOPK_NUM) {
-        throw std::runtime_error(std::string(__func__) + ": topK should be less than or equal to " +
-                                 std::to_string(MAX_TOPK_NUM));
+    uint32_t effectiveTopkStride = topK == 0 ? 0 : (topkStride != 0 ? topkStride : topK);
+    if (effectiveTopkStride < topK) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": topkStride must be >= topK (logical top-k width)");
+    }
+    if (effectiveTopkStride > MAX_TOPK_RUN_NUM) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": topkStride should be less than or equal to " +
+                                 std::to_string(MAX_TOPK_RUN_NUM));
+    }
+    if (effectiveTopkStride != 0 && effectiveTopkStride % TOPK_RUN_ALIGN != 0) {
+        throw std::runtime_error(std::string(__func__) + ": topkStride must be a multiple of " +
+                                 std::to_string(TOPK_RUN_ALIGN));
+    }
+    if (topK != 0 && topkIndices.ptr != nullptr && topkIndices.shape.size() > 1 &&
+        topkIndices.shape[1] != effectiveTopkStride) {
+        throw std::runtime_error(std::string(__func__) + ": topkIndices.shape[1] must equal " +
+                                 std::to_string(effectiveTopkStride));
+    }
+    // RunAivSoftmaxPingPong carve mirror fail-closed.
+    if (SoftmaxPingPongUbNeed(std::max(tileSizeOfCachedKV, effectiveTopkStride),
+                              effectiveTopkStride) > UB_SIZE) {
+        throw std::runtime_error(std::string(__func__) + ": softmax pingpong UB budget exceeded");
     }
     // See XliteOpMLAV2: one query token's heads must fit a single XLITE_MAX_M0-row tile.
     if (nHeads > XLITE_MAX_M0) {
@@ -1359,8 +1424,8 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
             qk.ptr, sv.ptr, max.ptr, sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr, oAbsorb.ptr,
             queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, ropeHeadDim,
             kvLoraRank, blockSize, batch, dense ? 0u : static_cast<uint32_t>(blockTables.stride[0]),
-            scale, tileSizeOfCachedKV, topK, kCache.stride[0], peCache.stride[0], dense ? 1u : 0u,
-            rt._attnZeroBuffer.ptr);
+            scale, tileSizeOfCachedKV, topK, effectiveTopkStride, kCache.stride[0],
+            peCache.stride[0], dense ? 1u : 0u, rt._attnZeroBuffer.ptr);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(qAbsorb) + XT_STR(qr) + XT_STR(kCache) +
                               XT_STR(peCache) + XT_STR(oAbsorb);
@@ -1422,6 +1487,10 @@ void XliteOpFlashCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &comp
                                  "equal to " +
                                  std::to_string(MAX_TOPK_NUM));
     }
+    if (indexTopK != 0 && indexTopK % TOPK_RUN_ALIGN != 0) {
+        throw std::runtime_error(std::string(__func__) + ": indexTopK must be a multiple of " +
+                                 std::to_string(TOPK_RUN_ALIGN));
+    }
     if (compressRatio == 0) {
         throw std::runtime_error(std::string(__func__) +
                                  ": compressRatio should be greater than 0");
@@ -1453,7 +1522,11 @@ void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &pe
                                 uint32_t kvHeads, uint32_t compressRatio, uint32_t burstCopySize,
                                 const XTensor &kScaleCache)
 {
-    const bool useK = kCache.ptr != nullptr, usePe = peCache.ptr != nullptr;
+    // a zero-size channel (NoPE rope head) counts as absent; a non-empty input
+    // channel with an absent output (or vice versa) is a caller bug
+    auto channelPresent = [](const XTensor &t) { return t.ptr != nullptr && t.numel > 0; };
+    const bool useK = channelPresent(kCache);
+    const bool usePe = channelPresent(peCache);
     if (IsDummyRuntime(rt) || (!useK && !usePe)) {
         return;
     }
@@ -1462,9 +1535,7 @@ void XliteOpGatherSparseKVCache(XRuntime &rt, XTensor &kCache, const XTensor &pe
                                  ": kvHeads should be less than or equal to 1");
     }
     const bool c8 = useK && kCache.dtype == INT8;
-    // an empty input channel with a non-empty output (or vice versa) is a caller
-    // bug: null-pointer write or a never-written output
-    if (!c8 && (useK != (kDenseCache.ptr != nullptr) || usePe != (peDenseCache.ptr != nullptr))) {
+    if (!c8 && (useK != channelPresent(kDenseCache) || usePe != channelPresent(peDenseCache))) {
         throw std::runtime_error(std::string(__func__) +
                                  ": cache and dense cache channel emptiness must match");
     }
@@ -2756,7 +2827,7 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                         XTensor &blockTables, XTensor &sync, uint32_t nHeads, uint32_t headDim,
                         uint32_t blockSize, uint32_t batch, uint32_t topK, uint8_t skipDenseTopk,
                         const XTensor &kScaleCache, uint32_t compressRatio, uint8_t kvSplit,
-                        uint8_t qTile)
+                        uint8_t qTile, uint8_t packTail, uint8_t reluQk, uint32_t outStride)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -2766,13 +2837,43 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                                  std::to_string(MAX_INDEXER_Q_TILE_LEN) + "], got " +
                                  std::to_string(qTile));
     }
+    // packTail expands each compressed block into kpool token slots; kpool=1
+    // has no causal tail and would disagree with the kernel's MAX(ratio, 2).
+    if (packTail && compressRatio < 2) {
+        throw std::invalid_argument(std::string(__func__) +
+                                    ": packTail requires compressRatio >= 2 (kpool)");
+    }
+    // packTail output contract: row width = topK*kpool + kpool-1 (block→token
+    // expansion + causal tail), rows padded to a TOPK_RUN_ALIGN-slot stride so
+    // every GM row base is aligned and the AIV softmax sees full 128-slot mask
+    // blocks. Keep the widened row within the softmax/kernel UB carve (the
+    // pool-space topK check above cannot bound the expanded width).
+    uint32_t outWidth = packTail ? topK * compressRatio + compressRatio - 1 : topK;
+    if (packTail && outWidth > MAX_TOPK_RUN_NUM) {
+        throw std::invalid_argument(std::string(__func__) + ": packTail output width must be <= " +
+                                    std::to_string(MAX_TOPK_RUN_NUM));
+    }
+    uint32_t expectedStride =
+        packTail ? DIV_ROUND_UP(outWidth, TOPK_RUN_ALIGN) * TOPK_RUN_ALIGN : outWidth;
+    if (outStride && outStride != expectedStride) {
+        throw std::invalid_argument(std::string(__func__) + ": outStride must be " +
+                                    std::to_string(expectedStride) +
+                                    " when packTail=" + std::to_string(packTail));
+    }
+    outStride = expectedStride;
+    if (packTail && topkIndices.shape[1] != outStride) {
+        throw std::invalid_argument(std::string(__func__) + ": topkIndices.shape[1] must be " +
+                                    std::to_string(outStride) + " when packTail is enabled");
+    }
     blockTables.AtLeast2D();
     uint32_t blockTableStride = static_cast<uint32_t>(blockTables.stride[0]);
     uint32_t maxNumBlocks = static_cast<uint32_t>(blockTables.shape[1]);
-    if (topK >= maxNumBlocks * blockSize && !skipDenseTopk) {
+    // packTail's per-position causal tail cannot be produced by host D2D copy;
+    // the kernel's dense template + BuildTail produce it.
+    if (topK >= maxNumBlocks * blockSize && !skipDenseTopk && !packTail) {
         // this kernel should not even be fired --- but let's pad the output anyways (inefficiently)
-        // the dense-row template is the first `topK` entries of `seqPositions` (0..topK-1)
-        size_t topkPosBytes = DIV_ROUND_UP(topK * XDtypeBit(topkIndices.dtype), 8);
+        // the dense-row template is the first `outWidth` entries of `seqPositions`
+        size_t topkPosBytes = DIV_ROUND_UP(outWidth * XDtypeBit(topkIndices.dtype), 8);
         for (uint64_t i = 0; i < topkIndices.shape[0]; i++) {
             aclrtMemcpyAsync(static_cast<char *>(topkIndices.ptr) + i * topkPosBytes, topkPosBytes,
                              seqPositions.ptr, topkPosBytes, ACL_MEMCPY_DEVICE_TO_DEVICE,
@@ -2815,7 +2916,8 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                 cachedLens.ptr, blockTables.ptr, scores.ptr, lastTopk.ptr, seqPositions.ptr,
                 topkIndices.ptr, sync.ptr, kCache.stride[0], nHeads, headDim, blockSize, batch,
                 blockTableStride, maxNumBlocks, topK, skipDenseTopk, kScaleCache.ptr,
-                kScaleCacheStride, compressRatio, weightCols, kvSplit, qTile);
+                kScaleCacheStride, compressRatio, weightCols, kvSplit, qTile, packTail, reluQk,
+                outStride);
         }
         return;
     }
@@ -2836,7 +2938,7 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                  cachedLens.ptr, blockTables.ptr, scores.ptr, lastTopk.ptr, seqPositions.ptr,
                  topkIndices.ptr, sync.ptr, kCache.stride[0], nHeads, headDim, blockSize, batch,
                  blockTableStride, maxNumBlocks, topK, skipDenseTopk, compressRatio, weightCols,
-                 kvSplit, qTile);
+                 kvSplit, qTile, packTail, reluQk, outStride);
 }
 
 void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output, uint32_t calcOffset,
@@ -2945,7 +3047,8 @@ static void CheckGdnPageMetadata(const XTensor &indices, const XTensor *cachedLe
 
 void XliteOpConv1dAndSiLUPaged(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
                                XTensor &output, XTensor &stateIndices, XTensor *cachedLens,
-                               uint32_t stateBlockSize, bool aligned)
+                               uint32_t stateBlockSize, bool aligned, uint32_t stateLayout,
+                               uint32_t chanOffset)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -2955,19 +3058,28 @@ void XliteOpConv1dAndSiLUPaged(XRuntime &rt, XTensor &state, XTensor &input, XTe
         (weight.shape.size() == 3 && weight.shape[1] != 1)) {
         throw std::runtime_error("conv decode: invalid activation/weight shape");
     }
+    if (stateLayout != 1 && stateLayout != 2) {
+        throw std::runtime_error("conv decode: unsupported stateLayout (1=split, 2=SD merged)");
+    }
     CheckGdnPageMetadata(stateIndices, cachedLens, input.shape.at(0), stateBlockSize);
     uint32_t channels = input.shape.at(1);
     uint32_t width = weight.shape.back();
+    // stateLayout 1: split page, per-stream [width-1, channels] rows; 2: vLLM SD
+    // merged page [width-1, 3*channels], q|k|v interleaved per timestep row. With
+    // layout 2, `state` is the full merged page and chanOffset (elements) selects
+    // the stream's column slice (kernel: r*stateRowStride + c).
+    uint32_t stateRowStride = stateLayout == 2 ? channels * 3u : channels;
+    uint32_t stateChannels = stateLayout == 2 ? channels * 3u : channels;
     if (input.shape.size() != 2 || output.shape != input.shape || width < 2 || width > 4 ||
         input.stride != std::vector<size_t>{channels, 1} ||
         output.stride != std::vector<size_t>{channels, 1} ||
         weight.stride != (weight.shape.size() == 2 ? std::vector<size_t>{width, 1}
                                                    : std::vector<size_t>{width, width, 1}) ||
         channels % 64 != 0 || state.shape.size() != 3 || state.shape[1] != width - 1 ||
-        state.shape[0] < 2 || state.shape[0] > UINT32_MAX || state.shape[2] != channels ||
-        state.stride.size() != 3 || state.stride[2] != 1 || state.stride[1] != channels ||
-        state.stride[0] < (width - 1) * channels || stateIndices.dtype != INT32 ||
-        weight.shape[0] != channels) {
+        state.shape[0] < 2 || state.shape[0] > UINT32_MAX || state.shape[2] != stateChannels ||
+        state.stride.size() != 3 || state.stride[2] != 1 || state.stride[1] != stateRowStride ||
+        state.stride[0] < (width - 1) * stateRowStride || stateIndices.dtype != INT32 ||
+        weight.shape[0] != channels || (stateLayout == 1 && chanOffset != 0)) {
         throw std::runtime_error("conv: unsupported native SD page descriptor");
     }
     KERNEL_PTR_TYPE(conv1d_and_silu_paged) * launchKernel;
@@ -2980,9 +3092,11 @@ void XliteOpConv1dAndSiLUPaged(XRuntime &rt, XTensor &state, XTensor &input, XTe
     } else {
         throw std::runtime_error("conv: unsupported state dtype");
     }
-    launchKernel(rt.aivNum, rt.stream, state.ptr, input.ptr, weight.ptr, output.ptr,
+    void *stateBase = static_cast<uint8_t *>(state.ptr) +
+                      static_cast<size_t>(chanOffset) * (XDtypeBit(state.dtype) / 8);
+    launchKernel(rt.aivNum, rt.stream, stateBase, input.ptr, weight.ptr, output.ptr,
                  static_cast<uint32_t>(input.shape[0]), channels, width, 1u, stateIndices.ptr,
-                 state.stride[0], 1u, static_cast<uint32_t>(state.shape[0]),
+                 state.stride[0], stateLayout, static_cast<uint32_t>(state.shape[0]),
                  cachedLens == nullptr ? nullptr : cachedLens->ptr,
                  cachedLens == nullptr ? 0 : stateIndices.stride[0],
                  cachedLens == nullptr ? 0 : static_cast<uint32_t>(stateIndices.shape[1]),
@@ -3762,7 +3876,7 @@ void XliteOpSiluGateMul(XRuntime &rt, XTensor &normed, XTensor &gate, XTensor &o
 
 static void Conv1dPrefillImpl(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
                               XTensor &output, XTensor &stateIndices, XTensor *starts,
-                              XTensor *initial)
+                              XTensor *initial, uint32_t stateLayout, uint32_t chanOffset)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -3770,6 +3884,9 @@ static void Conv1dPrefillImpl(XRuntime &rt, XTensor &state, XTensor &input, XTen
     if (input.shape.size() != 2 || (weight.shape.size() != 2 && weight.shape.size() != 3) ||
         (weight.shape.size() == 3 && weight.shape[1] != 1)) {
         throw std::runtime_error("conv: invalid activation/weight rank");
+    }
+    if (stateLayout != 1 && stateLayout != 2) {
+        throw std::runtime_error("conv prefill: unsupported stateLayout (1=split, 2=SD merged)");
     }
     uint32_t batch = starts ? starts->numel - 1 : input.shape.at(0);
     if (starts &&
@@ -3780,6 +3897,10 @@ static void Conv1dPrefillImpl(XRuntime &rt, XTensor &state, XTensor &input, XTen
     }
     uint32_t channels = input.shape.at(1);
     uint32_t width = weight.shape.back();
+    // Same page layouts as the decode variant; with layout 2, chanOffset selects
+    // the stream's column slice of the merged page.
+    uint32_t stateRowStride = stateLayout == 2 ? channels * 3u : channels;
+    uint32_t stateChannels = stateLayout == 2 ? channels * 3u : channels;
     if (input.shape.size() != 2 || output.shape != input.shape || width < 2 || width > 4 ||
         input.stride != std::vector<size_t>{channels, 1} ||
         output.stride != std::vector<size_t>{channels, 1} ||
@@ -3787,10 +3908,11 @@ static void Conv1dPrefillImpl(XRuntime &rt, XTensor &state, XTensor &input, XTen
                                                    : std::vector<size_t>{width, width, 1}) ||
         channels == 0 || channels % 64 != 0 || state.shape.size() != 3 ||
         state.shape[1] != width - 1 || state.shape[0] < 2 || state.shape[0] > UINT32_MAX ||
-        state.shape[2] != channels || state.stride.size() != 3 || state.stride[2] != 1 ||
-        state.stride[1] != channels || state.stride[0] < (width - 1) * channels ||
+        state.shape[2] != stateChannels || state.stride.size() != 3 || state.stride[2] != 1 ||
+        state.stride[1] != stateRowStride || state.stride[0] < (width - 1) * stateRowStride ||
         stateIndices.dtype != INT32 || stateIndices.numel < batch ||
-        stateIndices.stride != std::vector<size_t>{1} || weight.shape[0] != channels) {
+        stateIndices.stride != std::vector<size_t>{1} || weight.shape[0] != channels ||
+        (stateLayout == 1 && chanOffset != 0)) {
         throw std::runtime_error("conv: unsupported native SD page descriptor");
     }
     if (starts) {
@@ -3804,9 +3926,11 @@ static void Conv1dPrefillImpl(XRuntime &rt, XTensor &state, XTensor &input, XTen
         } else {
             throw std::runtime_error("conv prefill: unsupported dtype");
         }
-        kernel(std::min(rt.aivNum, batch * (channels / 64)), rt.stream, state.ptr, input.ptr,
+        void *stateBase = static_cast<uint8_t *>(state.ptr) +
+                          static_cast<size_t>(chanOffset) * (XDtypeBit(state.dtype) / 8);
+        kernel(std::min(rt.aivNum, batch * (channels / 64)), rt.stream, stateBase, input.ptr,
                weight.ptr, output.ptr, batch, channels, width, stateIndices.ptr, state.stride[0],
-               state.shape[0], starts->ptr, initial->ptr, input.shape[0]);
+               stateLayout, state.shape[0], starts->ptr, initial->ptr, input.shape[0]);
         return;
     }
 }
@@ -3878,9 +4002,10 @@ static void RecurrentPrefillImpl(XRuntime &rt, XTensor &query, XTensor &key, XTe
 
 void XliteOpConv1dAndSiLUPrefillPaged(XRuntime &rt, XTensor &state, XTensor &input, XTensor &weight,
                                       XTensor &output, XTensor &indices, XTensor &starts,
-                                      XTensor &initial)
+                                      XTensor &initial, uint32_t stateLayout, uint32_t chanOffset)
 {
-    Conv1dPrefillImpl(rt, state, input, weight, output, indices, &starts, &initial);
+    Conv1dPrefillImpl(rt, state, input, weight, output, indices, &starts, &initial, stateLayout,
+                      chanOffset);
 }
 
 void XliteOpRecurrentGatedDeltaRulePrefillPaged(XRuntime &rt, XTensor &query, XTensor &key,

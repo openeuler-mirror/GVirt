@@ -76,6 +76,13 @@ enum class NormKind {
 #error "MAX_INDEXER_KV_TILE_LEN must not exceed INIT_MIN_SEQ_POS"
 #endif
 #define MAX_TOPK_NUM 2048
+// Runtime topk row width may exceed MAX_TOPK_NUM: the GLM5 kpool path packs the PKI
+// causal tail into columns [topK, topK+kpool-1) of the topk buffer (e.g. 2048+3=2051).
+// The aiv softmax mask walks 128-slot blocks, so widened rows are padded to
+// TOPK_RUN_ALIGN slots with -1 (GLM5: 2051 -> 2176). MAX_TOPK_NUM stays the
+// compile-time bound for legacy (DSA) shapes.
+#define TOPK_RUN_ALIGN 128
+#define MAX_TOPK_RUN_NUM ((MAX_TOPK_NUM + 8 + TOPK_RUN_ALIGN - 1) / TOPK_RUN_ALIGN * TOPK_RUN_ALIGN)
 // RunAivSoftmaxPingPong row bound: the softmax row len = MAX(outN, topK +
 // swaSegWidth) must stay within this for the worst-case feature mix
 // (saveMaxSum + topK + attnSink all on) to fit UB. The binding scenario is
@@ -92,6 +99,7 @@ enum class NormKind {
 // (XliteOpCXA / XliteOpFlashCXA): the topK path's inTopK buffer holds
 // topK + swaSegWidth elements and must stay within the budget above.
 #define MAX_SWA_SEG_WIDTH 4096
+#define SOFTMAX_MASK_CHUNK 2048  // topkMask vand-slot granularity
 #define MSD_MERGE_DEQUANT_MAX_N 8064
 
 // kpool tail

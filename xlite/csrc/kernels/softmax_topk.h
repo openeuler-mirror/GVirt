@@ -217,10 +217,10 @@ public:
         // 分4块排序，每块32个数据
         vbitsort(sortTmp, calc, indicesIn, nSortScores / SORT_BLOCK_SIZE);
         pipe_barrier(PIPE_V);
-        // MrgSort() folds every vbitsort block into one descending run and prunes each merge
-        // level to the top candidates, so neither the 4-way merge limit nor a manual tail
-        // folding loop has to be handled here. The result lands in sortTmp or sortMrgTmp
-        // depending on how many merge levels ran, hence the returned pointer.
+        // MrgSort() folds every vbitsort block into one descending run. Multi-repeat
+        // levels merge four equal, full-width queues; only the final/remain level
+        // prunes to topK. The result lands in sortTmp or sortMrgTmp depending on
+        // how many merge levels ran, hence the returned pointer.
         __ubuf__ float *topSort = nullptr;
         MrgSort(sortTmp, sortMrgTmp, nSortScores / SORT_BLOCK_SIZE, &topSort, topK);
         pipe_barrier(PIPE_V);

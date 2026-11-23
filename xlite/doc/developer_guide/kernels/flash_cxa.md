@@ -85,7 +85,7 @@ host 侧仅 BF16(`csrc/op.cpp` 的 `XliteOpFlashCXA`(关键字 `EachXDtype(BF16`
 
 调度类型为 `KERNEL_TYPE_MIX_AIC_1_2`(`csrc/kernels/flash_cxa.h` 的 `FlashCXA::Init`(关键字 `KERNEL_TYPE_MIX_AIC_1_2`)):1 AIC + 2 AIV 混合调度,与 cxa 一致。
 
-host 侧约束(`csrc/op.cpp` 的 `XliteOpFlashCXA`(约束校验段,关键字 `MAX_SOFTMAX_PINGPONG_LEN` / `MAX_TOPK_NUM` / `compressRatio`)):`tileSizeOfCachedKV ≤ MAX_SOFTMAX_PINGPONG_LEN`、`indexTopK ≤ MAX_TOPK_NUM = 2048`、`compressRatio != 0`(flash 必须有压缩段)。
+host 侧约束(`csrc/op.cpp` 的 `XliteOpFlashCXA`(约束校验段,关键字 `MAX_SOFTMAX_PINGPONG_LEN` / `MAX_TOPK_NUM` / `TOPK_RUN_ALIGN` / `compressRatio`)):`tileSizeOfCachedKV ≤ MAX_SOFTMAX_PINGPONG_LEN`、`indexTopK ≤ MAX_TOPK_NUM = 2048`、非零 `indexTopK` 为 `TOPK_RUN_ALIGN=128` 的倍数、`compressRatio != 0`(flash 必须有压缩段)。
 
 ## 实现原理
 

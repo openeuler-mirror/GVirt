@@ -58,6 +58,9 @@ models = [
     ("base", 1, 64, 128, 128, 16, torch.bfloat16),
     ("deepseek_v3", 16, 64, 128, 128, 512, torch.bfloat16),
     ("glm5", 8, 64, 192, 256, 512, torch.bfloat16),
+    # GLM-5.3-Flash NoPE sparse MLA: no rope plane at all (rope_head_dim=0,
+    # empty pe slot) — previously only covered via the glm5_next reference model.
+    ("glm5flash_nope", 8, 0, 192, 256, 512, torch.bfloat16),
 ]
 
 # work configurations: batch_size, cached_lens, query_lens, [pitched]
@@ -409,11 +412,12 @@ for name, n_heads, rope_head_dim, nope_head_dim, v_head_dim, kv_lora_rank, test_
                 dst_k = k_cache_xlite[sample_cache_start : sample_cache_start + num_blocks_needed].view(
                     -1, kv_lora_rank
                 )
-                dst_pe = pe_cache_xlite[sample_cache_start : sample_cache_start + num_blocks_needed].view(
-                    -1, rope_head_dim
-                )
                 dst_k[:total_len] = current_k.flatten(0, 1)
-                dst_pe[:total_len] = current_pe.flatten(0, 1)
+                if rope_head_dim > 0:
+                    dst_pe = pe_cache_xlite[sample_cache_start : sample_cache_start + num_blocks_needed].view(
+                        -1, rope_head_dim
+                    )
+                    dst_pe[:total_len] = current_pe.flatten(0, 1)
 
         # ----- mla_v2 kernel (wuk einsum + mla_v2 + wuv einsum) -----
         if not run_v2:

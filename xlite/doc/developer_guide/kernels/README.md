@@ -21,7 +21,7 @@
 | silu_and_mul | [silu_and_mul.md](silu_and_mul.md) | SiLU 激活与门控乘融合 |
 | silu_gate_mul | [sigmoid_gate_mul.md](sigmoid_gate_mul.md) | FP32 norm 与 SiLU gate 融合 |
 | sigmoid_gate_mul | [sigmoid_gate_mul.md](sigmoid_gate_mul.md) | Sigmoid 门控乘融合 |
-| cast | [cast.md](cast.md) | dtype 类型转换 |
+| cast | [cast.md](cast.md) | dtype 类型转换(tiling 按输出粒度 32B 对齐,防核间尾块越界) |
 | softmax | [softmax.md](softmax.md) | Softmax |
 | concat | [concat.md](concat.md) | 按指定维度拼接 |
 | split | [split.md](split.md) | 按指定维度切分 |

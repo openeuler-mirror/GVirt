@@ -162,9 +162,14 @@ inline __aicore__ void RunAivSoftmaxPingPong(
     __ubuf__ float *cmpFp321 = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
     off += topK != 0 ? VECTOR_MAX_BYTESIZE : 0;
     __ubuf__ uint8_t *topkMask0 = reinterpret_cast<__ubuf__ uint8_t *>((uintptr_t)off);
-    off += topK != 0 ? ROUND_UP(topK / 8, VECTOR_MAX_BYTESIZE) : 0;
+    // Mask sizing: vcmpvs writes DIV_ROUND_UP(topK,64) x 8 B, the hit-block loop
+    // reads up to DIV_ROUND_UP(topK,128) x 16 B, and vand works in
+    // SOFTMAX_MASK_CHUNK-slot (256 B) repeats. Round topK up to the vand
+    // granularity so a kpool-widened topK (e.g. 2176) cannot overflow the
+    // 256 B a plain topK/8 would give.
+    off += topK != 0 ? ROUND_UP(topK, SOFTMAX_MASK_CHUNK) / 8 : 0;
     __ubuf__ uint8_t *topkMask1 = reinterpret_cast<__ubuf__ uint8_t *>((uintptr_t)off);
-    off += topK != 0 ? ROUND_UP(topK / 8, VECTOR_MAX_BYTESIZE) : 0;
+    off += topK != 0 ? ROUND_UP(topK, SOFTMAX_MASK_CHUNK) / 8 : 0;
     __ubuf__ int32_t *currIndices = reinterpret_cast<__ubuf__ int32_t *>((uintptr_t)off);
     off += topK != 0 ? ROUND_UP(topK * sizeof(int32_t), VECTOR_MAX_BYTESIZE) : 0;
     __ubuf__ float *sink = reinterpret_cast<__ubuf__ float *>((uintptr_t)off);
@@ -175,7 +180,7 @@ inline __aicore__ void RunAivSoftmaxPingPong(
     constexpr int indicesPad = VECTOR_MAX_BYTESIZE / sizeof(int32_t);
     int indicesRepeat = DIV_ROUND_UP(topK, indicesPad);
     int topKCalRepeat = DIV_ROUND_UP(topK, calPad);
-    int topKVandRepeat = DIV_ROUND_UP(topK, 2048);
+    int topKVandRepeat = DIV_ROUND_UP(topK, SOFTMAX_MASK_CHUNK);
     int topKLoopCnt = DIV_ROUND_UP(topK, 128);
     int firstHitBlock = -1;
     int lastHitBlock = -1;
@@ -226,8 +231,9 @@ inline __aicore__ void RunAivSoftmaxPingPong(
             int origActualCalcLen = actualCalcLen;
             // Per-64-slot hit masks, cached during the vgather scan and reused by the scatter
             // loop after softmax, so scatter reads them from scalars instead of slow UB loads.
-            // Each topLoop covers 128 slots = 2 x uint64; topK <= MAX_TOPK_NUM bounds the array.
-            constexpr int kMaxMaskEntries = 2 * DIV_ROUND_UP(MAX_TOPK_NUM, 128);
+            // Each topLoop covers 128 slots = 2 x uint64; topK <= MAX_TOPK_RUN_NUM bounds the
+            // array.
+            constexpr int kMaxMaskEntries = 2 * DIV_ROUND_UP(MAX_TOPK_RUN_NUM, 128);
             uint64_t maskCache[kMaxMaskEntries];
             if (topK > 0) {
                 CopyGmToUbufAligned(indices[curr], topkIndices + seqIdx * topK,
@@ -273,6 +279,9 @@ inline __aicore__ void RunAivSoftmaxPingPong(
                 for (int topLoop = 0; topLoop < topKLoopCnt; topLoop++) {
                     uint64_t mask0 = *(__ubuf__ uint64_t *)(topkMask0 + topLoop * 16);
                     uint64_t mask1 = *(__ubuf__ uint64_t *)(topkMask0 + topLoop * 16 + 8);
+                    // topK is TOPK_RUN_ALIGN-aligned (host contract), so every 128-slot
+                    // topLoop is full. kpool row padding inside the last block is -1 in
+                    // GM, which fails both vcmpvs comparisons and yields a zero mask.
                     maskCache[topLoop * 2] = mask0;
                     maskCache[topLoop * 2 + 1] = mask1;
                     __ubuf__ int32_t *indicesOffset = indices[curr] + topLoop * 128;
@@ -463,12 +472,21 @@ inline __aicore__ void RunAivSoftmaxPingPong(
                     pipe_barrier(PIPE_V);
                 }
                 __ubuf__ uint16_t *currOut = (__ubuf__ uint16_t *)(out[curr] + swaSegWidth);
+                // Positions not covered by the topk indices must read as 0 in the
+                // SV pass: out[] is a reused ping-pong buffer and the scatter below
+                // only writes the topk-hit slots, so leftovers from the previous row
+                // (topK < actualCalcLen) would leak into the sum.
+                vector_dup(out[curr] + swaSegWidth, Dtype(0),
+                           DIV_ROUND_UP(origActualCalcLen - swaSegWidth, pad), 1, 1, 8, 0);
+                pipe_barrier(PIPE_V);
                 set_flag(PIPE_V, PIPE_S, EVENT_ID0);
                 wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
 
                 // Scatter at 64-slot granularity (1 x uint64 mask); vgather's firstHitBlock/
                 // lastHitBlock are 128-slot block numbers, so multiply by 2 to align indices.
-                int topkLoop = topK >> 6;
+                // Round up (not >>6) so the partial last group of a non-64-multiple topK
+                // (kpool-widened rows) still gets scattered.
+                int topkLoop = DIV_ROUND_UP(topK, 64);
                 for (int i = firstHitBlock < 0 ? topkLoop : firstHitBlock * 2;
                      i <= lastHitBlock * 2 + 1 && i < topkLoop; i++) {
                     uint64_t mask = maskCache[i];
@@ -600,6 +618,7 @@ inline __aicore__ void RunAivSoftmaxPingPong(
  *   - EVENT_ID0/1: Ping-Pong sync for input buffer loads
  *   - EVENT_ID2/3: Ping-Pong sync for output buffer stores
  *   - EVENT_ID4/5: GM read/write synchronization for first chunk path
+ *   - EVENT_ID6: V<->S sync around the newSum scalar read in Step 10
  */
 template <typename Dtype>
 inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *currMax,
@@ -807,8 +826,26 @@ inline __aicore__ void RunAivSoftmaxUpdate(__gm__ Dtype *currSv, __gm__ float *c
             copy_ubuf_to_ubuf(newMaxOutUb[curr], newMaxUb, 0, 1, 1, 1, 1);
             vbrcb((__ubuf__ uint32_t *)newSumOutUb[curr], (__ubuf__ uint32_t *)newSumUb, 0, 0, 1);
             pipe_barrier(PIPE_V);
-            vdiv(svOutFloatUb, svOutFloatUb, newSumOutUb[curr], repeat, 1, 1, 0, 8, 8, 0);
-            pipe_barrier(PIPE_V);
+            // newSumOutUb is written on PIPE_V; the scalar read below runs on
+            // PIPE_S. Sync V->S before the read and S->V after it.
+            set_flag(PIPE_V, PIPE_S, EVENT_ID6);
+            wait_flag(PIPE_V, PIPE_S, EVENT_ID6);
+            // First element of the vbrcb broadcast above.
+            float newSumScalar = newSumOutUb[curr][0];
+            bool zeroSum = (newSumScalar == 0.0f) || (newSumScalar != newSumScalar);
+            set_flag(PIPE_S, PIPE_V, EVENT_ID6);
+            wait_flag(PIPE_S, PIPE_V, EVENT_ID6);
+            // All tiles missed: newSum is 0 (or NaN), vdiv would produce 0/0.
+            // Emit 0 so the next hit tile starts from a clean lastSum.
+            if (zeroSum) {
+                vector_dup(svOutFloatUb, float(0), repeat, 1, 1, 8, 0);
+                // Only [0] is consumed, by the Step 12 lastSum store.
+                vector_dup(newSumOutUb[curr], float(0), 1, 1, 1, 8, 0);
+                pipe_barrier(PIPE_V);
+            } else {
+                vdiv(svOutFloatUb, svOutFloatUb, newSumOutUb[curr], repeat, 1, 1, 0, 8, 8, 0);
+                pipe_barrier(PIPE_V);
+            }
 
             // Step 11: Convert result back from float32 to Dtype
             if constexpr (std::is_same<Dtype, half>::value) {

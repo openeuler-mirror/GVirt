@@ -276,31 +276,36 @@ public:
                 pingpongL1B ^= 1;
             }
 
-            kSize = ropeHeadDim;
-            kBlockPad = ROUND_UP(kSize, kBlockSize);
-            kBlockNum = kBlockPad / kBlockSize;
-            // copy KR (qkn0, ropeHeadDim) to L1
-            WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curr);
-            CopyGmToL1Nd2Nz(akrl1bBuf[curr], peCache[(uint64_t)block * pePitch], nSize, ropeHeadDim,
-                            ropeHeadDim, nBlockPad);
+            // R = QR * KR; zero-width when ropeHeadDim == 0 (GLM5 qk_rope_head_dim=0),
+            // where the mmad would run with k=0 (undefined hardware behavior on the
+            // accumulated C in L0C) -skip the whole R stage in that case.
+            if (ropeHeadDim > 0) {
+                kSize = ropeHeadDim;
+                kBlockPad = ROUND_UP(kSize, kBlockSize);
+                kBlockNum = kBlockPad / kBlockSize;
+                // copy KR (qkn0, ropeHeadDim) to L1
+                WaitFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curr);
+                CopyGmToL1Nd2Nz(akrl1bBuf[curr], peCache[(uint64_t)block * pePitch], nSize,
+                                ropeHeadDim, ropeHeadDim, nBlockPad);
 
-            SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + curr);
-            WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + curr);
+                SetFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + curr);
+                WaitFlag<HardEvent::MTE2_MTE1>(EVENT_ID2 + curr);
 
-            WaitFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
-            CopyToL0ACol(qkl0aBuf[curr], aqrl1aBuf, mBlockNum, 0, kBlockNum);
-            CopyToL0BCol(qkl0bBuf[curr], akrl1bBuf[curr], nBlockNum, 0, kBlockNum);
-            SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curr);
+                WaitFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
+                CopyToL0ACol(qkl0aBuf[curr], aqrl1aBuf, mBlockNum, 0, kBlockNum);
+                CopyToL0BCol(qkl0bBuf[curr], akrl1bBuf[curr], nBlockNum, 0, kBlockNum);
+                SetFlag<HardEvent::MTE1_MTE2>(EVENT_ID2 + curr);
 
-            SetFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
-            WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
+                SetFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
+                WaitFlag<HardEvent::MTE1_M>(EVENT_ID0 + curr);
 
-            // mmad R (queryTokens * nHeads, qkn0) = QR * KR
-            CalMmad(qkl0cBuf[pingpongL0C], qkl0aBuf[curr], qkl0bBuf[curr], mBlockPad, nBlockPad,
-                    kBlockPad, false);
-            SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
-            if (mBlockNum * nBlockNum < 10) {
-                PipeBarrier<PIPE_M>();
+                // mmad R (queryTokens * nHeads, qkn0) = QR * KR
+                CalMmad(qkl0cBuf[pingpongL0C], qkl0aBuf[curr], qkl0bBuf[curr], mBlockPad, nBlockPad,
+                        kBlockPad, false);
+                SetFlag<HardEvent::M_MTE1>(EVENT_ID0 + curr);
+                if (mBlockNum * nBlockNum < 10) {
+                    PipeBarrier<PIPE_M>();
+                }
             }
 
             SetFlag<HardEvent::M_FIX>(EVENT_ID0 + pingpongL0C);

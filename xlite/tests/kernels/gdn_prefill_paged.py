@@ -155,6 +155,76 @@ def check_case(rt, dtype, state_dtype, lengths, kh=2, vh=6, kd=128, vd=128, fp32
     print(f"PASS {dtype}/{state_dtype}: lengths={lengths}, Hk/Hv={kh}/{vh}, K/V={kd}/{vd}", flush=True)
 
 
+def check_case_layout2(rt, dtype, kh=2, vh=6, kd=128, vd=128):
+    # vLLM SD pool interleaves q|k|v per row in one shared page: each stream maps to
+    # state_layout=2 with its own chan_offset and must match a standalone convolution.
+    batch, width = 2, 4
+    lengths = [3, 5]
+    bounds = [0, 3, 8]
+    pages, flags = [3, 1], [1, 0]
+    tokens, channels = sum(lengths), 2 * kh * kd + vh * vd
+    indices, starts, initial = [torch.tensor(x, dtype=torch.int32, device="npu") for x in (pages, bounds, flags)]
+    cr2, conv2, ref_cr2, ref_conv2 = page_tensor((batch + 2, width - 1, 3 * channels), dtype)
+    streams = [
+        ((torch.randn(tokens, channels) * 0.2).to(dtype), torch.randn(channels, width).to(dtype)) for _ in range(3)
+    ]
+    expected = [torch.zeros(tokens, channels, dtype=dtype) for _ in range(3)]
+    for b, page in enumerate(pages):
+        history = [
+            ref_conv2[page, :, s * channels : (s + 1) * channels].float().clone()
+            if flags[b]
+            else torch.zeros(width - 1, channels)
+            for s in range(3)
+        ]
+        for t in range(bounds[b], bounds[b + 1]):
+            for s in range(3):
+                x_s, w_s = streams[s]
+                window = torch.cat((history[s], x_s[t : t + 1].float()))
+                expected[s][t] = torch.nn.functional.silu((window * w_s.float().T).sum(0).to(dtype).float()).to(dtype)
+                history[s] = window[1:]
+        for s in range(3):
+            ref_conv2[page, :, s * channels : (s + 1) * channels] = history[s].to(dtype)
+    cos = []
+    for s, (x_s, w_s) in enumerate(streams):
+        x_npu = x_s.to("npu")
+        co = torch.full_like(x_npu, float("nan"))
+        conv1d_and_silu_prefill_paged(
+            rt=rt,
+            input=x_npu,
+            state=conv2,
+            weight=w_s.to("npu"),
+            output=co,
+            indices=indices,
+            starts=starts,
+            initial=initial,
+            state_layout=2,
+            chan_offset=s * channels,
+        )
+        cos.append(co.cpu())
+    torch.npu.synchronize()
+    for s in range(3):
+        torch.testing.assert_close(cos[s], expected[s], rtol=0.025, atol=0.004)
+    torch.testing.assert_close(cr2.cpu(), ref_cr2, rtol=0, atol=0)
+    # Decode handoff continues from the same interleaved pages.
+    ids = torch.tensor([3, 1], dtype=torch.int32, device="npu")
+    for s, (x_s, w_s) in enumerate(streams):
+        xd = (torch.randn(2, channels) * 0.2).to(dtype)
+        yd_ref = torch.empty_like(xd)
+        for b, page in enumerate(pages):
+            window = torch.cat((ref_conv2[page, :, s * channels : (s + 1) * channels].float(), xd[b : b + 1].float()))
+            yd_ref[b] = torch.nn.functional.silu((window * w_s.float().T).sum(0)).to(dtype)
+            ref_conv2[page, :, s * channels : (s + 1) * channels] = window[1:].to(dtype)
+        xd_npu = xd.to("npu")
+        yd = torch.empty_like(xd_npu)
+        torch.npu.synchronize()
+        linear_att_conv_and_silu_paged(
+            rt, xd_npu, conv2, w_s.to("npu"), yd, ids, state_layout=2, chan_offset=s * channels
+        )
+        torch.testing.assert_close(yd.cpu(), yd_ref, rtol=0.025, atol=0.004)
+    torch.testing.assert_close(cr2.cpu(), ref_cr2, rtol=0, atol=0)
+    print(f"PASS layout2 {dtype}: Hk/Hv={kh}/{vh}, K/V={kd}/{vd}", flush=True)
+
+
 def check_rejections(rt):
     x = torch.zeros(2, 192, dtype=torch.bfloat16, device="npu")
     conv = torch.ones(3, 3, 192, dtype=x.dtype, device="npu")
@@ -178,6 +248,14 @@ def check_rejections(rt):
         starts=starts,
         initial=initial,
     )
+    decode_args = dict(
+        rt=rt,
+        mix_qkv=x,
+        conv_state=conv,
+        weight=weight,
+        output=torch.empty_like(x),
+        state_indices=ids,
+    )
     ssm_args = dict(
         rt=rt,
         query=q,
@@ -200,6 +278,10 @@ def check_rejections(rt):
         (conv1d_and_silu_prefill_paged, conv_args, "initial", initial.float()),
         (conv1d_and_silu_prefill_paged, conv_args, "indices", ids.cpu()),
         (conv1d_and_silu_prefill_paged, conv_args, "output", x.T),
+        (conv1d_and_silu_prefill_paged, conv_args, "state_layout", 2),
+        (conv1d_and_silu_prefill_paged, conv_args, "chan_offset", 1),
+        (linear_att_conv_and_silu_paged, decode_args, "state_layout", 2),
+        (linear_att_conv_and_silu_paged, decode_args, "chan_offset", 1),
         (recurrent_gated_delta_rule_prefill_paged, ssm_args, "starts", starts.long()),
         (recurrent_gated_delta_rule_prefill_paged, ssm_args, "initial", initial.float()),
         (recurrent_gated_delta_rule_prefill_paged, ssm_args, "indices", ids.cpu()),
@@ -218,7 +300,7 @@ def check_rejections(rt):
             raise AssertionError(f"invalid descriptor accepted at argument {name}")
         assert torch.equal(conv, before_conv), "rejected call changed Conv state"
         assert torch.equal(state, before_state), "rejected call changed SSM state"
-    print("PASS 9 Prefill descriptor/device rejections with unchanged state", flush=True)
+    print("PASS 13 Prefill descriptor/device/layout rejections with unchanged state", flush=True)
 
 
 def main(device):
@@ -231,9 +313,14 @@ def main(device):
                 check_case(rt, dtype, state_dtype, [1, 0, 65, 3, 7], kd=kd, vd=vd)
     for length in (512, 1024, 4096):
         check_case(rt, torch.bfloat16, torch.float32, [length, 1], kh=1, vh=3)
+    for dtype in (torch.bfloat16, torch.float16):
+        check_case_layout2(rt, dtype, kd=16, vd=64)
     check_case(rt, torch.bfloat16, torch.float32, [1, 0, 65, 3, 7], fp32_gates=True)
     check_rejections(rt)
-    print("PASS 19 packed prefill cases, 38 continuation updates and 19 SSM + 19 Conv decode handoffs", flush=True)
+    print(
+        "PASS 21 packed prefill cases (2 interleaved), 38 continuation updates and 19 SSM + 19 Conv decode handoffs",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

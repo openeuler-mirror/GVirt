@@ -2032,8 +2032,18 @@ static uint32_t SliceBlockTableToLens(XTensor &blockTables, const XTensor &lens,
                                       const XTensor &cachedLens, uint32_t blockSize,
                                       uint32_t compressRatio = 1)
 {
-    blockTables.AtLeast2D();
     uint32_t blocks = DIV_ROUND_UP(DeriveMaxSeqLen(lens, cachedLens) / compressRatio, blockSize);
+    if (blockTables.shape.size() == 1) {
+        // Flat batch-major table (test path): the kernel walks request rows by
+        // stride[0] (see XliteOpFlashMLAV2), so a flat table must be viewed as
+        // [batch, blocks] rows first — AtLeast2D would make it a single row with
+        // stride 1 and every request after the first would read request 0's table.
+        if (blocks > 0) {
+            blockTables.View({blockTables.numel / blocks, blocks});
+        }
+    } else {
+        blockTables.AtLeast2D();
+    }
     if (blocks > 0) {  // 0 = no complete compressed block: nothing valid to narrow
         blockTables.SliceView(0, blocks, 1);
     }
@@ -2095,7 +2105,8 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
            at::Tensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim, uint32_t nopeHeadDim,
            uint32_t vHeadDim, uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, float scale,
            at::Tensor &topkIndices, uint32_t topK, bool weightNz, bool enableFlashAttention,
-           uint32_t tileSizeOfCachedKV, bool dense, const std::optional<at::Tensor> &kScaleCache)
+           uint32_t tileSizeOfCachedKV, bool dense, const std::optional<at::Tensor> &kScaleCache,
+           uint32_t topkStride = 0)
 {
     (void)weightNz;  // deprecated no-op: nz is auto-detected from the weight format
     XTensor _qWithQr, _qr, _kCache, _peCache, _wukT, _wuv, _output, _queryStartLoc, _lens,
@@ -2145,7 +2156,7 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
             rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, topK}, XDtypeOf(qWithQr), DBG_LOC);
         XliteOpMLAV2(rt, qAbsorb, _qr, kDense, peDense, qk, oAbsorb, _queryStartLoc, _lens,
                      _cachedLens, _blockTables, nHeads, ropeHeadDim, kvLoraRank, blockSize, batch,
-                     topK, scale, 0, XTensor(), dense);
+                     topK, scale, 0, XTensor(), dense, true, topkStride);
         rt.PutTensor(qk);
         rt.PutTensor(peDense);
         rt.PutTensor(kDense);
@@ -2165,7 +2176,7 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
         }
         XliteOpMLAV2(rt, qAbsorb, _qr, *k, *pe, qk, oAbsorb, _queryStartLoc, _lens, _cachedLens,
                      *table, nHeads, ropeHeadDim, kvLoraRank, blockSize, batch,
-                     maxNumBlocks * blockSize, scale, topK, _topkIndices, c8, false);
+                     maxNumBlocks * blockSize, scale, topK, _topkIndices, c8, false, topkStride);
         if (c8) {
             rt.PutTensor(*pe);
             rt.PutTensor(*k);
@@ -2197,7 +2208,7 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
         XliteOpFlashMLAV2(rt, qAbsorb, _qr, *k, *pe, qk, sv, max, sum, lastMax, lastSum, sync,
                           oAbsorb, _queryStartLoc, _lens, _cachedLens, *table, nHeads, ropeHeadDim,
                           kvLoraRank, blockSize, batch, scale, tileSizeOfCachedKV, topK,
-                          _topkIndices, c8);
+                          _topkIndices, c8, topkStride);
         if (c8) {
             rt.PutTensor(*pe);
             rt.PutTensor(*k);
@@ -2932,7 +2943,8 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
                  at::Tensor &cachedLens, at::Tensor &blockTables, uint32_t nHeads, uint32_t headDim,
                  uint32_t blockSize, uint32_t batch, uint32_t topK,
                  const std::optional<at::Tensor> &kScaleCache = std::nullopt,
-                 uint32_t compressRatio = 1, uint8_t kvSplit = 0, uint8_t qTile = 0)
+                 uint32_t compressRatio = 1, uint8_t kvSplit = 0, uint8_t qTile = 0,
+                 uint8_t packTail = 0, uint8_t reluQk = 1, uint32_t outStride = 0)
 {
     XTensor _q, _kCache, _weight, _topkIndices, _queryStartLoc, _lens, _cachedLens, _blockTables,
         _ks;
@@ -2982,7 +2994,8 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
 
     XliteOpIndexerTopK(rt, _q, _kCache, _weight, scores, lastTopk, seqPositions, _topkIndices,
                        _queryStartLoc, _lens, _cachedLens, _blockTables, sync, nHeads, headDim,
-                       blockSize, batch, topK, 0, _ks, compressRatio, kvSplit, qTile);
+                       blockSize, batch, topK, 0, _ks, compressRatio, kvSplit, qTile, packTail,
+                       reluQk, outStride);
     rt.Synchronize();
     rt.PutTensor(sync);
     rt.PutTensor(lastTopk);
@@ -3083,7 +3096,8 @@ static void CheckGdnDevices(XRuntime &rt, std::initializer_list<const at::Tensor
 void LinearAttConv1dAndSiLUPaged(XRuntime &rt, at::Tensor &input, at::Tensor &state,
                                  at::Tensor &weight, at::Tensor &output, at::Tensor &indices,
                                  const std::optional<at::Tensor> &cachedLens,
-                                 uint32_t stateBlockSize, bool aligned)
+                                 uint32_t stateBlockSize, bool aligned, uint32_t stateLayout,
+                                 uint32_t chanOffset)
 {
     CheckGdnDevices(rt, {&input, &state, &weight, &output, &indices,
                          cachedLens.has_value() ? &cachedLens.value() : nullptr});
@@ -3101,7 +3115,7 @@ void LinearAttConv1dAndSiLUPaged(XRuntime &rt, at::Tensor &input, at::Tensor &st
         InitXTensor(cached, cachedLens.value());
     }
     XliteOpConv1dAndSiLUPaged(rt, c, x, w, y, pages, cachedLens.has_value() ? &cached : nullptr,
-                              stateBlockSize, aligned);
+                              stateBlockSize, aligned, stateLayout, chanOffset);
     rt.Synchronize();
 }
 
@@ -3507,7 +3521,8 @@ void HcMeanCollapse(XRuntime &rt, at::Tensor &input, at::Tensor &output, uint32_
 
 void Conv1dAndSiLUPrefillPaged(XRuntime &rt, at::Tensor &input, at::Tensor &state,
                                at::Tensor &weight, at::Tensor &output, at::Tensor &indices,
-                               at::Tensor &starts, at::Tensor &initial)
+                               at::Tensor &starts, at::Tensor &initial, uint32_t stateLayout,
+                               uint32_t chanOffset)
 {
     CheckGdnDevices(rt, {&input, &state, &weight, &output, &indices, &starts, &initial});
     XTensor x, st, w, o, ids, bounds, init;
@@ -3518,7 +3533,7 @@ void Conv1dAndSiLUPrefillPaged(XRuntime &rt, at::Tensor &input, at::Tensor &stat
     InitXTensor(ids, indices);
     InitXTensor(bounds, starts);
     InitXTensor(init, initial);
-    XliteOpConv1dAndSiLUPrefillPaged(rt, st, x, w, o, ids, bounds, init);
+    XliteOpConv1dAndSiLUPrefillPaged(rt, st, x, w, o, ids, bounds, init, stateLayout, chanOffset);
     rt.Synchronize();
 }
 
@@ -4861,7 +4876,8 @@ TORCH_LIBRARY(xlite_sabi, m)
               torch::arg("enable_flash_attention") = false,
               torch::arg("tile_size_of_cached_kv") = static_cast<int64_t>(8192),
               torch::arg("dense") = false,
-              torch::arg("k_scale_cache") = torch::arg::none()})
+              torch::arg("k_scale_cache") = torch::arg::none(),
+              torch::arg("topk_stride") = static_cast<int64_t>(0)})
         .def("dsa_cp_gather_mla", op<&DsaCpGatherMLA>,
              {torch::arg("rt"), torch::arg("q_absorb"), torch::arg("qr"), torch::arg("k_cache"),
               torch::arg("pe_cache"), torch::arg("output"), torch::arg("query_start_loc"),
@@ -4908,14 +4924,27 @@ TORCH_LIBRARY(xlite_sabi, m)
               torch::arg("cached_lens"), torch::arg("block_tables"), torch::arg("n_heads"),
               torch::arg("head_dim"), torch::arg("block_size"), torch::arg("batch")})
         .def("indexer_topk", op<&IndexerTopK>,
-             {torch::arg("rt"), torch::arg("q"), torch::arg("k_cache"), torch::arg("weight"),
-              torch::arg("topk_indices"), torch::arg("query_start_loc"), torch::arg("lens"),
-              torch::arg("cached_lens"), torch::arg("block_tables"), torch::arg("n_heads"),
-              torch::arg("head_dim"), torch::arg("block_size"), torch::arg("batch"),
-              torch::arg("top_k"), torch::arg("k_scale_cache") = torch::arg::none(),
+             {torch::arg("rt"),
+              torch::arg("q"),
+              torch::arg("k_cache"),
+              torch::arg("weight"),
+              torch::arg("topk_indices"),
+              torch::arg("query_start_loc"),
+              torch::arg("lens"),
+              torch::arg("cached_lens"),
+              torch::arg("block_tables"),
+              torch::arg("n_heads"),
+              torch::arg("head_dim"),
+              torch::arg("block_size"),
+              torch::arg("batch"),
+              torch::arg("top_k"),
+              torch::arg("k_scale_cache") = torch::arg::none(),
               torch::arg("compress_ratio") = static_cast<int64_t>(1),
               torch::arg("kv_split") = static_cast<int64_t>(0),
-              torch::arg("q_tile") = static_cast<int64_t>(0)})
+              torch::arg("q_tile") = static_cast<int64_t>(0),
+              torch::arg("pack_tail") = static_cast<int64_t>(0),
+              torch::arg("relu_qk") = static_cast<int64_t>(1),
+              torch::arg("out_stride") = static_cast<int64_t>(0)})
         .def("muls", muls_op,
              {torch::arg("rt"), torch::arg("input"), torch::arg("scale"), torch::arg("output"),
               torch::arg("calc_offset") = static_cast<int64_t>(0),
@@ -4940,7 +4969,8 @@ TORCH_LIBRARY(xlite_sabi, m)
               torch::arg("weight"), torch::arg("output"), torch::arg("state_indices"),
               torch::arg("cached_lens") = torch::arg::none(),
               torch::arg("state_block_size") = static_cast<int64_t>(0),
-              torch::arg("aligned") = false})
+              torch::arg("aligned") = false, torch::arg("state_layout") = static_cast<int64_t>(1),
+              torch::arg("chan_offset") = static_cast<int64_t>(0)})
         .def("split_col", op<&SplitCol>,
              {torch::arg("rt"), torch::arg("in_"), torch::arg("outputs")})
         .def("concat", op<&Concat>, {torch::arg("rt"), torch::arg("inputs"), torch::arg("out")})
@@ -4989,7 +5019,8 @@ TORCH_LIBRARY(xlite_sabi, m)
         .def("conv1d_and_silu_prefill_paged", op<&Conv1dAndSiLUPrefillPaged>,
              {torch::arg("rt"), torch::arg("input"), torch::arg("state"), torch::arg("weight"),
               torch::arg("output"), torch::arg("indices"), torch::arg("starts"),
-              torch::arg("initial")})
+              torch::arg("initial"), torch::arg("state_layout") = static_cast<int64_t>(1),
+              torch::arg("chan_offset") = static_cast<int64_t>(0)})
         .def("print", op<&Print>,
              {torch::arg("x"), torch::arg("name") = std::string(""),
               torch::arg("row") = static_cast<int64_t>(6),

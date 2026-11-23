@@ -83,7 +83,8 @@ mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, oAbsorb,
 | blockTableStride | 标量 | - | uint32 | blockTables 的行跨度(元素数),host 取 `blockTables.stride[0]`,仅用于 sparse 行寻址(dense 置 0) |
 | maxSeqLen | 标量 | - | uint32 | qk workspace 行宽与 dense 长度:sparse 时为 `blockTables.shape[1] * blockSize`(qk workspace 行宽;V2 的 `shape[1]` 已由 PrepareAttn 收窄到运行期宽度),dense 时为连续 cache 每批容量(Gather Decode 为 indexTopK，C8 完整展开为调用方分配的容量) |
 | scale | 标量 | - | float | `(nopeHeadDim + ropeHeadDim)^-0.5` |
-| topK | 标量 | - | uint32 | DSA top-k;启用 Top-K 选择时，host 要求 `maxSeqLen ≤ MAX_SOFTMAX_PINGPONG_LEN=10496` 且 `topK ≤ MAX_TOPK_NUM=2048`(见 `csrc/op.cpp` 的 `XliteOpMLAV2`,关键字 `MAX_SOFTMAX_PINGPONG_LEN`/`MAX_TOPK_NUM`)。Python `dense=True` 仍要求 topK > 0，收集后以该值为 maxSeqLen、以 `topK=0` 调用内核；C8 完整展开保留原 topK 和索引 |
+| topK | 标量 | - | uint32 | DSA 逻辑 top-k 选择数;`calcLen > topK` 时走 sparse。启用 Top-K 选择时 host 要求 `maxSeqLen ≤ MAX_SOFTMAX_PINGPONG_LEN=10496`(见 `csrc/op.cpp` 的 `XliteOpMLAV2`,关键字 `MAX_SOFTMAX_PINGPONG_LEN`)。Python `dense=True` 仍要求 topK > 0，收集后以该值为 maxSeqLen、以 `topK=0` 调用内核；C8 完整展开保留原 topK 和索引 |
+| topkStride | 标量 | - | uint32 | topkIndices 物理行距;GLM5 packTail 为 2176(逻辑 topK=2051)。`0` 回退到 `topK`;host 要求 `topkStride ≥ topK`、`topkStride ≤ MAX_TOPK_RUN_NUM=2176` 且为 128 的倍数 |
 | kCacheStride / peCacheStride | 标量 | - | uint32 | kCache / peCache 的 dim-0 跨度(元素数),块或 batch 基址 = 序号 × 跨度:sparse 为每物理块跨度(连续时等于 blockSize×kvLoraRank / blockSize×ropeHeadDim),dense 为每 batch 跨度(连续时等于 maxSeqLen×kvLoraRank / maxSeqLen×ropeHeadDim);非连续时由宿主传入真实跨距 |
 | dense | 标量 | - | uint32 | 1=dense cache(`[batch, maxSeqLen, ...]`,batch 起点 = b×kCacheStride,由 gather_sparse_kv_cache 收集,blockTable 不使用),0=paged(见 `csrc/op.cpp` 的 `XliteOpMLAV2`,关键字 `dense`) |
 | densePerQuery | 标量 | - | uint32 | dense 时选择缓存行布局：1=每 query 一行，0=每请求一行；SFA-C8 完整展开使用 0 |
@@ -145,7 +146,7 @@ SFA-C8 在 host 接受独立的 INT8 `kCache[numBlocks, blockSize, 1, kvLoraRank
 
 AIC 侧 12 个 L1/L0 缓冲由共用的 `MlaAicHelper::Init`(`csrc/kernels/mla_aic_helper.h` 的 `MlaAicHelper::Init`)手动排布:QK 组与 SV 组各自在 L1(`TPosition::A1`)/L0A(`A2`)/L0B(`B2`)/L0C(`CO1`)上从偏移 0 累进 `bufferAddr`,L0 三级物理独立、各自从偏移 0 重新起排;**QK 组与 SV 组复用同一物理空间**——`RunAicQK` 收尾等待 `FIX_M`/`M_MTE1`/`MTE1_MTE2` 全部排空后才切换 `RunAicSV`,两相位在核内严格串行,各存储级物理占用按两相位取 max;`Init` 还用 host 提供的 `zeroGm` 把两份 `aktl1bBuf` 预填零(见上文 nan bug 修复)。AIV 侧 UB 由 softmax 函数在每次调用入口自偏移 0 现场排布,topK=0(全量 `RunAivSoftmaxLong`)与 topK>0(`RunAivSoftmaxPingPong`)两条路径互斥,占用亦取 max。硬件容量(910B/dav C220,NpuArch 2201,CANN 平台配置 `l0_a_size`/`l0_b_size`/`l0_c_size`/`l1_size`):L1 512KB、L0A 64KB、L0B 64KB,L0C 总容量 128KB（`l0_c_size=131072`，16 bank × 8KB），Mmad 累加缓冲即 `TPosition::CO1` 且占满整个 L0C;AIV UB 预算取 `UB_SIZE=192KB`(`csrc/kernels/kernel_macro.h` 的 `UB_SIZE`,4KB×48 bank),每个 AIV subblock 各持一份独立 UB、布局相同。
 
-dtype 记法:mla_v2 仅 BF16 单路径(`csrc/kernels/mla_v2_bfloat16_t.cpp`),`Dtype=bfloat16_t`(2B);几何常量(`MlaAicHelper::Init`)为 `qkk0=256/sizeof(Dtype)=128`、`qkn0=dense?MAX_N0:blockSize`、`svn0=256`、`svk0=64`。典型配置取 DeepSeek-V3 档(`tests/kernels/mla.py` 的 `models` 表):nHeads=16、kvLoraRank=512、ropeHeadDim=64、blockSize=128——AIC 缓冲大小只依赖 `XLITE_MAX_M0`/kvLoraRank/ropeHeadDim,与 nHeads 无关(dense 时 qkn0=MAX_N0=128,与 blockSize=128 同值);AIV 侧按短序列路径上限 maxSeqLen=8192(`tile_size_of_cached_kv` 默认值,超过即路由 flash_mla_v2)与 DSA topK=2048 代入,下表 shape 为逻辑形状(L1/L0 内实际按 Nd2Nz/NZ 分形排布)。
+dtype 记法:mla_v2 仅 BF16 单路径(`csrc/kernels/mla_v2_bfloat16_t.cpp`),`Dtype=bfloat16_t`(2B);几何常量(`MlaAicHelper::Init`)为 `qkk0=256/sizeof(Dtype)=128`、`qkn0=dense?MAX_N0:blockSize`、`svn0=256`、`svk0=64`。典型配置取 DeepSeek-V3 档(`tests/kernels/mla.py` 的 `models` 表):nHeads=16、kvLoraRank=512、ropeHeadDim=64、blockSize=128——AIC 缓冲大小只依赖 `XLITE_MAX_M0`/kvLoraRank/ropeHeadDim,与 nHeads 无关(dense 时 qkn0=MAX_N0=128,与 blockSize=128 同值);AIV 侧按短序列路径上限 maxSeqLen=8192(`tile_size_of_cached_kv` 默认值,超过即路由 flash_mla_v2)与 DSA topK=2048 代入(kpool 行宽补齐到 2176,见末尾要点),下表 shape 为逻辑形状(L1/L0 内实际按 Nd2Nz/NZ 分形排布)。
 
 **AIC L1(A1,容量 512KB;QK/SV 两相位自偏移 0 复用)**
 
@@ -222,7 +223,7 @@ mla_v2 的 maxBuf/sumBuf 传 nullptr(saveMaxSum=false),`maxOut`/`sumOut` 槽位�
 | `cmp1` | 1 个 256B repeat | int32 | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
 | `cmpFp320` | 1 个 256B repeat | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
 | `cmpFp321` | 1 个 256B repeat | float | 1 | `VECTOR_MAX_BYTESIZE` | 256 |
-| `topkMask0`/`topkMask1` | `(topK/8,)`=(256,) | uint8 | 2 | `ROUND_UP(topK/8,256)` | 512 |
+| `topkMask0`/`topkMask1` | `(ROUND_UP(topK,2048)/8,)`=(256,) | uint8 | 2 | `ROUND_UP(topK,2048)/8` B | 512 |
 | `currIndices` | `(topK,)` | int32 | 1 | `ROUND_UP(topK*sizeof(int32_t),256)` | 8192 |
 | **合计** | | | | | **153344** |
 
@@ -241,7 +242,7 @@ mla_v2 的 maxBuf/sumBuf 传 nullptr(saveMaxSum=false),`maxOut`/`sumOut` 槽位�
 - **L0 三级峰值全部顶满(100%)**:BF16 下 `qkk0=128`、`XLITE_MAX_M0=MAX_N0=128` 使 QK 相位 L0A/L0B 各恰 64KB、SV 相位 L0B 亦恰满 64KB(`svn0=256` 单份即 32768 B、双份顶满),两相位 L0C(CO1)各恰 128KB——M/N/K 任一维度增大都会先撞 L0;host 侧 `nHeads <= XLITE_MAX_M0` 校验(`csrc/op.cpp` 的 `XliteOpMLAV2`,关键字 `nHeads > XLITE_MAX_M0`)正是「单 token 全部头必须落进一个 M0 tile」的容量前提;
 - L1 峰值在 QK 相位 442368 B(84.4%),大头是双份 K 预取 `akl1bBuf`(262144 B,占 QK 相位 59%);SV 相位仅 262144 B(50%),与 QK 相位自偏移 0 复用同一物理 L1,无需按两组求和;
 - AIV UB 峰值在全量 softmax 路径:in/out/calc/calcDst 按 `MAX_SUB_CONTEXT_SIZE=16256` 定长合计 162560 B,加 max/sum 两槽共 163584 B(159.75KB,83.2%);top-k 路径 153344 B(78.0%)随运行期 len/topK 缩放;
-- top-k 路径的容量来源是 host 校验 `maxSeqLen <= MAX_SOFTMAX_PINGPONG_LEN=10496` 与 `topK <= MAX_TOPK_NUM=2048`(`csrc/op.cpp` 的 `XliteOpMLAV2`)。按该上限组合(len=10496、topK=2048)代入布局为 185600 B ≤ `UB_SIZE`(余 11008 B;旧上限 11776 的同组合实占 203520 B 越界,旧 static_assert 公式漏计 `indicesFp32` 槽位 8192 B 而误判通过——已随上限收紧到 10496 并补全断言公式一并修复);mla_v2 实际服务的短序列(maxSeqLen ≤ 8192,占 153344 B)尚有 43264 B 余量。
+- top-k 路径的容量来源是 host 校验 `maxSeqLen <= MAX_SOFTMAX_PINGPONG_LEN=10496` 与 `topkStride <= MAX_TOPK_RUN_NUM=2176`(`csrc/op.cpp` 的 `XliteOpMLAV2`),并用 `SoftmaxPingPongUbNeed(max(len, topkStride), topkStride)` 按运行期形状复核。按上限组合(len=10496、topK=2048)代入布局为 185600 B ≤ `UB_SIZE`(余 11008 B;旧上限 11776 的同组合实占 203520 B 越界,旧 static_assert 公式漏计 `indicesFp32` 槽位 8192 B 而误判通过——已随上限收紧到 10496 并补全断言公式一并修复);kpool 行距补齐到 topkStride=2176 时 `topkMask0`/`topkMask1` 各 512 B,同组合峰值为 189696 B,仍余 6912 B;mla_v2 实际服务的短序列(maxSeqLen ≤ 8192,占 153344 B)尚有 43264 B 余量。
 
 ## DSA-CP MLA
 
