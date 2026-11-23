@@ -76,7 +76,24 @@ world_size = 1
 rank = 0
 global_rank = 0
 global_world_size = 1
+
+
 forward_backend = ds_forward_backend
+block_size = 128
+if forward_backend == "xlite":
+    xlite_rt = None
+    xlite_model = None
+    import numpy as np
+
+    from tests.models.xlite_utils import prepare_xlite_attnmeta_v2
+    from xlite._C import (
+        AttnHybridKda,
+        AttnMetaV2,
+        Model,
+        ModelConfig,
+        Runtime,
+        ScoringFuncSigmoid,
+    )
 
 
 @dataclass
@@ -741,6 +758,8 @@ class Indexer(nn.Module):
         self.compress = args.index_kpool_compress
         self.always_select_tail = args.index_kpool_always_select_tail
         self.softmax_scale = self.head_dim**-0.5
+        if not (self.compress and self.kpool > 1):
+            raise NotImplementedError("GLM5 reference Indexer requires index_kpool_compress=True and index_kpool>1")
         # wq_b loaded FULL (not TP-sharded), BF16. wk / weights_proj are distinct in this
         # checkpoint (the GLM-5.2 Indexer fuses them into one fp32 wk_weights_proj); kept
         # fp32 so the index scores retain precision -- the bf16 checkpoint weights copy_
@@ -756,33 +775,63 @@ class Indexer(nn.Module):
             self.register_buffer(
                 "k_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.head_dim), persistent=False
             )
+            self.register_buffer(
+                "gate_cache", torch.zeros(args.max_batch_size, args.max_seq_len, self.head_dim), persistent=False
+            )
 
     def forward(self, x: torch.Tensor, qr: torch.Tensor, start_pos: int, mask) -> torch.Tensor:
+        # Mirrors the native vllm-ascend kpool indexer:
+        #   1. one cache entry per kpool consecutive tokens, per-dim
+        #      softmax(gate + ape)-weighted sum of the raw K (NO sigmoid);
+        #   2. pool-granular scores  sum_h w[s,h] * (q[s,h].k_pool[p]) * scale
+        #      (NO relu -- the native chain has none);
+        #   3. top topk//kpool pools per row, expanded to kpool tokens each,
+        #      plus the row's trailing incomplete-pool tokens appended
+        #      (out width topk + kpool - 1, -1 padding).
         bsz, seqlen, _ = x.shape
         end_pos = start_pos + seqlen
         q = self.wq_b(qr).view(bsz, seqlen, self.n_heads, self.head_dim)
-        wk_weights = self.wk(x.float())  # [bsz, seq, head_dim], fp32
-        k = self.k_norm(wk_weights[..., : self.head_dim].type_as(x))
-        weights = self.weights_proj(x.float()) * (self.n_heads**-0.5)  # [bsz, seq, n_heads], fp32
-        if self.compress and self.kpool > 1:
-            # kpool compression: F.linear on the [head_dim, dim] gate yields only head_dim
-            # outputs per token, so broadcast against the [kpool, head_dim] ape with unsqueeze
-            # (NOT a reshape to [bsz, seq, kpool, head_dim], which would need kpool*head_dim
-            # elements). Gated mean over the kpool slots then compresses back to [bsz, seq, head_dim].
-            gate = torch.sigmoid(
-                F.linear(x.float(), self.index_kpool_compress_gate).unsqueeze(2) + self.index_kpool_compress_ape
-            )  # [bsz, seq, kpool, head_dim]
-            k = (k.unsqueeze(2) * gate).mean(dim=2)  # [bsz, seq, head_dim]
+        k = self.k_norm(self.wk(x.float()).type_as(x))  # [b,s,d]
+        weights = self.weights_proj(x.float()) * (self.n_heads**-0.5)  # [b,s,H] fp32
+        gate = F.linear(x.float(), self.index_kpool_compress_gate)  # [b,s,d] fp32
         self.k_cache[:bsz, start_pos:end_pos] = k
-        scores = torch.relu(torch.einsum("bshd,btd->bsht", q, self.k_cache[:bsz, :end_pos]) * self.softmax_scale)
-        index_score = torch.einsum("bsht,bsh->bst", scores, weights)
-        if mask is not None:
-            index_score = index_score + mask
-        topk = min(self.index_topk, end_pos)
-        topk_indices = index_score.topk(topk, dim=-1)[1]
-        if self.always_select_tail and (start_pos + seqlen - 1) < topk_indices.size(-1):
-            topk_indices[..., -1] = start_pos + seqlen - 1
-        return topk_indices
+        self.gate_cache[:bsz, start_pos:end_pos] = gate
+        P = end_pos // self.kpool  # complete pools
+        pos = torch.arange(start_pos, end_pos, device=x.device)
+        ke = (pos + 1) // self.kpool  # pools fully visible per row
+        select_k = self.index_topk // self.kpool
+        out_cols = self.index_topk + self.kpool - 1
+        out = torch.full((bsz, seqlen, out_cols), -1, dtype=torch.long, device=x.device)
+        if P > 0:
+            kc = self.k_cache[:bsz, : P * self.kpool].view(bsz, P, self.kpool, self.head_dim).float()
+            gc = self.gate_cache[:bsz, : P * self.kpool].view(bsz, P, self.kpool, self.head_dim)
+            prob = torch.softmax(gc + self.index_kpool_compress_ape, dim=2)
+            pool_k = (kc * prob).sum(dim=2)  # [b,P,d] fp32
+            logits = torch.einsum("bshd,bpd,bsh->bsp", q.float(), pool_k, weights) * self.softmax_scale
+            pool_range = torch.arange(P, device=x.device)
+            invalid = pool_range[None, None, :] >= ke[None, :, None]
+            logits = logits.masked_fill(invalid, float("-inf"))
+            sel = min(select_k, P)
+            pool_topk = logits.topk(sel, dim=-1)[1]
+            # rows with fewer valid pools than sel: masked slots -> -1
+            pool_topk = torch.where(
+                torch.gather(logits, -1, pool_topk) == float("-inf"), torch.full_like(pool_topk, -1), pool_topk
+            )
+            # expand each selected pool to its kpool token indices
+            slots = torch.arange(self.kpool, device=x.device)
+            tok = pool_topk.unsqueeze(-1) * self.kpool + slots
+            topk_indices = torch.where(pool_topk.unsqueeze(-1) >= 0, tok, torch.full_like(tok, -1)).view(
+                bsz, seqlen, -1
+            )
+            out[..., : sel * self.kpool] = topk_indices
+        # append the row's trailing incomplete-pool tokens: [ke*4, t]
+        tail_off = torch.arange(self.kpool - 1, device=x.device)
+        tail_tok = ke[:, None] * self.kpool + tail_off[None, :]  # [s, kpool-1]
+        tail_valid = tail_tok[None, :, :] <= pos[None, :, None]
+        out[:, :, out_cols - (self.kpool - 1) :] = torch.where(
+            tail_valid, tail_tok.unsqueeze(0), torch.full_like(tail_tok, -1).unsqueeze(0)
+        )
+        return out
 
 
 # --------------------------------------------------------------------------------------
@@ -803,10 +852,11 @@ class MLA(nn.Module):
         self.layer_id = layer_id
         self.has_indexer = bool(args.index_full_mask[layer_id]) if args.index_full_mask else True
 
-        # BF16 attention (no int8) -- wqkv_a fused (q_lora + kv_lora), wkv_b float
-        self.wqkv_a = Linear(self.dim, self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim)
-        self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.qk_head_dim)
-        self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim)
+        # W8A8 attention: q_a/kv_a (fused wqkv_a), q_b and o_proj are int8+scale;
+        # kv_b and the indexer weights are true BF16.
+        self.wqkv_a = Linear(self.dim, self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim, dtype=torch.int8)
+        self.wq_b = ColumnParallelLinear(self.q_lora_rank, self.n_heads * self.qk_head_dim, dtype=torch.int8)
+        self.wo = RowParallelLinear(self.n_heads * self.v_head_dim, self.dim, dtype=torch.int8)
         self.q_norm = RMSNorm(self.q_lora_rank, args.norm_eps, bias=False)
         self.kv_norm = RMSNorm(self.kv_lora_rank, args.norm_eps, bias=False)
         self.wkv_b = ColumnParallelLinear(self.kv_lora_rank, self.n_heads * (self.qk_nope_head_dim + self.v_head_dim))
@@ -854,8 +904,10 @@ class MLA(nn.Module):
                 scores = torch.einsum("bshd,bthd->bsht", q_nope, k_nope).mul_(self.softmax_scale)
             if self.indexer is not None:
                 topk_indices = self.indexer(x, qr, start_pos, mask)
+                # -1 padding -> clamp to 0 (token 0 is always causally visible,
+                # so the extra scatter is a no-op on the mask)
                 index_mask = torch.full((bsz, seqlen, seqlen), float("-inf"), device=x.device).scatter_(
-                    -1, topk_indices, 0
+                    -1, topk_indices.clamp(min=0), 0
                 )
                 scores = scores + (index_mask + mask).unsqueeze(2)
             else:
@@ -876,7 +928,9 @@ class MLA(nn.Module):
             if self.indexer is not None:
                 # recompute top-k for the new token against the full kv_cache
                 topk_indices = self.indexer(x, qr, start_pos, mask)
-                index_mask = torch.full((bsz, 1, end_pos), float("-inf"), device=x.device).scatter_(-1, topk_indices, 0)
+                index_mask = torch.full((bsz, 1, end_pos), float("-inf"), device=x.device).scatter_(
+                    -1, topk_indices.clamp(min=0), 0
+                )
                 scores = scores + index_mask.unsqueeze(2)
             scores = scores.softmax(dim=-1, dtype=torch.float32).type_as(x)
             x = torch.einsum("bsht,btc->bshc", scores, self.kv_cache[:bsz, :end_pos])
@@ -1038,7 +1092,8 @@ class Block(nn.Module):
     def forward(self, residual: torch.Tensor, start_pos: int, freqs_cis, mask) -> torch.Tensor:
         # attn sub-layer
         post_mix, comb_mix, layer_input = self.attn_hc.pre(residual)
-        attn_out = self.attn(self.attn_norm(layer_input), start_pos, freqs_cis, mask)
+        h = self.attn_norm(layer_input)
+        attn_out = self.attn(h, start_pos, freqs_cis, mask)
         residual = self.attn_hc.post(attn_out, residual, post_mix, comb_mix)
         # ffn sub-layer
         post_mix2, comb_mix2, layer_input2 = self.ffn_hc.pre(residual)
@@ -1074,6 +1129,13 @@ class GLM5Next(nn.Module):
         _ds3.rank = rank
         _ds3.global_rank = global_rank
         _ds3.global_world_size = global_world_size
+        # Same guard as qwen3_5_moe: MoE modules shard by global_world_size while
+        # load_weights skips experts by args.moe_ep_size, so a config that omits
+        # moe_ep_size (ModelArgs default 16) silently bypasses most expert weights.
+        assert args.moe_ep_size * args.moe_tp_size == self.global_world_size, (
+            f"moe parallel size(moe_ep_size={args.moe_ep_size}, moe_tp_size={args.moe_tp_size}) "
+            f"must be same with world_size(world_size={self.global_world_size})"
+        )
         Linear.dtype = torch.float8_e4m3fn if args.dtype == "fp8" else torch.bfloat16
         super().__init__()
         self.args = args
@@ -1103,7 +1165,9 @@ class GLM5Next(nn.Module):
         image_grid_thw: torch.Tensor = None,
     ):
         if forward_backend == "xlite":
-            raise NotImplementedError("GLM-5.3-Flash xlite C++ path not implemented; use FORWARD_BACKEND=torch_npu")
+            if tokens is None:
+                raise ValueError("xlite text path requires tokens; use FORWARD_BACKEND=torch_npu for multimodal")
+            return self.forward_xlite(tokens, start_pos)
         if tokens is None and inputs_embeds is None:
             raise ValueError("forward requires either tokens or inputs_embeds")
         # Build inputs_embeds: from tokens via embed, then scatter image features at
@@ -1220,11 +1284,6 @@ class GLM5Next(nn.Module):
                 continue
             if not name.startswith("model."):
                 name = "model." + name
-            # GLM-5.3 attention is BF16 -> the static-quant guard below never skips an
-            # attention weight; kept for parity with GLM-5.2 static-quant models.
-            if (args.quantization == "w8a8" and "weight_scale" in name) or ".bias" in name:
-                if any(s in name for s in ("q_a_proj", "kv_a_proj_with_mqa", "wq_b", "wo")):
-                    continue
             name = name.replace("weight_scale", "scale")  # global per-channel scale rename
 
             # ---- fused wqkv_a (q_a_proj + kv_a_proj_with_mqa) ----
@@ -1294,6 +1353,20 @@ class GLM5Next(nn.Module):
                 )
                 continue
             # MLA wq_b (non-indexer): column-parallel, shard output
+            # wq_b scale: per-output-row, same sharding as the weight
+            if name.endswith(".scale") and "wq_b" in name and "indexer" not in name:
+                load_tensor_parallel_weights(
+                    param,
+                    loaded_weight,
+                    args.q_lora_rank,
+                    args.n_heads * (args.qk_nope_head_dim + args.qk_rope_head_dim),
+                    name,
+                    False,
+                    True,
+                    rank,
+                    world_size,
+                )
+                continue
             if "wq_b" in name and "indexer" not in name:
                 load_tensor_parallel_weights(
                     param,
@@ -1323,6 +1396,10 @@ class GLM5Next(nn.Module):
                     rank,
                     world_size,
                 )
+                continue
+            # wo scale: per-output-row of the full output dim, not sharded
+            if name.endswith(".scale") and "wo" in name:
+                param.data.copy_(convert_pyslice_to_tensor(loaded_weight))
                 continue
             if "wo" in name:
                 # row-parallel; full input dim differs by layer type (proj_size for
@@ -1365,3 +1442,412 @@ class GLM5Next(nn.Module):
             param.data.copy_(convert_pyslice_to_tensor(loaded_weight))
 
         torch.npu.empty_cache()
+
+        # ------------------------------------------------------------------
+        # xlite C++ backend init (AttnHybridKda). Runtime rank = GLOBAL rank;
+        # MoE EP spans the full world (moe_tp=1, ep=world, the only supported
+        # split). Heterogeneous per-layer kv_cache: KDA layers get a 2-tuple
+        # (paged conv+ssm pool), sparse-MLA layers a 4-tuple
+        # (kCache/peCache/indexKCache/tailCache). See init_xlite_kvcache.
+        # ------------------------------------------------------------------
+        if forward_backend == "xlite":
+            local_rank = int(os.getenv("LOCAL_RANK", "0"))
+            self.xlite_rt = Runtime(
+                local_rank,
+                size=0,
+                rank=self.global_rank,
+                tp_size=self.tp_size,
+                dp_size=self.dp_size,
+                moe_tp_size=1,
+                moe_ep_size=world_size,
+            )
+            self.init_xlite_model(args)
+            kv_size = self.init_xlite_kvcache(args)
+            pool_size = self.xlite_model.get_tensor_pool_size()
+            self.xlite_rt.init_tensor_pool(pool_size)
+            if self.global_rank == 0:
+                mem = sum(p.element_size() * p.numel() for _, p in self.named_parameters())
+                print(
+                    f"Memory usage: Model: {mem // 1024 // 1024} MB"
+                    f" KV Cache: {kv_size // 1024 // 1024} MB"
+                    f" Tensor pool: {pool_size} MB"
+                )
+
+    def init_xlite_model(self, args: ModelArgs):
+        config = ModelConfig()
+        config.vocab_size = args.vocab_size
+        config.hidden_size = args.dim
+        config.n_layers = args.n_layers
+        config.n_heads = args.n_heads
+        config.n_kv_heads = 1  # MQA-style shared kv-lora (single kv head)
+        config.nope_head_dim = args.qk_nope_head_dim
+        config.rope_head_dim = args.qk_rope_head_dim  # 0 -> no rope
+        config.v_head_dim = args.v_head_dim
+        config.q_lora_rank = args.q_lora_rank
+        config.kv_lora_rank = args.kv_lora_rank
+        config.norm_eps = args.norm_eps
+        config.rope_theta = args.rope_theta
+        config.softmax_scale = (args.qk_nope_head_dim + args.qk_rope_head_dim) ** -0.5
+        config.n_dense_layers = args.n_dense_layers
+        config.n_routed_experts = args.n_routed_experts
+        config.n_shared_experts = args.n_shared_experts
+        config.n_expert_groups = args.n_expert_groups
+        config.n_limited_groups = args.n_limited_groups
+        config.n_act_experts = args.n_activated_experts
+        config.intermediate_size = args.inter_dim
+        config.moe_intermediate_size = args.moe_inter_dim
+        config.route_scale = args.route_scale
+        config.def_tp_size = self.tp_size
+        config.def_dp_size = self.dp_size
+        config.moe_ep_size = world_size
+        config.moe_tp_size = 1
+        # Family vector [main kernel page, pooled entries per main page, tail ring
+        # capacity] (capacity = kpool; no speculative lookahead in this test).
+        config.block_sizes = [block_size, block_size // args.index_kpool, args.index_kpool]
+        config.max_seq_len = args.max_seq_len
+        config.max_batch_size = args.max_batch_size
+        config.max_num_batched_tokens = args.max_num_batched_tokens
+        config.attn_type = AttnHybridKda
+        config.scoring_func = ScoringFuncSigmoid
+        config.norm_topk_prob = True
+        config.swiglu_limit = args.swiglu_limit
+        config.hc_mult = args.hc_mult
+        config.hc_sinkhorn_iters = args.hc_sinkhorn_iters
+        config.hc_eps = args.hc_eps
+        # MLA indexer (sparse layers).
+        config.index_head_dim = args.index_head_dim
+        config.index_n_heads = args.index_n_heads
+        config.index_topk = args.index_topk
+        config.index_softmax_scale = args.index_head_dim**-0.5
+        config.index_full_mask = args.index_full_mask
+        # KDA linear attention (q/k/v share the same head layout).
+        config.linear_num_k_heads = args.la_num_heads
+        config.linear_num_v_heads = args.la_num_heads
+        config.linear_key_head_dim = args.la_head_dim
+        config.linear_value_head_dim = args.la_head_dim
+        config.linear_conv_kernel_dim = args.short_conv_kernel_size
+        # GLM5-specific safe_gate / kpool / per-layer dispatch.
+        config.gate_lower_bound = args.gate_lower_bound
+        config.index_kpool = args.index_kpool
+        config.index_kpool_compress = args.index_kpool_compress
+        config.index_kpool_always_select_tail = args.index_kpool_always_select_tail
+        # Per-layer dispatch from layer_types (C++ defaults every layer to MLA,
+        # so kda_layers must be resolved even when the config relies on
+        # layer_types).
+        layer_types = list(getattr(args, "layer_types", []) or [])
+        config.kda_layers = [i for i, t in enumerate(layer_types) if t == "linear_attention"]
+        config.full_attn_layers = [i for i, t in enumerate(layer_types) if t != "linear_attention"]
+        config.weight_nz = False
+
+        def is_mla_layer(li):
+            if layer_types and li < len(layer_types):
+                return layer_types[li] != "linear_attention"
+            return li in (args.full_attn_layers or [])
+
+        n_local_heads = args.n_heads // world_size
+        n_layers = args.n_layers
+
+        global xlite_model
+        xlite_model = self.xlite_model = Model()
+        self.xlite_model.embed = self.embed.weight
+        self.xlite_model.norm = self.norm.weight
+        self.xlite_model.head = self.head.weight
+        self.xlite_model.attn_norm = [layer.attn_norm.weight for layer in self.layers]
+        self.xlite_model.mlp_norm = [layer.ffn_norm.weight for layer in self.layers]
+
+        # KDA weights: empty(1) placeholder on MLA layers (C++ binds KDA layers only).
+        def kda_w(li, fn):
+            return fn(self.layers[li].attn) if not is_mla_layer(li) else torch.empty(1, device="npu")
+
+        self.xlite_model.linear_in_proj_q = [kda_w(li, lambda a: a.q_proj.weight) for li in range(n_layers)]
+        self.xlite_model.linear_in_proj_k = [kda_w(li, lambda a: a.k_proj.weight) for li in range(n_layers)]
+        self.xlite_model.linear_in_proj_v = [kda_w(li, lambda a: a.v_proj.weight) for li in range(n_layers)]
+        self.xlite_model.linear_in_proj_b = [kda_w(li, lambda a: a.b_proj.weight) for li in range(n_layers)]
+        self.xlite_model.linear_in_proj_f_a = [kda_w(li, lambda a: a.f_a_proj.weight) for li in range(n_layers)]
+        self.xlite_model.linear_f_b_proj = [kda_w(li, lambda a: a.f_b_proj.weight) for li in range(n_layers)]
+        self.xlite_model.linear_in_proj_g_a = [kda_w(li, lambda a: a.g_a_proj.weight) for li in range(n_layers)]
+        self.xlite_model.linear_g_b_proj = [kda_w(li, lambda a: a.g_b_proj.weight) for li in range(n_layers)]
+        # conv1d / A_log / dt_bias are plain Parameters carrying the FULL proj_size /
+        # n_heads (torch_npu path slices at forward), so TP-slice here.
+        _n_kda_local = args.la_num_heads // world_size
+        _s = slice(rank * _n_kda_local * args.la_head_dim, (rank + 1) * _n_kda_local * args.la_head_dim)
+        _sh = slice(rank * _n_kda_local, (rank + 1) * _n_kda_local)
+        self.xlite_model.linear_q_conv1d = [kda_w(li, lambda a: a.q_conv1d[_s]) for li in range(n_layers)]
+        self.xlite_model.linear_k_conv1d = [kda_w(li, lambda a: a.k_conv1d[_s]) for li in range(n_layers)]
+        self.xlite_model.linear_v_conv1d = [kda_w(li, lambda a: a.v_conv1d[_s]) for li in range(n_layers)]
+        self.xlite_model.linear_a_log = [kda_w(li, lambda a: a.A_log[_sh].to(torch.float32)) for li in range(n_layers)]
+        self.xlite_model.linear_dt_bias = [
+            kda_w(li, lambda a: a.dt_bias[_s].to(torch.float32)) for li in range(n_layers)
+        ]
+        self.xlite_model.linear_norm = [kda_w(li, lambda a: a.o_norm.weight) for li in range(n_layers)]
+        self.xlite_model.linear_out_proj = [kda_w(li, lambda a: a.wo.weight) for li in range(n_layers)]
+
+        # MLA weights: empty(1) placeholder on KDA layers. wkv_b split with NO
+        # rope term (qk_rope_head_dim=0 -> split=[qk_nope_head_dim, v_head_dim]).
+        def mla_attn(li):
+            return self.layers[li].attn if is_mla_layer(li) else None
+
+        self.xlite_model.mla_qkv_a = [
+            mla_attn(li).wqkv_a.weight if mla_attn(li) else torch.empty(1, device="npu") for li in range(n_layers)
+        ]
+        self.xlite_model.mla_q_b = [
+            mla_attn(li).wq_b.weight if mla_attn(li) else torch.empty(1, device="npu") for li in range(n_layers)
+        ]
+        self.xlite_model.mla_q_norm = [
+            mla_attn(li).q_norm.weight if mla_attn(li) else torch.empty(1, device="npu") for li in range(n_layers)
+        ]
+        self.xlite_model.mla_kv_norm = [
+            mla_attn(li).kv_norm.weight if mla_attn(li) else torch.empty(1, device="npu") for li in range(n_layers)
+        ]
+        self.xlite_model.mla_wuv = [
+            (
+                a.wkv_b.weight.view(n_local_heads, -1, args.kv_lora_rank)
+                .split([args.qk_nope_head_dim, args.v_head_dim], dim=1)[1]
+                .permute(0, 2, 1)
+                .contiguous()
+            )
+            if (a := mla_attn(li)) is not None
+            else torch.empty(1, device="npu")
+            for li in range(n_layers)
+        ]
+        self.xlite_model.mla_wuk_t = [
+            (
+                a.wkv_b.weight.view(n_local_heads, -1, args.kv_lora_rank)
+                .split([args.qk_nope_head_dim, args.v_head_dim], dim=1)[0]
+                .contiguous()
+            )
+            if (a := mla_attn(li)) is not None
+            else torch.empty(1, device="npu")
+            for li in range(n_layers)
+        ]
+        self.xlite_model.attn_out = [layer.attn.wo.weight for layer in self.layers]
+
+        # Indexer (MLA layers; GLM-5.3 has separate wk + weights_proj). kpool
+        # gate/ape only when compress; weights stay fp32 (native contract).
+        def idx_attr(li, fn, default=None):
+            if default is None:
+                default = torch.empty(1, device="npu")
+            a = mla_attn(li)
+            if a is None or a.indexer is None:
+                return default
+            return fn(a.indexer)
+
+        self.xlite_model.index_q_b = [idx_attr(li, lambda i: i.wq_b.weight.to(torch.float32)) for li in range(n_layers)]
+        self.xlite_model.index_wk = [idx_attr(li, lambda i: i.wk.weight.to(torch.float32)) for li in range(n_layers)]
+        self.xlite_model.index_weights_proj = [
+            idx_attr(li, lambda i: i.weights_proj.weight.to(torch.float32)) for li in range(n_layers)
+        ]
+        self.xlite_model.index_k_norm = [idx_attr(li, lambda i: i.k_norm.weight) for li in range(n_layers)]
+        self.xlite_model.index_k_norm_bias = [idx_attr(li, lambda i: i.k_norm.bias) for li in range(n_layers)]
+        self.xlite_model.index_kpool_gate = [
+            idx_attr(li, lambda i: getattr(i, "index_kpool_compress_gate", torch.empty(1, device="npu")))
+            for li in range(n_layers)
+        ]
+        self.xlite_model.index_kpool_ape = [
+            idx_attr(li, lambda i: getattr(i, "index_kpool_compress_ape", torch.empty(1, device="npu")))
+            for li in range(n_layers)
+        ]
+
+        # MHC per-layer weights (every layer): fp32 upcast (the checkpoint stores
+        # bf16; C++ matmuls xNorm(FP32) x hcFn -> mixes(FP32)).
+        self.xlite_model.hc_attn_fn = [layer.attn_hc.fn.to(torch.float32) for layer in self.layers]
+        self.xlite_model.hc_attn_base = [layer.attn_hc.base.to(torch.float32) for layer in self.layers]
+        self.xlite_model.hc_attn_scale = [layer.attn_hc.scale.to(torch.float32) for layer in self.layers]
+        self.xlite_model.hc_ffn_fn = [layer.ffn_hc.fn.to(torch.float32) for layer in self.layers]
+        self.xlite_model.hc_ffn_base = [layer.ffn_hc.base.to(torch.float32) for layer in self.layers]
+        self.xlite_model.hc_ffn_scale = [layer.ffn_hc.scale.to(torch.float32) for layer in self.layers]
+
+        # Dense MLP + MoE (W8A8_DYNAMIC int8 weights; gate BF16). GLM-5.3 has
+        # no se_gate (1 shared expert, unconditional).
+        self.xlite_model.mlp_up_gate = [self.layers[i].ffn.w13.weight for i in range(args.n_dense_layers)]
+        self.xlite_model.mlp_down = [self.layers[i].ffn.w2.weight for i in range(args.n_dense_layers)]
+        self.xlite_model.gate = [self.layers[i].ffn.gate.weight for i in range(args.n_dense_layers, args.n_layers)]
+        self.xlite_model.gate_bias = [self.layers[i].ffn.gate.bias for i in range(args.n_dense_layers, args.n_layers)]
+        self.xlite_model.se_up_gate = [
+            self.layers[i].ffn.shared_experts.w13.weight for i in range(args.n_dense_layers, args.n_layers)
+        ]
+        self.xlite_model.se_down = [
+            self.layers[i].ffn.shared_experts.w2.weight for i in range(args.n_dense_layers, args.n_layers)
+        ]
+        self.xlite_model.re_up_gate = [
+            self.layers[i].ffn.experts[j].w13.weight
+            for i in range(args.n_dense_layers, args.n_layers)
+            for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)
+        ]
+        self.xlite_model.re_down = [
+            self.layers[i].ffn.experts[j].w2.weight
+            for i in range(args.n_dense_layers, args.n_layers)
+            for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)
+        ]
+
+        # W8A8 deq_scale for MLP weights only (attention/indexer/MHC/norms/gate
+        # are BF16 -> no quant scales; C++ InitMatmulWeight skips empty lists).
+        # deq vectors are interleaved 2x-out (low|high nibble slots); w8a8 keeps
+        # the scale in the low half.
+        if args.quantization in ("w8a8", "w4a8"):
+            for i in range(args.n_dense_layers):
+                self.layers[i].ffn.w13.weight.xlite_scale[0::2] = self.layers[i].ffn.w13.weight.scale[0::1]
+                self.layers[i].ffn.w2.weight.xlite_scale[0::2] = self.layers[i].ffn.w2.weight.scale[0::1]
+            self.xlite_model.mlp_up_gate_deq_scale = [
+                self.layers[i].ffn.w13.weight.xlite_scale for i in range(args.n_dense_layers)
+            ]
+            self.xlite_model.mlp_down_deq_scale = [
+                self.layers[i].ffn.w2.weight.xlite_scale for i in range(args.n_dense_layers)
+            ]
+            for i in range(args.n_dense_layers, args.n_layers):
+                self.layers[i].ffn.shared_experts.w13.weight.xlite_scale[0::2] = self.layers[
+                    i
+                ].ffn.shared_experts.w13.weight.scale[0::1]
+                self.layers[i].ffn.shared_experts.w2.weight.xlite_scale[0::2] = self.layers[
+                    i
+                ].ffn.shared_experts.w2.weight.scale[0::1]
+                for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx):
+                    self.layers[i].ffn.experts[j].w13.weight.xlite_scale[0::2] = (
+                        self.layers[i].ffn.experts[j].w13.weight.scale[0::1]
+                    )
+                    self.layers[i].ffn.experts[j].w2.weight.xlite_scale[0::2] = (
+                        self.layers[i].ffn.experts[j].w2.weight.scale[0::1]
+                    )
+            self.xlite_model.se_up_gate_deq_scale = [
+                self.layers[i].ffn.shared_experts.w13.weight.xlite_scale
+                for i in range(args.n_dense_layers, args.n_layers)
+            ]
+            self.xlite_model.se_down_deq_scale = [
+                self.layers[i].ffn.shared_experts.w2.weight.xlite_scale
+                for i in range(args.n_dense_layers, args.n_layers)
+            ]
+            self.xlite_model.re_up_gate_deq_scale = [
+                self.layers[i].ffn.experts[j].w13.weight.xlite_scale
+                for i in range(args.n_dense_layers, args.n_layers)
+                for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)
+            ]
+            self.xlite_model.re_down_deq_scale = [
+                self.layers[i].ffn.experts[j].w2.weight.xlite_scale
+                for i in range(args.n_dense_layers, args.n_layers)
+                for j in range(self.layers[i].ffn.experts_start_idx, self.layers[i].ffn.experts_end_idx)
+            ]
+
+            # MLA attention (fused qkv_a, q_b, o_proj) are int8 + per-row scale in
+            # the checkpoint (kv_b / indexer / MHC / norms are true BF16). Same
+            # 2x-out interleave (low|high), w8a8 keeps the low half. KDA layers
+            # have no MLA weights -> empty(1) placeholders (C++ skips BF16).
+            for i in range(args.n_layers):
+                a = mla_attn(i)
+                if a is None:
+                    continue
+                a.wqkv_a.weight.xlite_scale[0::2] = a.wqkv_a.weight.scale[0::1]
+                a.wq_b.weight.xlite_scale[0::2] = a.wq_b.weight.scale[0::1]
+                a.wo.weight.xlite_scale[0::2] = a.wo.weight.scale[0::1]
+            self.xlite_model.mla_qkv_a_deq_scale = [
+                mla_attn(i).wqkv_a.weight.xlite_scale if mla_attn(i) else torch.empty(1, device="npu")
+                for i in range(n_layers)
+            ]
+            self.xlite_model.mla_q_b_deq_scale = [
+                mla_attn(i).wq_b.weight.xlite_scale if mla_attn(i) else torch.empty(1, device="npu")
+                for i in range(n_layers)
+            ]
+            self.xlite_model.attn_out_deq_scale = [
+                self.layers[i].attn.wo.weight.xlite_scale if is_mla_layer(i) else torch.empty(1, device="npu")
+                for i in range(n_layers)
+            ]
+
+        # init() takes the GLOBAL rank (C++ derives tp_rank/ep_id from it).
+        self.xlite_model.init(config, self.global_rank)
+
+    def init_xlite_kvcache(self, args: ModelArgs):
+        """Heterogeneous per-layer kv_cache. KDA: 2-tuple paged pool
+        (conv [S, K-1, 3*localProj] bf16 with page 0 reserved, ssm
+        [S, H_local, head_dim, head_dim] fp32). Sparse-MLA: 4-tuple
+        (kCache, peCache[rope=0 -> 0-size], indexKCache[bs/kpool], tailCache
+        [max_batch, index_kpool, 2*index_head_dim] fp32 row-major [k | gate]
+        per pool slot — matches the C++ paged tail-ring contract, one ring
+        block per request)."""
+        block_num = (args.max_seq_len + block_size - 1) // block_size * args.max_batch_size
+        dtype = torch.get_default_dtype()
+
+        layer_types = list(getattr(args, "layer_types", []) or [])
+
+        def is_mla_layer(li):
+            if layer_types and li < len(layer_types):
+                return layer_types[li] != "linear_attention"
+            return li in (args.full_attn_layers or [])
+
+        n_local_heads = args.la_num_heads // world_size
+        local_proj = n_local_heads * args.la_head_dim
+        conv_k = args.short_conv_kernel_size
+        pool_slots = args.max_batch_size + 1  # page 0 reserved
+        idx_bs = block_size // args.index_kpool
+
+        kv_cache = []
+        kv_size = 0
+        for li in range(args.n_layers):
+            if not is_mla_layer(li):
+                conv_state = torch.zeros(pool_slots, conv_k - 1, 3 * local_proj, dtype=dtype, device="npu")
+                ssm_state = torch.zeros(
+                    pool_slots, n_local_heads, args.la_head_dim, args.la_head_dim, dtype=torch.float32, device="npu"
+                )
+                kv_cache.append([conv_state, ssm_state])
+                kv_size += conv_state.numel() * conv_state.element_size() + ssm_state.numel() * ssm_state.element_size()
+            else:
+                k_cache = torch.zeros(block_num, block_size, 1, args.kv_lora_rank, dtype=dtype, device="npu")
+                pe_cache = torch.zeros(block_num, block_size, 1, args.qk_rope_head_dim, dtype=dtype, device="npu")
+                index_k_cache = torch.zeros(block_num, idx_bs, 1, args.index_head_dim, dtype=dtype, device="npu")
+                tail_cache = torch.zeros(
+                    args.max_batch_size, args.index_kpool, 2 * args.index_head_dim, dtype=torch.float32, device="npu"
+                )
+                kv_cache.append([k_cache, pe_cache, index_k_cache, tail_cache])
+                kv_size += (
+                    k_cache.numel() * k_cache.element_size()
+                    + index_k_cache.numel() * index_k_cache.element_size()
+                    + tail_cache.numel() * tail_cache.element_size()
+                )
+        self.xlite_kv_cache = kv_cache
+        return kv_size
+
+    def prepare_xlite_attnmeta_v2(self, tokens: torch.Tensor, start_pos: int):
+        # Main-family metadata via the shared helper ([block_size] builds exactly
+        # one slot_mapping + main block table), then append the two GLM5 family
+        # slots: block_tables[1] = mamba state indices [batch, 1] (page 0
+        # reserved) and block_tables[2] = per-request tail-ring block ids.
+        pages = torch.arange(1, tokens.size(0) + 1, dtype=torch.int32)
+        meta = prepare_xlite_attnmeta_v2(
+            AttnMetaV2,
+            tokens,
+            start_pos,
+            self.args.max_seq_len,
+            [block_size],
+            gdn_state_pages=pages.to(tokens.device),
+        )
+        tail_table = torch.arange(tokens.size(0), dtype=torch.int32, device=tokens.device).reshape(-1, 1)
+        block_tables = list(meta.block_tables)
+        block_tables.append(tail_table)
+        meta.block_tables = block_tables
+        return meta
+
+    @torch.inference_mode()
+    def forward_xlite(self, tokens: torch.Tensor, start_pos: int = 0):
+        logits = torch.empty(world_size, tokens.size(0), self.args.vocab_size // world_size, device=tokens.device)
+        tokens = tokens.contiguous().view(tokens.size(0), tokens.size(1))
+        batch = tokens.size(0)
+        seqlen = tokens.size(1)
+        logits_indices = torch.arange(batch, dtype=torch.int32, device=tokens.device) * seqlen + (seqlen - 1)
+        attn_meta = self.prepare_xlite_attnmeta_v2(tokens, start_pos)
+        stream = torch.npu.current_stream().npu_stream
+        h = torch.empty(tokens.numel(), self.args.dim, device=tokens.device)
+        # Per-layer freqs_cis list (ForwardLayersMhc indexes [i]); rope=0 ->
+        # every entry is the same empty(0,0) tensor, never read by KDA/MLA.
+        freqs_cis = [self.freqs_cis] * self.args.n_layers
+        self.xlite_model.forward_v2(
+            rt=self.xlite_rt,
+            input=tokens.flatten().to(torch.int32),
+            attn_meta=attn_meta,
+            kv_cache=self.xlite_kv_cache,
+            freqs_cis=freqs_cis,
+            output=h,
+            curr_stream=stream,
+        )
+        self.xlite_model.forward_get_logits(
+            rt=self.xlite_rt, input=h, indices=logits_indices, output=logits, curr_stream=stream
+        )
+        logits = logits.permute(1, 0, 2).reshape(tokens.size(0), self.args.vocab_size)
+        return logits

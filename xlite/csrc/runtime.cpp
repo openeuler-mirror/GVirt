@@ -455,8 +455,11 @@ int XRuntime::InitHcclComm(void)
 
 void XRuntime::InitAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uint64_t maxBatch,
                         uint64_t maxSeqLen, const std::vector<uint32_t> &blockSizes,
-                        uint32_t indexTopK, const std::vector<uint32_t> &compressRatios)
+                        uint32_t indexTopK, const std::vector<uint32_t> &compressRatios,
+                        uint32_t indexKpool, bool indexKpoolCompress)
 {
+    _indexKpool = indexKpool;
+    _indexKpoolCompress = indexKpoolCompress;
     std::vector<uint32_t> vgatherIndices;
     size_t size;
     void *ptr;
@@ -523,9 +526,26 @@ void XRuntime::InitAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, uin
     _tokensPerEpGroupAllEpHost.Init({_moeEpSize * _moeEpSize}, INT32, ptr);
 
     if (indexTopK > 0) {
-        size = maxBatchedTokens * indexTopK * XDtypeBit(INT32) / 8;
+        // kpool packTail adds the causal tail and pads rows to a 128-slot pitch;
+        // non-kpool rows keep width == stride == indexTopK.
+        bool pitchAligned = indexKpool > 1;
+        if (pitchAligned) {
+            uint32_t poolTopK = indexTopK / indexKpool;
+            _dsaTopkWidth = poolTopK * indexKpool + indexKpool - 1;
+            _dsaTopkStride = DIV_ROUND_UP(_dsaTopkWidth, TOPK_RUN_ALIGN) * TOPK_RUN_ALIGN;
+        } else {
+            _dsaTopkWidth = indexTopK;
+            _dsaTopkStride = indexTopK;
+        }
+        size = maxBatchedTokens * _dsaTopkStride * XDtypeBit(INT32) / 8;
         CHECK_ACL(aclrtMalloc(&ptr, size, ACL_MEM_MALLOC_NORMAL_ONLY));
-        _dsaTopkBuffer.Init({maxBatchedTokens, indexTopK}, INT32, ptr);
+        _dsaTopkBuffer.Init({maxBatchedTokens, _dsaTopkStride}, INT32, ptr);
+        if (pitchAligned) {
+            CHECK_ACL(aclrtMemset(ptr, size, 0xFF, size));
+        }
+    } else {
+        _dsaTopkWidth = 0;
+        _dsaTopkStride = 0;
     }
 }
 
@@ -803,8 +823,12 @@ void XRuntime::PrepareHybridMetadata(const std::vector<uint32_t> &layerTypes,
         throw std::runtime_error("hybrid forward requires resolved lens/cachedLens");
     }
     // Family slots: [0]=main KV, [1..1+nMambaTables)=mamba state indices;
-    // HYBRID_KDA appends a tail-ring table at the end.
-    const bool hasTail = attnMeta.attnType == XMODEL_ATTN_HYBRID_KDA;
+    // HYBRID_KDA with kpool compression appends a tail-ring table at the end.
+    // Tail table exists only for kpool compression; condition must stay in sync
+    // with model.cpp's hasTail (indexKpoolCompress && indexKpool > 1) -
+    // non-compressing configs pass no tail.
+    const bool hasTail =
+        attnMeta.attnType == XMODEL_ATTN_HYBRID_KDA && _indexKpoolCompress && _indexKpool > 1;
     const size_t minBlockTables = 2 + (hasTail ? 1 : 0);
     if (attnMeta.blockTables.size() < minBlockTables) {
         throw std::runtime_error(
@@ -862,11 +886,12 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
                            uint32_t nRoutedExperts, uint32_t defDpSize, int inputDtype,
                            int weightsDtype, uint32_t indexTopK,
                            const std::vector<uint32_t> &layerTypes,
-                           const std::vector<uint32_t> &compressRatios)
+                           const std::vector<uint32_t> &compressRatios, uint32_t indexKpool,
+                           bool indexKpoolCompress)
 {
     if (!_attnInitialized) {
         InitAttn(attnMeta, maxBatchedTokens, maxBatch, maxSeqLen, blockSizes, indexTopK,
-                 compressRatios);
+                 compressRatios, indexKpool, indexKpoolCompress);
         bool agInGraph = defDpSize > 1 && AllGatherInGraphActive(DP);
         bool rsInGraph = defDpSize > 1 && ReduceScatterInGraphActive(DP);
         bool arInGraph = _tpSize > 1 && AllReduceSumInGraphActive(TP);
@@ -968,11 +993,16 @@ void XRuntime::PrepareAttn(XModelAttnMeta &attnMeta, uint64_t maxBatchedTokens, 
     }
 
     // indexer_topk query-tile length and partitioning mode, decided once per
-    // forward from the host lens (CXA indexer layers are the ratio==4 ones);
-    // the tile feeds the kv-split sparse-tile count for one task granularity.
-    uint32_t indexerRatio = attnMeta.attnType == XMODEL_ATTN_CXA ? 4 : 1;
-    _indexerQTile = PickIndexerQTile(_cachedLensHost, _hostLens, indexTopK, indexerRatio);
-    _indexerKvSplit = PickIndexerKvSplit(_cachedLensHost, _hostLens, aicNum, indexTopK,
+    // forward from the host lens. CXA indexer layers and HYBRID_KDA kpool are the
+    // compress_ratio==4 ones (block-space KV); HYBRID_KDA's topK is likewise in
+    // block (pool) space. The tile feeds the kv-split sparse-tile count.
+    bool kdaBlockSpaceKv =
+        attnMeta.attnType == XMODEL_ATTN_HYBRID_KDA && indexKpoolCompress && indexKpool > 1;
+    bool blockSpaceKv = attnMeta.attnType == XMODEL_ATTN_CXA || kdaBlockSpaceKv;
+    uint32_t indexerRatio = blockSpaceKv ? 4 : 1;
+    uint32_t indexerTopK = kdaBlockSpaceKv ? DIV_ROUND_UP(indexTopK, indexKpool) : indexTopK;
+    _indexerQTile = PickIndexerQTile(_cachedLensHost, _hostLens, indexerTopK, indexerRatio);
+    _indexerKvSplit = PickIndexerKvSplit(_cachedLensHost, _hostLens, aicNum, indexerTopK,
                                          indexerRatio, _indexerQTile);
 
     size = batch * XDtypeBit(INT32) / 8;

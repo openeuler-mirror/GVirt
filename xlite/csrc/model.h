@@ -128,7 +128,53 @@ struct XModelConfig {
     std::vector<uint32_t> compressRatios;
 
     std::vector<uint32_t> auxLayerIds;
+
+    // ===== GLM-5.3-Flash (GLM5) =====
+    // KDA safe_gate lower bound: gate = gateLowerBound * sigmoid(exp(A_log) * (g1 + dt_bias)).
+    float gateLowerBound = 0.0f;
+    // Indexer kpool compression: kpool group size (1 disables).
+    uint32_t indexKpool = 1;
+    bool indexKpoolCompress = false;
+    // Force the current tail token into the last top-k slot; kpool indexer requires true.
+    bool indexKpoolAlwaysSelectTail = true;
+    // Per-layer dispatch source: layer ids using KDA linear attention / sparse MLA.
+    // KDA layers resolve to XMODEL_LAYER_ATTN_LINEAR; MLA layers to XMODEL_LAYER_ATTN_FULL.
+    std::vector<uint32_t> kdaLayers;
+    std::vector<uint32_t> fullAttnLayers;
 };
+
+// Per-layer attention dispatch for hybrid models (empty for non-hybrid).
+// Hybrid GDN alternates by fullAttentionInterval; hybrid KDA derives from the
+// explicit kdaLayers/fullAttnLayers lists (GLM-5.3-Flash), defaulting every
+// layer to FULL. Single source of truth -XModel and the _C.cpp weight checks
+// must agree on layer types.
+inline std::vector<uint32_t> DeriveLayerTypes(const XModelConfig &c)
+{
+    std::vector<uint32_t> layerTypes;
+    if (IsHybridGdn(c.attnType)) {
+        if (c.fullAttentionInterval == 0) {
+            throw std::invalid_argument("fullAttentionInterval must be > 0 for hybrid attention");
+        }
+        layerTypes.resize(c.nLayers);
+        for (uint32_t i = 0; i < c.nLayers; i++) {
+            layerTypes[i] = ((i + 1) % c.fullAttentionInterval == 0) ? XMODEL_LAYER_ATTN_FULL
+                                                                     : XMODEL_LAYER_ATTN_LINEAR;
+        }
+    } else if (IsHybridKda(c.attnType)) {
+        layerTypes.resize(c.nLayers, XMODEL_LAYER_ATTN_FULL);
+        for (uint32_t l : c.kdaLayers) {
+            if (l < c.nLayers) {
+                layerTypes[l] = XMODEL_LAYER_ATTN_LINEAR;
+            }
+        }
+        for (uint32_t l : c.fullAttnLayers) {
+            if (l < c.nLayers) {
+                layerTypes[l] = XMODEL_LAYER_ATTN_FULL;
+            }
+        }
+    }
+    return layerTypes;
+}
 
 struct MoEAlltoAllMeta {
     std::vector<int64_t> sendCountsData;
@@ -300,6 +346,33 @@ public:
     XTensor hcHeadBase;
     XTensor hcHeadScale;
 
+    // ===== GLM-5.3-Flash (GLM5) attention weights =====
+    // KDA linear-attention layers (q/k/v/b/f_a/f_b/g_a/g_b/wo projections; conv1d; A_log; dt_bias;
+    // o_norm). Reuses attnNorm / attnOut (output proj) / mlpNorm / MoE-FFN weight slots shared by
+    // all attnTypes.
+    std::vector<MatmulWeight> linearInProjQ;
+    std::vector<MatmulWeight> linearInProjK;
+    std::vector<MatmulWeight> linearInProjV;
+    // linear_in_proj_b / linear_a_log / linear_dt_bias / linear_norm / linear_out_proj reuse the
+    // GDN members of the same names (attnTypes are mutually exclusive).
+    std::vector<MatmulWeight> linearInProjFA;
+    std::vector<MatmulWeight> linearFBProj;
+    std::vector<MatmulWeight> linearInProjGA;
+    std::vector<MatmulWeight> linearGBProj;
+    // Per-stream causal-conv weights [localProj, K-1] over the merged native conv pool
+    // [S, K-1, 3*localProj]: each call views its own [K-1, localProj] window segment via
+    // pointer offset + row-pitch stride (the 1D conv is independent per channel).
+    std::vector<XTensor> linearQConv1d;
+    std::vector<XTensor> linearKConv1d;
+    std::vector<XTensor> linearVConv1d;
+    // Sparse-MLA layers reuse mlaQKVA / mlaQB / mlaWUV / mlaWUKT / mlaQNorm / mlaKVNorm slots.
+    // Indexer (sparse-MLA layers): wq_b replicated; wk / weights_proj fp32; k_norm LayerNorm; kpool
+    // gate+ape. index_q_b / index_k_norm / index_k_norm_bias reuse the DSA members.
+    std::vector<XTensor> indexWK;
+    std::vector<XTensor> indexWeightsProj;
+    std::vector<XTensor> indexKpoolGate;
+    std::vector<XTensor> indexKpoolApe;
+
 private:
     // Prefill receives a token shard; pure decode receives all batch tokens.
     // Positions, request metadata and persistent KV caches remain global.
@@ -318,6 +391,15 @@ private:
                             const XTensor &indexKScaleCache = XTensor());
     void ForwardAttnMLAV2(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
                           XTensor &freqsCis, XTensor &hiddenState);
+    // HYBRID_KDA linear-attention layer: shared MHC dispatch + weight-free mean
+    // collapse head, selected by attnType == XMODEL_ATTN_HYBRID_KDA.
+    void ForwardAttnLinearKda(XRuntime &rt, uint32_t layer,
+                              std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
+                              XTensor &hiddenState);
+    // HYBRID_KDA sparse-MLA layers reuse ForwardAttnMLAV2 (the indexer dispatch is
+    // selected inside it by attnType == XMODEL_ATTN_HYBRID_KDA).
+    void ForwardAttnIndexerKpool(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
+                                 XTensor &attnNormQc, std::vector<XTensor> &layerCache);
     void XliteOpQKNorm(XRuntime &rt, uint32_t layer, XTensor &qkv);
     void ForwardAttnMHA(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
                         XTensor &freqsCis, XTensor &hiddenState);

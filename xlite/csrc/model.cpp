@@ -106,6 +106,23 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     hcAttnScale.resize(c.nLayers);
     hcFfnScale.resize(c.nLayers);
 
+    // GLM-5.3-Flash (GLM5) per-layer attention weights (KDA + indexer); the b/a_log/dt_bias/
+    // norm/wo and index_q_b/k_norm/k_norm_bias slots reuse the GDN/DSA members above.
+    linearInProjQ.resize(c.nLayers);
+    linearInProjK.resize(c.nLayers);
+    linearInProjV.resize(c.nLayers);
+    linearInProjFA.resize(c.nLayers);
+    linearFBProj.resize(c.nLayers);
+    linearInProjGA.resize(c.nLayers);
+    linearGBProj.resize(c.nLayers);
+    linearQConv1d.resize(c.nLayers);
+    linearKConv1d.resize(c.nLayers);
+    linearVConv1d.resize(c.nLayers);
+    indexWK.resize(c.nLayers);
+    indexWeightsProj.resize(c.nLayers);
+    indexKpoolGate.resize(c.nLayers);
+    indexKpoolApe.resize(c.nLayers);
+
     attnNormBias.resize(c.nLayers);
     mhaQNormBias.resize(c.nLayers);
     mhaKNormBias.resize(c.nLayers);
@@ -120,14 +137,7 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     }
 
     if (IsHybridAttn(c.attnType)) {
-        if (c.fullAttentionInterval == 0) {
-            throw std::invalid_argument("fullAttentionInterval must be > 0 for hybrid attention");
-        }
-        _layerTypes.resize(c.nLayers);
-        for (uint32_t i = 0; i < c.nLayers; i++) {
-            _layerTypes[i] = ((i + 1) % c.fullAttentionInterval == 0) ? XMODEL_LAYER_ATTN_FULL
-                                                                      : XMODEL_LAYER_ATTN_LINEAR;
-        }
+        _layerTypes = DeriveLayerTypes(c);
     }
     if (_c.blockSizes.empty()) {
         _c.blockSizes.push_back(_c.blockSize);
@@ -147,7 +157,7 @@ void XModel::Init(void)
     uint32_t end = start + nLocalPhysicalExperts;
 
     if (_c.nDenseLayers != _c.nLayers || _c.attnType == XMODEL_ATTN_DSA ||
-        _c.attnType == XMODEL_ATTN_CXA) {
+        _c.attnType == XMODEL_ATTN_CXA || _c.attnType == XMODEL_ATTN_HYBRID_KDA) {
         // generate the identity index table 0.1.2...max(maxSeqLen,topK)-1
         uint64_t maxSeqLen = ROUND_UP(_c.maxSeqLen, _c.blockSizes[0]);
         maxSeqLen = INIT_MIN_SEQ_POS > maxSeqLen ? INIT_MIN_SEQ_POS : maxSeqLen;
@@ -162,7 +172,10 @@ void XModel::Init(void)
         if (_c.nDenseLayers != _c.nLayers) {
             _gateIndices.Init({_c.nRoutedExperts}, INT32, ptr);
         }
-        if (_c.attnType == XMODEL_ATTN_DSA || _c.attnType == XMODEL_ATTN_CXA) {
+        // indexer_topk consumes this arange as its sortIndices source and
+        // dense-row template; DSA/CXA/HYBRID_KDA all share it.
+        if (_c.attnType == XMODEL_ATTN_DSA || _c.attnType == XMODEL_ATTN_CXA ||
+            _c.attnType == XMODEL_ATTN_HYBRID_KDA) {
             _dsaSeqPositions.Init({maxSeqLen}, INT32, ptr);
         }
     }
@@ -905,8 +918,15 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
         // For shared indexer, only update the current topk for a full indexer layer
         ForwardAttnIndexer(rt, layer, hiddenState, attnNormQc, kvCache[layer][2], freqsCis,
                            kvCache[layer].size() == 4 ? kvCache[layer][3] : XTensor());
+    } else if (_c.attnType == XMODEL_ATTN_HYBRID_KDA) {
+        // GLM5: unconditional per-layer indexer (kpool-compressed, no RoPE; the DSA
+        // indexFullMask gate does not apply -every sparse-MLA layer runs its own indexer).
+        ForwardAttnIndexerKpool(rt, layer, hiddenState, attnNormQc, kvCache[layer]);
     }
     XTensor *topkIndices = rt.dsaPerLayerTopk;
+    // Runtime owns the topk buffer geometry. No topk row means topK=0 (dense).
+    uint32_t topkWidth = topkIndices != nullptr ? rt._dsaTopkWidth : 0;
+    uint32_t topkStride = topkIndices != nullptr ? rt._dsaTopkStride : 0;
     rt.PutTensor(attnNormQc);
 
     XTensor &qAbsorb = rt.GetTensor({hiddenState.shape[0], nLocalHeads * _c.kvLoraRank},
@@ -928,24 +948,30 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
     // Decode always qualifies; a non-decode (MTP / small prefill) step also qualifies
     // when its max query length is small enough that the per-query-token dense cache
     // (forced queryTileSize=1) still beats the paged path on long sequences.
+    // DSA-only: the dense-gather chain (gather_sparse + dense MLAV2) assumes a
+    // full-width topk row with no -1 padding. GLM5's kpool topk pads unused
+    // columns (incl. short PKI tail) with -1 by native contract, which would be
+    // consumed as raw token positions here — OOB / hang. GLM5 keeps the paged /
+    // flash MLAV2 path, where topkIndices feeds the softmax mask and -1 is
+    // filtered natively.
     if (_c.attnType == XMODEL_ATTN_DSA && topkIndices != nullptr &&
         (maxNumBlocks * _c.blockSizes[0] > rt._tileSizeOfCachedKV ||
          maxNumBlocks * _c.blockSizes[0] > XLITE_MLA_DENSE_THRESHOLD * rt._batch) &&
         rt._maxQueryLen <= XLITE_SMALL_PREFILL_THRESHOLD) {
-        XTensor &kDense = rt.GetTensor({hiddenState.shape[0], _c.indexTopK, _c.kvLoraRank},
+        XTensor &kDense = rt.GetTensor({hiddenState.shape[0], topkWidth, _c.kvLoraRank},
                                        hiddenState.dtype, DBG_LOC);
-        XTensor &peDense = rt.GetTensor({hiddenState.shape[0], _c.indexTopK, _c.ropeHeadDim},
+        XTensor &peDense = rt.GetTensor({hiddenState.shape[0], topkWidth, _c.ropeHeadDim},
                                         hiddenState.dtype, DBG_LOC);
         XliteOpGatherSparseKVCache(rt, kCache, peCache, rt._attnBlockTables[0], *topkIndices,
                                    rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens, kDense,
-                                   peDense, rt._batch, _c.indexTopK, _c.blockSizes[0],
-                                   _c.kvLoraRank, _c.ropeHeadDim, _c.nKvHeads);
+                                   peDense, rt._batch, topkWidth, _c.blockSizes[0], _c.kvLoraRank,
+                                   _c.ropeHeadDim, _c.nKvHeads);
         XTensor &qkDense =
-            rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, _c.indexTopK}, hiddenState.dtype, DBG_LOC);
+            rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, topkWidth}, hiddenState.dtype, DBG_LOC);
         XliteOpMLAV2(rt, qAbsorb, qPe, kDense, peDense, qkDense, oAbsorb, rt._attnQueryStartLoc,
                      rt._attnLens, rt._attnCachedLens, rt._attnBlockTables[0], nLocalHeads,
-                     _c.ropeHeadDim, _c.kvLoraRank, _c.blockSizes[0], rt._batch, _c.indexTopK,
-                     _c.softmaxScale, 0, XTensor(), true);
+                     _c.ropeHeadDim, _c.kvLoraRank, _c.blockSizes[0], rt._batch, topkWidth,
+                     _c.softmaxScale, 0, XTensor(), true, true, topkWidth);
         rt.PutTensor(qkDense);
         rt.PutTensor(peDense);
         rt.PutTensor(kDense);
@@ -955,8 +981,8 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
         XliteOpMLAV2(rt, qAbsorb, qPe, kCache, peCache, qk, oAbsorb, rt._attnQueryStartLoc,
                      rt._attnLens, rt._attnCachedLens, rt._attnBlockTables[0], nLocalHeads,
                      _c.ropeHeadDim, _c.kvLoraRank, _c.blockSizes[0], rt._batch,
-                     maxNumBlocks * _c.blockSizes[0], _c.softmaxScale, _c.indexTopK,
-                     topkIndices == nullptr ? XTensor() : *topkIndices);
+                     maxNumBlocks * _c.blockSizes[0], _c.softmaxScale, topkWidth,
+                     topkIndices == nullptr ? XTensor() : *topkIndices, false, true, topkStride);
         rt.PutTensor(qk);
     } else {
         XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._tileSizeOfCachedKV},
@@ -971,7 +997,8 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
                           _sync, oAbsorb, rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens,
                           rt._attnBlockTables[0], nLocalHeads, _c.ropeHeadDim, _c.kvLoraRank,
                           _c.blockSizes[0], rt._batch, _c.softmaxScale, rt._tileSizeOfCachedKV,
-                          _c.indexTopK, topkIndices == nullptr ? XTensor() : *topkIndices);
+                          topkWidth, topkIndices == nullptr ? XTensor() : *topkIndices, false,
+                          topkStride);
         rt.PutTensor(lastSum);
         rt.PutTensor(lastMax);
         rt.PutTensor(sum);
@@ -1286,6 +1313,250 @@ static inline const XTensor &CompressorPositions(XRuntime &rt, uint32_t ratio)
     return rt._compressorPosBufs[std::distance(rt._distinctCompressRatios.begin(), it)];
 }
 
+// GLM-5.3-Flash KDA linear-attention layer (paged native mamba pool, 2-tuple
+// [convPool, ssmPool]). Differences from the Qwen3.5 ForwardAttnLinear: eight separate
+// projections with f_a->f_b / g_a->g_b two-stage chains; no BetaDecay / external L2Norm /
+// RMSNormGated+SiluGateMul -the KDA safe-gate kernel takes RAW b/g1 plus fp32 A_log/dt_bias
+// and applies sigmoid/gate/decay/L2-norm/scale in-kernel; output goes through o_norm +
+// sigmoid(g2) then wo. conv reuses the Qwen paged conv kernels: the merged native pool page
+// [K-1, 3*localProj] is viewed per stream via pointer offset + row-pitch stride.
+void XModel::ForwardAttnLinearKda(XRuntime &rt, uint32_t layer,
+                                  std::vector<std::vector<XTensor>> &kvCache, XTensor &freqsCis,
+                                  XTensor &hiddenState)
+{
+    (void)freqsCis;
+    if (kvCache.size() <= layer || kvCache[layer].size() != 2) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": KDA state cache must be the 2-tuple [conv, ssm] native mamba "
+                                 "pool at layer " +
+                                 std::to_string(layer));
+    }
+    XTensor &convState = kvCache[layer][0];
+    XTensor &ssmState = kvCache[layer][1];
+
+    uint32_t m = hiddenState.shape[0];
+    uint32_t batch = rt._batch;
+    if (batch == 0) {
+        throw std::runtime_error("ForwardAttnLinearKda: empty batch");
+    }
+    if (rt._hostLens.size() != batch || rt._cachedLensHost.size() != batch) {
+        throw std::runtime_error(
+            "ForwardAttnLinearKda: host lens not populated; PrepareAttn must run first");
+    }
+    bool prefill = !rt._linearDecodeStep;
+    if (!rt.IsDummyRuntime() && !prefill && m != batch) {
+        throw std::runtime_error("multi-token native KDA requires prefill metadata");
+    }
+
+    // GLM5 KDA: q/k/v share the same head layout; n_k_heads == n_v_heads, so no
+    // ExpandLinearHeads (unlike Qwen3.5 ForwardAttnLinear).
+    uint32_t nLocalHeads = _c.linearNumKHeads / _c.defTpSize;
+    uint32_t headDim = _c.linearKeyHeadDim;  // == linearValueHeadDim
+    uint32_t localProj = nLocalHeads * headDim;
+    uint32_t convKernelK = _c.linearConvKernelDim;
+    if (convKernelK < 2) {
+        throw std::runtime_error("ForwardAttnLinearKda: paged conv kernels require kernelDim>=2");
+    }
+
+    // Step 1: per-weight projections (q/k/v + b + f_a->f_b + g_a->g_b two-stage chains).
+    XTensor &q = rt.GetTensor({m, localProj}, hiddenState.dtype, DBG_LOC);
+    XTensor &k = rt.GetTensor({m, localProj}, hiddenState.dtype, DBG_LOC);
+    XTensor &v = rt.GetTensor({m, localProj}, hiddenState.dtype, DBG_LOC);
+    XTensor &b = rt.GetTensor({m, nLocalHeads}, hiddenState.dtype, DBG_LOC);
+    XTensor &fa = rt.GetTensor({m, headDim}, hiddenState.dtype, DBG_LOC);    // f_a replicated
+    XTensor &g1 = rt.GetTensor({m, localProj}, hiddenState.dtype, DBG_LOC);  // f_b column-parallel
+    XTensor &ga = rt.GetTensor({m, headDim}, hiddenState.dtype, DBG_LOC);    // g_a replicated
+    XTensor &g2 = rt.GetTensor({m, localProj}, hiddenState.dtype, DBG_LOC);  // g_b column-parallel
+    XliteOpMatmul(rt, hiddenState, linearInProjQ[layer].weight, q);
+    XliteOpMatmul(rt, hiddenState, linearInProjK[layer].weight, k);
+    XliteOpMatmul(rt, hiddenState, linearInProjV[layer].weight, v);
+    XliteOpMatmul(rt, hiddenState, linearInProjB[layer].weight, b);
+    XliteOpMatmul(rt, hiddenState, linearInProjFA[layer].weight, fa);
+    XliteOpMatmul(rt, fa, linearFBProj[layer].weight, g1);
+    XliteOpMatmul(rt, hiddenState, linearInProjGA[layer].weight, ga);
+    XliteOpMatmul(rt, ga, linearGBProj[layer].weight, g2);
+    rt.PutTensor(fa);
+    rt.PutTensor(ga);
+
+    // Step 2: causal conv1d + SiLU. The native SD pool page interleaves q|k|v per
+    // timestep row ([K-1, 3*localProj] row-major); each stream passes the full page
+    // with stateLayout=2 and a channel offset (kernel: r*stateRowStride + c).
+    // b/g1 stay RAW -the recurrent kernel applies beta/decay internally.
+    XTensor &convQ = rt.GetTensor({m, localProj}, hiddenState.dtype, DBG_LOC);
+    XTensor &convK = rt.GetTensor({m, localProj}, hiddenState.dtype, DBG_LOC);
+    XTensor &convV = rt.GetTensor({m, localProj}, hiddenState.dtype, DBG_LOC);
+    auto conv1dStep = [&](uint32_t chanOff, XTensor &inputRaw, XTensor &weight, XTensor &output) {
+        if (prefill) {
+            XliteOpConv1dAndSiLUPrefillPaged(
+                rt, convState, inputRaw, weight, output, rt._gdnConvIndices.at(layer),
+                rt._gdnQueryStarts.at(layer), rt._gdnConvInitial.at(layer), 2, chanOff);
+        } else {
+            XliteOpConv1dAndSiLUPaged(rt, convState, inputRaw, weight, output,
+                                      rt._gdnConvIndices.at(layer), nullptr, 0, false, 2, chanOff);
+        }
+    };
+    if (!rt.IsDummyRuntime()) {
+        conv1dStep(0, q, linearQConv1d[layer], convQ);
+        conv1dStep(localProj, k, linearKConv1d[layer], convK);
+        conv1dStep(2 * localProj, v, linearVConv1d[layer], convV);
+    }
+    rt.PutTensor(q);
+    rt.PutTensor(k);
+    rt.PutTensor(v);
+
+    // Step 3: recurrent gated delta rule (decay-first). The kernel L2-norms q/k and applies
+    // scale=headDim**-0.5 internally; raw b/g1 are sigmoid'd inside the kernel with the
+    // gateLowerBound-bounded safe_gate decay.
+    XTensor &core = rt.GetTensor({m, localProj}, hiddenState.dtype, DBG_LOC);
+    if (prefill && !rt.IsDummyRuntime()) {
+        XliteOpRecurrentGatedDeltaRuleKdaPrefillPaged(
+            rt, convQ, convK, convV, b, g1, linearALog[layer], linearDtBias[layer], ssmState, core,
+            rt._gdnSsmIndices.at(layer), rt._gdnQueryStarts.at(layer), rt._gdnSsmInitial.at(layer),
+            nLocalHeads, nLocalHeads, headDim, headDim,
+            1.0f / std::sqrt(static_cast<float>(headDim)), _c.gateLowerBound, _c.normEps);
+    } else {
+        XliteOpRecurrentGatedDeltaRuleKdaPaged(
+            rt, convQ, convK, convV, b, g1, linearALog[layer], linearDtBias[layer], ssmState, core,
+            rt.IsDummyRuntime() ? nullptr : &rt._gdnSsmIndices.at(layer), batch, nLocalHeads,
+            nLocalHeads, headDim, headDim, 1.0f / std::sqrt(static_cast<float>(headDim)),
+            _c.gateLowerBound, _c.normEps);
+    }
+    rt.PutTensor(convQ);
+    rt.PutTensor(convK);
+    rt.PutTensor(convV);
+    rt.PutTensor(b);
+    rt.PutTensor(g1);
+
+    // Step 4: o_norm(core) * sigmoid(g2).
+    XTensor &gated = rt.GetTensor({m, localProj}, hiddenState.dtype, DBG_LOC);
+    {
+        XTensor &normed = rt.GetTensor({m, localProj}, hiddenState.dtype, DBG_LOC);
+        XliteOpRmsNorm(rt, core, linearNorm[layer], normed, _c.normEps, headDim, true, XTensor(),
+                       nLocalHeads);
+        XliteOpSigmoidGateMul(rt, normed, g2, gated);
+        rt.PutTensor(normed);
+        rt.PutTensor(g2);
+        rt.PutTensor(core);
+    }
+
+    // Step 5: output projection (wo, row-parallel) + TP all-reduce. The MHC path keeps
+    // CommOptimize off (see ForwardEmbedAndLayers), so the ReduceScatter branch below is
+    // unreachable for GLM5; kept for structural parity with ForwardAttnLinear.
+    {
+        ForwardLinear(rt, layer, gated, linearOutProj, hiddenState);
+        rt.PutTensor(gated);
+
+        if (_c.defTpSize > 1) {
+            if (rt.multiTaskParallel) {
+                rt.NotifyRecordPeerStream();
+            }
+            if (rt.enableCommOptimize) {
+                XliteOpReduceScatter(rt, rt.hiddenStatePad, rt.hiddenStateSlice, TP, false,
+                                     DBG_LOC);
+            } else {
+                XliteOpAllReduceSum(rt, hiddenState, hiddenState, TP, false, DBG_LOC);
+            }
+        }
+    }
+}
+
+// GLM5 sparse-MLA indexer (kpool-compressed, no RoPE). k path: wk(x) -> k_norm (LayerNorm,
+// fp32); gate path: kpool_compress_gate(x) fp32; weights = weights_proj(x) scaled by
+// n_heads**-0.5; q = wq_b(qc). On kpool layers the 4-token sliding-window softmax compress
+// writes the paged indexer cache + tail-ring spill, then pool-granularity topk fills
+// rt.dsaPerLayerTopk with width indexTopK + kpool - 1 (PKI causal tail packed). Short
+// sequences take the full-attention path (no sparse selection).
+void XModel::ForwardAttnIndexerKpool(XRuntime &rt, uint32_t layer, XTensor &hiddenState,
+                                     XTensor &attnNormQc, std::vector<XTensor> &layerCache)
+{
+    // Cache tuple arity is validated per-layer in CheckForwardParam (hasTail ? 4 : 3);
+    // bind the tail ring conditionally so a non-kpool config cannot index out of bounds.
+    const bool hasTail = _c.indexKpoolCompress && _c.indexKpool > 1;
+    if (layerCache.size() < (hasTail ? 4u : 3u)) {
+        throw std::runtime_error(
+            "ForwardAttnIndexerKpool: MLA cache tuple must match kpool config (hasTail ? 4 : 3)");
+    }
+    XTensor &indexKCache = layerCache[2];
+    XTensor *tailCache = hasTail ? &layerCache[3] : nullptr;
+    uint32_t m = hiddenState.shape[0];
+    // Indexer q = wq_b(qr); wq_b is replicated (full nHeads), so no TP shard on heads.
+    XTensor &q = rt.GetTensor({m, _c.indexNHeads * _c.indexHeadDim}, hiddenState.dtype, DBG_LOC);
+    ForwardLinear(rt, layer, attnNormQc, indexQB, q);
+    // k path: wk(x) -> k_norm -> k. Indexer weights are bound fp32 (native
+    // process_weights_after_loading casts wk/weights_proj/gate to fp32), so the
+    // matmul takes the bf16-in/fp32-weight path with fp32 accumulation;
+    // k_norm is a bf16-in/fp32-out LayerNorm (native computes k in fp32).
+    XTensor &wkOut = rt.GetTensor({m, _c.indexHeadDim}, hiddenState.dtype, DBG_LOC);
+    // Indexer weights are bound fp32/ND (native casts wk/gate/weights_proj to fp32);
+    // do NOT forward global weightNZ — it faults on ND fp32 (see ForwardAttnCXACommon).
+    XliteOpMatmul(rt, hiddenState, indexWK[layer], wkOut);
+    XTensor &k = rt.GetTensor({m, _c.indexHeadDim}, FP32, DBG_LOC);
+    XliteOpLayerNorm(rt, wkOut, indexKNorm[layer], indexKNormBias[layer], k, _c.normEps,
+                     _c.indexHeadDim);
+    rt.PutTensor(wkOut);
+    // gate path: kpool_compress_gate(x) in fp32 (native: x.float() @ W_f32).
+    XTensor &gate = rt.GetTensor({m, _c.indexHeadDim}, FP32, DBG_LOC);
+    XliteOpMatmul(rt, hiddenState, indexKpoolGate[layer], gate);
+    // weights = weights_proj(x) cast to the query dtype (native semantics), then
+    // scaled by (n_heads ** -0.5).
+    XTensor &weights = rt.GetTensor({m, _c.indexNHeads}, hiddenState.dtype, DBG_LOC);
+    XliteOpMatmul(rt, hiddenState, indexWeightsProj[layer], weights);
+    XliteOpMuls(rt, weights, 1.0f / std::sqrt(static_cast<float>(_c.indexNHeads)), weights);
+
+    // 4-token sliding-window softmax compress into the paged pool cache + tail
+    // ring spill. The kernels derive all bookkeeping from standard metadata:
+    // pooled write slot = mainSlot/kpool (slotMapping[0] is the main-KV token
+    // slot table), spill slot = tailBlock[req]*cap + pos%cap, seqLen from
+    // cachedLens + lens (queryStartLoc[l]/lens[l] = layer's request start/length).
+    if (hasTail) {
+        XliteOpKpoolTailCompressAndSpill(
+            rt, *tailCache, indexKCache, k, gate, indexKpoolApe[layer], rt._attnPosition,
+            rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens, rt._attnSlotMapping[0],
+            rt._attnBlockTables.back(), _c.indexHeadDim, _c.indexKpool, _c.blockSizes[0]);
+    }
+    rt.PutTensor(k);
+    rt.PutTensor(gate);
+
+    // Sparse selection via the shared IndexerTopK in compressed-block (pool) space:
+    // kCache rows are kpool-token pooled entries, topK is in pool units, packTail
+    // expands each selected pool to its kpool tokens + the PKI causal tail
+    // (width = topK + kpool - 1, native glm5_next_lightning_indexer contract).
+    // Gate on the actual KV length (cachedLens + lens), not the block table
+    // capacity; short sequences take the full-attention path.
+    uint32_t maxKvLen = 0;
+    if (rt._hostLens.size() != rt._batch || rt._cachedLensHost.size() != rt._batch) {
+        throw std::runtime_error(
+            "ForwardAttnIndexerKpool: host lens not populated; PrepareAttn must run first");
+    }
+    for (uint32_t i = 0; i < rt._batch; ++i) {
+        maxKvLen = std::max(maxKvLen, rt._hostLens[i] + rt._cachedLensHost[i]);
+    }
+    bool isLong = maxKvLen > _c.indexTopK;
+    if (!isLong || !(_c.indexKpoolCompress && _c.indexKpool > 1)) {
+        rt.dsaPerLayerTopk = nullptr;
+        rt.PutTensor(q);
+        rt.PutTensor(weights);
+        return;
+    }
+    // Pack-tail pitch is allocated and pre-filled (-1) in InitAttn.
+    uint32_t poolTopK = _c.indexTopK / _c.indexKpool;
+    rt._dsaTopkBuffer.View({m, rt._dsaTopkStride});
+    rt.dsaPerLayerTopk = &rt._dsaTopkBuffer;
+    q.View({m, _c.indexNHeads, _c.indexHeadDim});
+    auto &scores = rt.GetTensor({2 * rt.aicNum * MAX_INDEXER_Q_TILE_LEN, MAX_INDEXER_KV_TILE_LEN},
+                                hiddenState.dtype, DBG_LOC);
+    auto &lastTopk = rt.GetTensor({m, 2 * poolTopK}, INT32, DBG_LOC);
+    XliteOpIndexerTopK(rt, q, indexKCache, weights, scores, lastTopk, _dsaSeqPositions,
+                       rt._dsaTopkBuffer, rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens,
+                       rt._attnBlockTables[0], _sync, _c.indexNHeads, _c.indexHeadDim,
+                       _c.blockSizes[1], rt._batch, poolTopK, 0, XTensor(), _c.indexKpool,
+                       rt._indexerKvSplit, rt._indexerQTile, /*packTail=*/1, /*reluQk=*/0);
+    rt.PutTensor(lastTopk);
+    rt.PutTensor(scores);
+    rt.PutTensor(q);
+    rt.PutTensor(weights);
+}
+
 std::tuple<XTensor &, XTensor &> XModel::ForwardAttnCXACommon(XRuntime &rt, uint32_t layer,
                                                               std::vector<XTensor> &kvCache,
                                                               XTensor &freqsCis,
@@ -1542,7 +1813,7 @@ void XModel::ForwardAttnCXA(XRuntime &rt, uint32_t layer, std::vector<XTensor> &
 void XModel::ForwardAttn(XRuntime &rt, uint32_t layer, std::vector<std::vector<XTensor>> &kvCache,
                          XTensor &freqsCis, XTensor &hiddenState)
 {
-    if (IsHybridAttn(_c.attnType)) {
+    if (IsHybridGdn(_c.attnType)) {
         if (_layerTypes[layer] == XMODEL_LAYER_ATTN_FULL) {
             ForwardAttnMHA(rt, layer, kvCache, freqsCis, hiddenState);
         } else {
@@ -1552,6 +1823,12 @@ void XModel::ForwardAttn(XRuntime &rt, uint32_t layer, std::vector<std::vector<X
         ForwardAttnMLAV2(rt, layer, kvCache, freqsCis, hiddenState);
     } else if (_c.attnType == XMODEL_ATTN_MHA) {
         ForwardAttnMHA(rt, layer, kvCache, freqsCis, hiddenState);
+    } else if (_c.attnType == XMODEL_ATTN_HYBRID_KDA) {
+        // GLM5 attention only dispatches through ForwardLayersMhc; a call here means a
+        // naive/CommOptimize layer loop reached a GLM5 model (must never happen);
+        // hcMult>0 routes every entry point to ForwardLayersMhc).
+        throw std::runtime_error(std::string(__func__) +
+                                 ": GLM5 attention must go through ForwardLayersMhc");
     } else {
         throw std::runtime_error(std::string(__func__) + ": TODO");
     }
@@ -2500,7 +2777,17 @@ void XModel::ForwardLayersMhc(XRuntime &rt, XTensor &x, std::vector<std::vector<
         XDEBUG_PRINT_X(rt, i == 0 ? x : residual, ("L" + std::to_string(i) + " in").c_str(), 1e6f);
         ForwardHcPre(rt, residual, hcAttnFn[i], hcAttnScale[i], hcAttnBase[i], h, post, comb);
         XliteOpRmsNorm(rt, h, attnNorm[i], h, _c.normEps, _c.hiddenSize, true, attnNormBias[i]);
-        ForwardAttnCXA(rt, i, kvCache[i], freqsCis[i], h);
+        // GLM5: per-layer KDA-linear vs sparse-MLA dispatch (sparse-MLA reuses ForwardAttnMLAV2;
+        // rope=0 makes qPe/peCache 0-size). Other MHC attn types use ForwardAttnCXA.
+        if (_c.attnType == XMODEL_ATTN_HYBRID_KDA) {
+            if (_layerTypes[i] == XMODEL_LAYER_ATTN_LINEAR) {
+                ForwardAttnLinearKda(rt, i, kvCache, freqsCis[i], h);
+            } else {
+                ForwardAttnMLAV2(rt, i, kvCache, freqsCis[i], h);
+            }
+        } else {
+            ForwardAttnCXA(rt, i, kvCache[i], freqsCis[i], h);
+        }
         XDEBUG_PRINT_X(rt, h, ("L" + std::to_string(i) + " after attn").c_str(), 1e6f);
         ForwardHcPost(rt, h, post, comb, residual, residual);
 
@@ -2510,7 +2797,13 @@ void XModel::ForwardLayersMhc(XRuntime &rt, XTensor &x, std::vector<std::vector<
         XDEBUG_PRINT_X(rt, h, ("L" + std::to_string(i) + " after ffn").c_str(), 1e6f);
         ForwardHcPost(rt, h, post, comb, residual, residual);
     }
-    ForwardHcPre(rt, residual, hcHeadFn, hcHeadScale, hcHeadBase, h, post, comb);
+    // GLM5 head: weight-free mean collapse over hcMult streams (checkpoint has no hc_head).
+    // Other MHC attn types use the parameterized ForwardHcPre(head) path.
+    if (_c.attnType == XMODEL_ATTN_HYBRID_KDA) {
+        XliteOpHcMeanCollapse(rt, residual, h, x.shape[0], _c.hcMult, _c.hiddenSize);
+    } else {
+        ForwardHcPre(rt, residual, hcHeadFn, hcHeadScale, hcHeadBase, h, post, comb);
+    }
     XliteOpRmsNorm(rt, h, norm, output, _c.normEps, _c.hiddenSize, true, normBias);
     rt.PutTensor(comb);
     rt.PutTensor(post);
@@ -2542,6 +2835,11 @@ void XModel::ForwardEmbedAndLayers(XRuntime &rt, XTensor &input,
             rt.PutTensor(x);
         }
     } else {
+        // MHC path: ForwardLayersMhc never inits rt.hiddenStatePad/Slice (only
+        // ForwardLayersCommOptimize does), so keep CommOptimize off to route wo
+        // all-reduce through AllReduceSum; otherwise batch*seqlen >= commOptimizeLen
+        // (6144) would hit ReduceScatter on an uninitialized buffer (batch>1 crash).
+        rt.enableCommOptimize = false;
         XTensor &x = rt.GetTensor({rt.currTokens, _c.hiddenSize}, embed.dtype, DBG_LOC);
         ForwardParallelEmbed(rt, input, embed, x);
         ForwardLayersMhc(rt, x, kvCache, freqsCis, h);
@@ -2612,7 +2910,8 @@ void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMet
                    static_cast<int>(embed.dtype),
                    (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                                                   : static_cast<int>(embed.dtype),
-                   _c.indexTopK, _layerTypes, _c.compressRatios);
+                   _c.indexTopK, _layerTypes, _c.compressRatios, _c.indexKpool,
+                   _c.indexKpoolCompress);
     if (rt.batchedTokens < input.shape[0]) {
         input.View(rt.batchedTokens);
         inputIds.View(rt.batchedTokens);
@@ -2625,7 +2924,17 @@ void XModel::ForwardWithInputsEmbeds(XRuntime &rt, XTensor &input, XModelAttnMet
     if (inputIds.ptr != nullptr && inputIds.numel != 0) {
         _inputIds.Init(inputIds.shape, inputIds.dtype, inputIds.ptr);
     }
-    if (rt.enableCommOptimize) {
+    if (_c.hcMult > 0) {
+        // GLM5 (MHC): the naive/CommOptimize layer loops route attention through
+        // ForwardAttn, which has no GLM5 dispatch; reuse the MHC loop exactly like
+        // Forward() does. enableCommOptimize stays off (same rationale as in Forward:
+        // ReduceScatter would hit uninitialized MHC pad buffers).
+        // vLLM always feeds embeds for multimodal models (even text-only requests), so
+        // this is GLM5's main serving path, not a corner case.
+        rt.enableCommOptimize = false;
+        std::vector<XTensor> freqs(_c.nLayers, freqsCis);
+        ForwardLayersMhc(rt, input, kvCache, freqs, output);
+    } else if (rt.enableCommOptimize) {
         size_t mPad = ROUND_UP(input.shape[0], _c.defTpSize);
         XTensor *xPadPtr, xPad;
         if (input.OrigShape()[0] >= mPad) {
@@ -2654,7 +2963,8 @@ void XModel::Forward(XRuntime &rt, XTensor &input, XModelAttnMeta &attnMeta,
                    static_cast<int>(embed.dtype),
                    (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                                                   : static_cast<int>(embed.dtype),
-                   _c.indexTopK, _layerTypes, _c.compressRatios);
+                   _c.indexTopK, _layerTypes, _c.compressRatios, _c.indexKpool,
+                   _c.indexKpoolCompress);
     if (rt.batchedTokens < input.shape[0]) {
         input.View(rt.batchedTokens);
     }
@@ -2677,7 +2987,8 @@ void XModel::ForwardAndGetLogits(XRuntime &rt, XTensor &input, XModelAttnMeta &a
                    static_cast<int>(embed.dtype),
                    (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
                                                   : static_cast<int>(embed.dtype),
-                   _c.indexTopK, _layerTypes, _c.compressRatios);
+                   _c.indexTopK, _layerTypes, _c.compressRatios, _c.indexKpool,
+                   _c.indexKpoolCompress);
     if (rt.batchedTokens < input.shape[0]) {
         input.View(rt.batchedTokens);
     }
@@ -2712,7 +3023,7 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
                                  ": state cache size must equal nLayers");
     }
 
-    if (IsHybridAttn(_c.attnType)) {
+    if (IsHybridGdn(_c.attnType)) {
         uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
         uint32_t nLocalKHeads = _c.linearNumKHeads / _c.defTpSize;
         uint32_t nLocalVHeads = _c.linearNumVHeads / _c.defTpSize;
@@ -2757,6 +3068,98 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
                         (c1.dtype != embed.dtype && c1.dtype != FP32)) {
                         throw std::runtime_error(
                             "unsupported native GDN cache descriptor at layer " +
+                            std::to_string(i));
+                    }
+                }
+            }
+        }
+    } else if (IsHybridKda(_c.attnType)) {
+        // GLM-5.3-Flash: per-layer tuples. KDA layers carry the native mamba pool
+        // (conv [S, K-1, 3*localProj] + ssm [S, H, headDim, headDim] fp32,
+        // glm5next/kda.py); MLA layers carry sparse-MLA + kpool indexer caches
+        // (kCache/peCache/indexKCache plus an optional tail ring). See buildKvCache
+        // for the C++-internal counterpart.
+        uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
+        uint32_t nLocalHeads = _c.linearNumKHeads / _c.defTpSize;
+        if (_c.linearNumKHeads % _c.defTpSize != 0 || nLocalHeads == 0 ||
+            _c.linearNumKHeads != _c.linearNumVHeads) {
+            throw std::runtime_error("hybrid KDA requires divisible TP and q|k|v head parity");
+        }
+        uint32_t width = _c.linearConvKernelDim;
+        uint32_t convDim = 3 * nLocalHeads * _c.linearKeyHeadDim;
+        for (uint32_t i = 0; i < _c.nLayers; i++) {
+            if (_layerTypes[i] == XMODEL_LAYER_ATTN_LINEAR) {
+                if (kvCache[i].size() != 2) {
+                    throw std::runtime_error(std::string(__FILE__) + ":" +
+                                             std::to_string(__LINE__) +
+                                             ": KDA layer must provide a conv+ssm state tuple");
+                }
+                if (rt.IsDummyRuntime()) {
+                    continue;
+                }
+                const XTensor &c0 = kvCache[i][0];
+                const XTensor &c1 = kvCache[i][1];
+                if (c0.shape.size() != 3 || c0.shape[0] < 2 || c0.shape[1] != width - 1 ||
+                    c0.shape[2] != convDim || c0.stride.size() != 3 || c0.stride[2] != 1 ||
+                    c0.stride[1] != convDim ||
+                    c0.stride[0] < static_cast<uint64_t>(width - 1) * convDim ||
+                    c0.dtype != embed.dtype || c1.shape.size() != 4 || c1.shape[0] != c0.shape[0] ||
+                    c1.shape[1] != nLocalHeads || c1.shape[2] != _c.linearKeyHeadDim ||
+                    c1.shape[3] != _c.linearKeyHeadDim || c1.stride.size() != 4 ||
+                    c1.stride[3] != 1 || c1.stride[2] != _c.linearKeyHeadDim ||
+                    c1.stride[1] !=
+                        static_cast<uint64_t>(_c.linearKeyHeadDim) * _c.linearKeyHeadDim ||
+                    c1.stride[0] < static_cast<uint64_t>(nLocalHeads) * _c.linearKeyHeadDim *
+                                       _c.linearKeyHeadDim ||
+                    c1.dtype != FP32) {
+                    throw std::runtime_error("unsupported native KDA cache descriptor at layer " +
+                                             std::to_string(i));
+                }
+            } else {
+                bool hasTail = _c.indexKpoolCompress && _c.indexKpool > 1;
+                if (kvCache[i].size() != (hasTail ? 4u : 3u)) {
+                    throw std::runtime_error(std::string(__FILE__) + ":" +
+                                             std::to_string(__LINE__) +
+                                             ": MLA layer cache tuple must match kpool config");
+                }
+                const XTensor &kC = kvCache[i][0];
+                const XTensor &peC = kvCache[i][1];
+                const XTensor &ik = kvCache[i][2];
+                if (kC.shape.size() != 4 || kC.shape[1] != _c.blockSizes[0] ||
+                    kC.shape[2] != expectedKvHeads || kC.shape[3] != _c.kvLoraRank) {
+                    throw std::runtime_error(
+                        std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                        ": k nope cache's shape not match [block_num, block_size, kv_head_num, "
+                        "kv_lora_rank] at layer " +
+                        std::to_string(i));
+                }
+                if (peC.shape.size() != 4 || peC.shape[1] != _c.blockSizes[0] ||
+                    peC.shape[2] != expectedKvHeads || peC.shape[3] != _c.ropeHeadDim) {
+                    throw std::runtime_error(
+                        std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                        ": pe cache's shape not match [block_num, block_size, kv_head_num, "
+                        "rope_head_dim] at layer " +
+                        std::to_string(i));
+                }
+                uint32_t expectIdxBlockSize =
+                    _c.blockSizes.size() > 1 ? _c.blockSizes[1] : _c.blockSizes[0];
+                if (ik.shape.size() != 4 || ik.shape[1] != expectIdxBlockSize || ik.shape[2] != 1 ||
+                    ik.shape[3] != _c.indexHeadDim) {
+                    throw std::runtime_error(
+                        std::string(__FILE__) + ":" + std::to_string(__LINE__) +
+                        ": index k cache's shape not match [block_num, block_size, 1, "
+                        "index_head_size] at layer " +
+                        std::to_string(i));
+                }
+                if (hasTail) {
+                    // Ring capacity grows under spec decoding; only the lower bound is
+                    // validated (matches xlite.py's tail check).
+                    const XTensor &tc = kvCache[i][3];
+                    if (tc.shape.size() != 3 || tc.shape[0] == 0 || tc.shape[1] < _c.indexKpool ||
+                        tc.shape[2] != 2 * _c.indexHeadDim || tc.dtype != FP32) {
+                        throw std::runtime_error(
+                            "tail ring cache must be [tailBlocks>=1, indexKpool>=kpool, "
+                            "2*indexHeadDim] fp32 at layer " +
                             std::to_string(i));
                     }
                 }
@@ -2938,7 +3341,7 @@ size_t XModel::DummyRun()
         for (uint32_t i = 0; i < _c.nLayers; i++) {
             uint32_t expectedKvHeads =
                 std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
-            if (IsHybridAttn(_c.attnType)) {
+            if (IsHybridGdn(_c.attnType)) {
                 if (_layerTypes[i] == XMODEL_LAYER_ATTN_FULL) {
                     XTensor kCache(
                         {_c.maxBatch * maxNumBlocks, _c.blockSizes[0], expectedKvHeads, _c.headDim},
@@ -2958,6 +3361,42 @@ size_t XModel::DummyRun()
                         {_c.maxBatch + 1, nLocalVHeads, _c.linearValueHeadDim, _c.linearKeyHeadDim},
                         embed.dtype, nullptr);
                     kvCache[i] = {convState, ssmState};
+                }
+            } else if (_c.attnType == XMODEL_ATTN_HYBRID_KDA) {
+                if (_layerTypes[i] == XMODEL_LAYER_ATTN_LINEAR) {
+                    // Native mamba pool (glm5next/kda.py): conv [S, K-1, 3*localProj] merged
+                    // q|k|v pages, ssm [S, H, headDim, headDim] v-first.
+                    uint32_t nLocalHeads = _c.linearNumKHeads / _c.defTpSize;
+                    uint32_t headDim = _c.linearKeyHeadDim;
+                    uint32_t convDim = 3 * nLocalHeads * headDim;
+                    XTensor convPool({_c.maxBatch + 1, _c.linearConvKernelDim - 1, convDim},
+                                     embed.dtype, nullptr);
+                    XTensor ssmPool({_c.maxBatch + 1, nLocalHeads, headDim, headDim}, embed.dtype,
+                                    nullptr);
+                    kvCache[i] = {convPool, ssmPool};
+                } else {
+                    // Sparse MLA + kpool indexer: [kCache, peCache, indexKCache, tailCache].
+                    XTensor kCache({_c.maxBatch * maxNumBlocks, _c.blockSizes[0], expectedKvHeads,
+                                    _c.kvLoraRank},
+                                   embed.dtype, nullptr);
+                    XTensor peCache({_c.maxBatch * maxNumBlocks, _c.blockSizes[0], expectedKvHeads,
+                                     _c.ropeHeadDim},
+                                    embed.dtype, nullptr);
+                    uint32_t indexBlockSize =
+                        _c.blockSizes.size() > 1 ? _c.blockSizes[1] : _c.blockSizes[0];
+                    uint32_t poolBlocks =
+                        DIV_ROUND_UP(DIV_ROUND_UP(_c.maxSeqLen, _c.indexKpool), indexBlockSize);
+                    XTensor indexKCache(
+                        {_c.maxBatch * poolBlocks, indexBlockSize, 1, _c.indexHeadDim}, embed.dtype,
+                        nullptr);
+                    kvCache[i] = {kCache, peCache, indexKCache};
+                    if (_c.indexKpoolCompress && _c.indexKpool > 1) {
+                        // Tail ring: one block per request, ring capacity = indexKpool
+                        // (get_kpool_tail_ring_capacity with no speculative lookahead).
+                        kvCache[i].emplace_back(
+                            std::vector<size_t>{_c.maxBatch, _c.indexKpool, 2 * _c.indexHeadDim},
+                            FP32, nullptr);
+                    }
                 }
             } else if (_c.attnType == XMODEL_ATTN_MHA) {
                 XTensor kCache(
@@ -3136,13 +3575,13 @@ size_t XModel::DummyRun()
         XTensor output({_c.maxBatchedTokens, _c.hiddenSize}, embed.dtype, nullptr);
         XTensor logits({_c.defTpSize, _c.maxBatch, _c.vocabSize / _c.defTpSize}, embed.dtype,
                        nullptr);
-        rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads,
-                       _c.nKvHeads, _c.blockSizes, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
-                       static_cast<int>(embed.dtype),
-                       (_c.nDenseLayers < _c.nLayers)
-                           ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
-                           : static_cast<int>(embed.dtype),
-                       _c.indexTopK, _layerTypes, _c.compressRatios);
+        rt.PrepareAttn(
+            attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads, _c.nKvHeads,
+            _c.blockSizes, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
+            static_cast<int>(embed.dtype),
+            (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
+                                           : static_cast<int>(embed.dtype),
+            _c.indexTopK, _layerTypes, _c.compressRatios, _c.indexKpool, _c.indexKpoolCompress);
         Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCisVec, output);
         XTensor indices;
         indices.Init({batchSize}, INT32, nullptr);
@@ -3171,13 +3610,13 @@ size_t XModel::DummyRun()
         XTensor output({batchedTokens, _c.hiddenSize}, embed.dtype, nullptr);
         XTensor logits({_c.defTpSize, _c.maxBatch, _c.vocabSize / _c.defTpSize}, embed.dtype,
                        nullptr);
-        rt.PrepareAttn(attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads,
-                       _c.nKvHeads, _c.blockSizes, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
-                       static_cast<int>(embed.dtype),
-                       (_c.nDenseLayers < _c.nLayers)
-                           ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
-                           : static_cast<int>(embed.dtype),
-                       _c.indexTopK, _layerTypes, _c.compressRatios);
+        rt.PrepareAttn(
+            attnMeta, _c.maxBatchedTokens, _c.maxBatch, _c.maxSeqLen, _c.nHeads, _c.nKvHeads,
+            _c.blockSizes, _c.hiddenSize, _c.nRoutedExperts, _c.defDpSize,
+            static_cast<int>(embed.dtype),
+            (_c.nDenseLayers < _c.nLayers) ? static_cast<int>(moeGate[_c.nDenseLayers].dtype)
+                                           : static_cast<int>(embed.dtype),
+            _c.indexTopK, _layerTypes, _c.compressRatios, _c.indexKpool, _c.indexKpoolCompress);
         Forward(rt, input, attnMeta, kvCache, deepstackInputEmbeds, freqsCisVec, output);
         XTensor indices;
         indices.Init({batch}, INT32, nullptr);
