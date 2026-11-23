@@ -204,8 +204,10 @@ class ModelConfig:
             :attr:`aux_layer_ids` and :meth:`Model.forward`.
         gate_lower_bound (float): KDA safe_gate lower bound (GLM-5.3-Flash):
             ``gate = gate_lower_bound * sigmoid(exp(A_log) * (g1 + dt_bias))``.
-        index_kpool (int): Indexer kpool compression group size; 1 disables.
+        index_kpool (int): Indexer kpool compression group size. HYBRID_KDA requires
+            ``index_kpool > 1``.
         index_kpool_compress (bool): Whether indexer kpool compression is enabled.
+            HYBRID_KDA requires ``True``.
         index_kpool_always_select_tail (bool): Force the current tail token into the last
             top-k slot. Only ``True`` is supported; ``False`` is rejected.
         kda_layers (List[int]): Layer ids dispatched to KDA linear attention
@@ -328,7 +330,7 @@ class ModelConfig:
     gate_lower_bound: float = ...
     """KDA safe_gate lower bound (GLM-5.3-Flash)."""
     index_kpool: int = ...
-    """Indexer kpool compression group size; 1 disables."""
+    """Indexer kpool compression group size; HYBRID_KDA requires > 1."""
     index_kpool_compress: bool = ...
     """Whether indexer kpool compression is enabled."""
     index_kpool_always_select_tail: bool = ...
@@ -950,7 +952,7 @@ class Model:
     linear_g_b_proj: List[torch.Tensor] = ...
     """KDA g_b projection weight per layer (GLM-5.3-Flash; consumes full g_a output)."""
     linear_q_conv1d: List[torch.Tensor] = ...
-    """KDA per-stream causal conv1d weight for Q, shape ``[full_proj_size, 1, kernel-1]``
+    """KDA per-stream causal conv1d weight for Q, shape ``[full_proj_size, 1, kernel]``
     pre-sliced to the local head shard by the caller (GLM-5.3-Flash)."""
     linear_k_conv1d: List[torch.Tensor] = ...
     """KDA per-stream causal conv1d weight for K (GLM-5.3-Flash)."""

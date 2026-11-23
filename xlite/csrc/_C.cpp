@@ -788,8 +788,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
                 // GLM5 weights are BF16/FP32 (unquantized): InitMatmulWeight skips empty
                 // quant vectors, so all quant args share this local empty vector.
                 std::vector<at::Tensor> noQuant;
-                bool isKda =
-                    std::find(c.kdaLayers.begin(), c.kdaLayers.end(), i) != c.kdaLayers.end();
+                const bool isKda = layerTypes[i] == XMODEL_LAYER_ATTN_LINEAR;
                 if (isKda) {
                     // KDA layer: q/k/v/b column-parallel; f_a/g_a replicated (full head_dim,
                     // see the python row slices); f_b/g_b consume the full f_a/g_a (head-shard
@@ -951,8 +950,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         if (c.attnType == XMODEL_ATTN_HYBRID_KDA) {
             // GLM-5.3-Flash hybrid: KDA layers carry (conv, ssm) state, sparse MLA
             // layers carry (k, pe, indexK, tail) caches.
-            const bool isKda =
-                std::find(c.kdaLayers.begin(), c.kdaLayers.end(), i) != c.kdaLayers.end();
+            const bool isKda = layerTypes[i] == XMODEL_LAYER_ATTN_LINEAR;
             _kv[i].resize(isKda ? 2 : 4);
         } else if (c.attnType == XMODEL_ATTN_DSA) {
             _kv[i].resize(i < c.indexC8Mask.size() && c.indexC8Mask[i] ? 4 : 3);

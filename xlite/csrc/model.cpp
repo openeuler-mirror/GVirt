@@ -151,11 +151,10 @@ void XModel::Init(void)
 {
     // Kpool paths use blockSizes[1] for the index cache; non-kpool paths fall back to
     // blockSizes[0].
-    if (_c.attnType == XMODEL_ATTN_HYBRID_KDA && _c.indexKpool == 0) {
-        throw std::invalid_argument("HYBRID_KDA requires indexKpool > 0");
+    if (_c.attnType == XMODEL_ATTN_HYBRID_KDA && !(_c.indexKpoolCompress && _c.indexKpool > 1)) {
+        throw std::invalid_argument("HYBRID_KDA requires indexKpoolCompress=true and indexKpool>1");
     }
-    if (_c.attnType == XMODEL_ATTN_HYBRID_KDA && _c.indexKpoolCompress && _c.indexKpool > 1 &&
-        _c.blockSizes.size() < 2) {
+    if (_c.attnType == XMODEL_ATTN_HYBRID_KDA && _c.blockSizes.size() < 2) {
         throw std::invalid_argument(
             "HYBRID_KDA kpool path requires blockSizes = [mainBlockSize, indexerBlockSize]");
     }
@@ -1569,7 +1568,7 @@ void XModel::ForwardAttnIndexerKpool(XRuntime &rt, uint32_t layer, XTensor &hidd
     rt._dsaTopkBuffer.View({m, rt._dsaTopkStride});
     rt.dsaPerLayerTopk = &rt._dsaTopkBuffer;
     q.View({m, _c.indexNHeads, _c.indexHeadDim});
-    auto &scores = rt.GetTensor({2 * rt.aicNum * XLITE_MAX_M0, MAX_INDEXER_KV_TILE_LEN},
+    auto &scores = rt.GetTensor({2 * rt.aicNum * MAX_INDEXER_Q_TILE_LEN, MAX_INDEXER_KV_TILE_LEN},
                                 hiddenState.dtype, DBG_LOC);
     auto &lastTopk = rt.GetTensor({m, 2 * poolTopK}, INT32, DBG_LOC);
     XliteOpIndexerTopK(rt, q, indexKCache, weights, scores, lastTopk, _dsaSeqPositions,
@@ -3111,6 +3110,7 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
             _c.linearNumKHeads != _c.linearNumVHeads) {
             throw std::runtime_error("hybrid KDA requires divisible TP and q|k|v head parity");
         }
+        uint32_t width = _c.linearConvKernelDim;
         uint32_t convDim = 3 * nLocalHeads * _c.linearKeyHeadDim;
         for (uint32_t i = 0; i < _c.nLayers; i++) {
             if (_layerTypes[i] == XMODEL_LAYER_ATTN_LINEAR) {
@@ -3124,11 +3124,19 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
                 }
                 const XTensor &c0 = kvCache[i][0];
                 const XTensor &c1 = kvCache[i][1];
-                if (c0.shape.size() != 3 || c0.shape[0] < 2 ||
-                    c0.shape[1] != _c.linearConvKernelDim - 1 || c0.shape[2] != convDim ||
+                if (c0.shape.size() != 3 || c0.shape[0] < 2 || c0.shape[1] != width - 1 ||
+                    c0.shape[2] != convDim || c0.stride.size() != 3 || c0.stride[2] != 1 ||
+                    c0.stride[1] != convDim ||
+                    c0.stride[0] < static_cast<uint64_t>(width - 1) * convDim ||
                     c0.dtype != embed.dtype || c1.shape.size() != 4 || c1.shape[0] != c0.shape[0] ||
                     c1.shape[1] != nLocalHeads || c1.shape[2] != _c.linearKeyHeadDim ||
-                    c1.shape[3] != _c.linearKeyHeadDim || c1.dtype != FP32) {
+                    c1.shape[3] != _c.linearKeyHeadDim || c1.stride.size() != 4 ||
+                    c1.stride[3] != 1 || c1.stride[2] != _c.linearKeyHeadDim ||
+                    c1.stride[1] !=
+                        static_cast<uint64_t>(_c.linearKeyHeadDim) * _c.linearKeyHeadDim ||
+                    c1.stride[0] < static_cast<uint64_t>(nLocalHeads) * _c.linearKeyHeadDim *
+                                       _c.linearKeyHeadDim ||
+                    c1.dtype != FP32) {
                     throw std::runtime_error("unsupported native KDA cache descriptor at layer " +
                                              std::to_string(i));
                 }
@@ -3343,100 +3351,6 @@ void XModel::CheckForwardParam(XRuntime &rt, std::vector<std::vector<XTensor>> &
                                      ": CXA swa kv cache must be non-empty");
         }
         checkShape(swaKv, _c.blockSizes[CXA_SWA_KV], 1, _c.headDim, "swa kv cache");
-    } else if (_c.attnType == XMODEL_ATTN_HYBRID_KDA) {
-        // GLM-5.3-Flash: per-layer KDA (2-slot mamba pool) vs sparse-MLA (3/4-tuple) cache.
-        // KDA pool geometry matches the native [conv, ssm] contract (glm5next/kda.py):
-        // conv [S, K-1, 3*localProj] (merged q|k|v causal-conv state, same layout as the
-        // Qwen GDN conv cache), ssm [S, H, headDim, headDim] v-first (kda_state_shape).
-        uint32_t nLocalHeads = _c.linearNumKHeads / _c.defTpSize;
-        uint32_t headDim = _c.linearKeyHeadDim;  // == linearValueHeadDim == 128
-        uint32_t localProj = nLocalHeads * headDim;
-        uint32_t convDim = 3 * localProj;
-        uint32_t width = _c.linearConvKernelDim;
-        uint32_t expectedKvHeads = std::max(_c.nKvHeads / _c.defTpSize, static_cast<uint32_t>(1));
-        for (uint32_t i = 0; i < _c.nLayers; i++) {
-            if (_layerTypes[i] == XMODEL_LAYER_ATTN_LINEAR) {
-                if (kvCache[i].size() != 2) {
-                    throw std::runtime_error(
-                        std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                        ": GLM5 KDA layer must have 2 state tensors at layer " + std::to_string(i));
-                }
-                if (rt.IsDummyRuntime()) {
-                    continue;
-                }
-                const XTensor &conv = kvCache[i][0];
-                const XTensor &ssm = kvCache[i][1];
-                if (conv.shape.size() != 3 || conv.shape[0] < 2 || conv.shape[1] != width - 1 ||
-                    conv.shape[2] != convDim || conv.stride.size() != 3 || conv.stride[2] != 1 ||
-                    conv.stride[1] != convDim || conv.stride[0] < (width - 1) * convDim ||
-                    conv.dtype != embed.dtype) {
-                    throw std::runtime_error(
-                        std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                        ": GLM5 KDA native conv pool shape mismatch at layer " + std::to_string(i));
-                }
-                if (ssm.shape.size() != 4 || ssm.shape[0] != conv.shape[0] ||
-                    ssm.shape[1] != nLocalHeads || ssm.shape[2] != headDim ||
-                    ssm.shape[3] != headDim || ssm.stride.size() != 4 || ssm.stride[3] != 1 ||
-                    ssm.stride[2] != headDim ||
-                    ssm.stride[1] != static_cast<uint64_t>(headDim) * headDim ||
-                    ssm.stride[0] < static_cast<uint64_t>(nLocalHeads) * headDim * headDim ||
-                    (ssm.dtype != embed.dtype && ssm.dtype != FP32)) {
-                    throw std::runtime_error(
-                        std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                        ": GLM5 KDA native ssm pool shape mismatch at layer " + std::to_string(i));
-                }
-            } else {
-                // Sparse MLA. kpool path (indexKpool>1): 4-tuple
-                // {kCache, peCache, indexKCache(blockSizes[1]/block), tailCache(ring fp32)};
-                // legacy DSA-style: 3-tuple {kCache, peCache, indexKCache}.
-                if (kvCache[i].size() != 3 && kvCache[i].size() != 4) {
-                    throw std::runtime_error(
-                        std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                        ": GLM5 MLA layer must have 3/4 state tensors at layer " +
-                        std::to_string(i));
-                }
-                const XTensor &kCache = kvCache[i][0];
-                const XTensor &peCache = kvCache[i][1];
-                if (kCache.shape.size() != 4 || kCache.shape[1] != _c.blockSizes[0] ||
-                    kCache.shape[2] != expectedKvHeads || kCache.shape[3] != _c.kvLoraRank) {
-                    throw std::runtime_error(
-                        std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                        ": GLM5 MLA k cache shape mismatch at layer " + std::to_string(i));
-                }
-                if (peCache.shape.size() != 4 || peCache.shape[1] != _c.blockSizes[0] ||
-                    peCache.shape[2] != expectedKvHeads || peCache.shape[3] != _c.ropeHeadDim) {
-                    throw std::runtime_error(
-                        std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                        ": GLM5 MLA pe cache shape mismatch at layer " + std::to_string(i));
-                }
-                const XTensor &indexKCache = kvCache[i][2];
-                uint32_t expectIdxBlockSize =
-                    _c.blockSizes.size() > 1 ? _c.blockSizes[1] : _c.blockSizes[0];
-                if (indexKCache.shape.size() != 4 || indexKCache.shape[1] != expectIdxBlockSize ||
-                    indexKCache.shape[2] != 1 || indexKCache.shape[3] != _c.indexHeadDim) {
-                    throw std::runtime_error(
-                        std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                        ": GLM5 index k cache shape mismatch at layer " + std::to_string(i));
-                }
-                if (kvCache[i].size() == 4) {
-                    // Tail ring: [blocks, tail_capacity, 2*indexHeadDim] fp32.
-                    const XTensor &tailCache = kvCache[i][3];
-                    if (tailCache.shape.size() != 3 || tailCache.shape[0] == 0 ||
-                        tailCache.shape[1] != _c.indexKpool ||
-                        tailCache.shape[2] != 2 * _c.indexHeadDim || tailCache.dtype != FP32) {
-                        throw std::runtime_error(
-                            std::string(__FILE__) + ":" + std::to_string(__LINE__) +
-                            ": GLM5 tail cache shape/dtype mismatch at layer " + std::to_string(i));
-                    }
-                } else if (_c.indexKpoolCompress && _c.indexKpool > 1) {
-                    throw std::runtime_error(std::string(__FILE__) + ":" +
-                                             std::to_string(__LINE__) +
-                                             ": GLM5 kpool path requires a 4-tuple (tail cache "
-                                             "missing) at layer " +
-                                             std::to_string(i));
-                }
-            }
-        }
     }
 }
 
