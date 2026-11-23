@@ -409,7 +409,31 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         }
     } else if (IsHybridKda(c.attnType)) {
         if (c.linearNumKHeads == 0 || c.linearKeyHeadDim == 0 || c.linearConvKernelDim == 0) {
-            throw std::invalid_argument("Linear attention config is incomplete");
+            throw std::invalid_argument(
+                "HYBRID_KDA requires non-zero linearNumKHeads, linearKeyHeadDim and "
+                "linearConvKernelDim");
+        }
+        if (c.hcMult == 0) {
+            throw std::invalid_argument("HYBRID_KDA requires hcMult != 0 (MHC wrapping)");
+        }
+        if (!(c.indexKpoolCompress && c.indexKpool > 1)) {
+            throw std::invalid_argument(
+                "HYBRID_KDA requires indexKpoolCompress=true and indexKpool>1");
+        }
+        if (c.indexTopK > 0 && !c.indexKpoolAlwaysSelectTail) {
+            throw std::invalid_argument(
+                "HYBRID_KDA kpool indexer requires indexKpoolAlwaysSelectTail=true");
+        }
+        if (c.blockSizes.size() < 2) {
+            throw std::invalid_argument(
+                "HYBRID_KDA kpool path requires blockSizes = [mainBlockSize, indexerBlockSize]");
+        }
+        // Compress and topk paths agree on pool-block mapping only under this identity.
+        if (static_cast<uint64_t>(c.blockSizes[1]) * c.indexKpool != c.blockSizes[0]) {
+            throw std::invalid_argument(
+                "HYBRID_KDA kpool path requires blockSizes[1] * indexKpool == blockSizes[0] (got " +
+                std::to_string(c.blockSizes[1]) + " * " + std::to_string(c.indexKpool) +
+                " != " + std::to_string(c.blockSizes[0]) + ")");
         }
     } else if (c.attnType >= XMODEL_ATTN_MAX_TYPE) {
         XDebugStream s(rankId, std::string(__func__) + ":" + std::to_string(__LINE__));

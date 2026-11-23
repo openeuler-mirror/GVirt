@@ -139,9 +139,6 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
     if (IsHybridAttn(c.attnType)) {
         _layerTypes = DeriveLayerTypes(c);
     }
-    if (IsHybridKda(c.attnType) && _c.hcMult == 0) {
-        throw std::invalid_argument("GLM5: hc_mult must be set (MHC wrapping)");
-    }
     if (_c.blockSizes.empty()) {
         _c.blockSizes.push_back(_c.blockSize);
     }
@@ -149,28 +146,6 @@ XModel::XModel(struct XModelConfig &c, uint32_t rankId) : _c(c), _rankId(rankId)
 
 void XModel::Init(void)
 {
-    // Kpool paths use blockSizes[1] for the index cache; non-kpool paths fall back to
-    // blockSizes[0].
-    if (_c.attnType == XMODEL_ATTN_HYBRID_KDA && !(_c.indexKpoolCompress && _c.indexKpool > 1)) {
-        throw std::invalid_argument("HYBRID_KDA requires indexKpoolCompress=true and indexKpool>1");
-    }
-    if (_c.attnType == XMODEL_ATTN_HYBRID_KDA && _c.blockSizes.size() < 2) {
-        throw std::invalid_argument(
-            "HYBRID_KDA kpool path requires blockSizes = [mainBlockSize, indexerBlockSize]");
-    }
-    if (_c.attnType == XMODEL_ATTN_HYBRID_KDA && _c.indexTopK > 0 &&
-        !_c.indexKpoolAlwaysSelectTail) {
-        throw std::invalid_argument(
-            "HYBRID_KDA kpool indexer requires indexKpoolAlwaysSelectTail=true");
-    }
-    // Compress and topk paths agree on pool-block mapping only under this identity.
-    if (_c.attnType == XMODEL_ATTN_HYBRID_KDA && _c.indexKpoolCompress && _c.indexKpool > 1 &&
-        _c.blockSizes[1] * _c.indexKpool != _c.blockSizes[0]) {
-        throw std::invalid_argument(
-            "HYBRID_KDA kpool path requires blockSizes[1] * indexKpool == blockSizes[0] (got " +
-            std::to_string(_c.blockSizes[1]) + " * " + std::to_string(_c.indexKpool) +
-            " != " + std::to_string(_c.blockSizes[0]) + ")");
-    }
     std::vector<uint32_t> vbitsortIndices;
     std::vector<uint64_t> weights;
     size_t size;
