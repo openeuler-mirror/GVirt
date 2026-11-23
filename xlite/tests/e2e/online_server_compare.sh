@@ -243,6 +243,8 @@ is_service_all_scenarios_complete() {
 #   $6 - max_model_len: 最大模型长度（模型级统一）
 #   $7 - tensor_parallel_size: 张量并行大小（模型级统一）
 #   $8 - main_output_dir: 主输出目录（断点续测产物所在目录）
+#   $9 - model_name: 产物命名用的 served_name，须与 process_scenario_data 一致（勿用 model_path basename，
+#       glm5_2_dummy 的 served_name 与 basename 不同，会导致产物名与数据处理查找名分叉）
 # 依赖全局：SCENARIOS（当前模型的场景表，4字段 in|out|并发|mult）、MODEL_SCENARIO_LIMIT（场景数）。
 run_service_all_scenarios() {
     local service_mode=$1
@@ -253,8 +255,9 @@ run_service_all_scenarios() {
     local max_model_len=$6
     local tensor_parallel_size=$7
     local main_output_dir=$8
+    local model_name=$9
 
-    local model_name=$(basename "${model_path}")
+
 
     # service_tag -> 中文服务名 (便于日志直读)
     local service_cn="未知服务"
@@ -533,16 +536,17 @@ for model_type in "${TEST_MODELS[@]}"; do
 
     # 服务外提：3 服务各起一次, 每个服务跑完全部场景再 kill。
     # 服务日志命名 server_<model>_<service>.log（每服务一个, 不再按场景分）。
+    # 产物命名用 ${TEST_MODEL} (served_name), 与下方 process_scenario_data 一致。
     run_service_all_scenarios "xlite_decode_only" "xlite_decode_only" "${TEST_MODEL_PATH}" \
-        "${MNBT}" "${MNS}" "${MML}" "${TP}" "${MAIN_OUTPUT_DIR}"
+        "${MNBT}" "${MNS}" "${MML}" "${TP}" "${MAIN_OUTPUT_DIR}" "${TEST_MODEL}"
     wait_10s "xlite_decode_only 完成，准备 xlite_full_mode"
 
     run_service_all_scenarios "xlite_full_mode" "xlite_full" "${TEST_MODEL_PATH}" \
-        "${MNBT}" "${MNS}" "${MML}" "${TP}" "${MAIN_OUTPUT_DIR}"
+        "${MNBT}" "${MNS}" "${MML}" "${TP}" "${MAIN_OUTPUT_DIR}" "${TEST_MODEL}"
     wait_10s "xlite_full_mode 完成，准备 aclgraph"
 
     run_service_all_scenarios "aclgraph" "aclgraph" "${TEST_MODEL_PATH}" \
-        "${MNBT}" "${MNS}" "${MML}" "${TP}" "${MAIN_OUTPUT_DIR}"
+        "${MNBT}" "${MNS}" "${MML}" "${TP}" "${MAIN_OUTPUT_DIR}" "${TEST_MODEL}"
 
     # 最后统一对比：3 服务的 result_input_* 目录此时都已填满, 逐场景生成对比报告。
     # 此循环位于脚本顶层而非函数内，不可使用 local（set -u 下会因 unbound variable 退出）
