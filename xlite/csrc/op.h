@@ -387,4 +387,13 @@ void XliteOpKpoolTailCompressAndSpill(XRuntime &rt, XTensor &tailCache, XTensor 
                                       XTensor &cachedLens, XTensor &slotMapping,
                                       XTensor &tailBlockTable, uint32_t headDim, uint32_t kpool,
                                       uint32_t mainBlockSize);
+// DeepSeek-V4.1 engram gate: fused RMSNorm-rstd-pair + weighted dot + sign-preserving
+// sigmoid + residual inject (out = hResid + gate*value). kv is the post-wkv [T,(HC+1)*DIM]
+// tensor (HC*DIM key ++ DIM value). q_weight/k_weight [HC,DIM] may be pre-folded.
+// hiddenResidual is the residual-stream basis for the inject add; when rotated, the caller
+// passes the un-rotated hidden as `hidden` (gate math) and the rotated residual as
+// hiddenResidual. An empty XTensor (ptr==nullptr) aliases `hidden` (unrotated path).
+void XliteOpEngramGate(XRuntime &rt, XTensor &hidden, XTensor &hiddenResidual, XTensor &kv,
+                       XTensor &qWeight, XTensor &kWeight, XTensor &mask, XTensor &out,
+                       uint32_t hcMult, uint32_t dim, float eps);
 #endif

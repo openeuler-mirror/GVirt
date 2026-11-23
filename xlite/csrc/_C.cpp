@@ -4415,6 +4415,29 @@ private:
 
 }  // namespace opreg
 
+void EngramGate(XRuntime &rt, at::Tensor &hidden, at::Tensor &kv, at::Tensor &qWeight,
+                at::Tensor &kWeight, at::Tensor &mask, at::Tensor &out, uint32_t hcMult,
+                uint32_t dim, double eps, std::optional<at::Tensor> hiddenResidual)
+{
+    // xlite's XDtypeOf (xlite.h:21) does not map torch.bool/uint8; cast to int32
+    // (nonzero = active). The kernel reads it as __gm__ int32_t.
+    at::Tensor maskI32 = mask.to(at::kInt);
+    XTensor _hidden, _hiddenResid, _kv, _q, _k, _mask, _out;
+    InitXTensor(_hidden, hidden, DBG_LOC);
+    // hiddenResidual nullopt/undefined → aliases hidden (unrotated path).
+    if (hiddenResidual && hiddenResidual->defined() && hiddenResidual->numel() > 0) {
+        InitXTensor(_hiddenResid, *hiddenResidual, DBG_LOC);
+    }
+    InitXTensor(_kv, kv, DBG_LOC);
+    InitXTensor(_q, qWeight, DBG_LOC);
+    InitXTensor(_k, kWeight, DBG_LOC);
+    InitXTensor(_mask, maskI32, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
+    XliteOpEngramGate(rt, _hidden, _hiddenResid, _kv, _q, _k, _mask, _out, hcMult, dim,
+                      static_cast<float>(eps));
+    rt.Synchronize();
+}
+
 TORCH_LIBRARY(xlite_sabi, m)
 {
     m.class_<RuntimeHolder>("Runtime")
@@ -5228,4 +5251,9 @@ TORCH_LIBRARY(xlite_sabi, m)
              torch::arg("query_start_loc"), torch::arg("lens"), torch::arg("cached_lens"),
              torch::arg("slot_mapping"), torch::arg("tail_block_table"), torch::arg("head_dim"),
              torch::arg("kpool"), torch::arg("main_block_size")});
+    ops.def(
+        "engram_gate", op<&EngramGate>,
+        {torch::arg("rt"), torch::arg("hidden"), torch::arg("kv"), torch::arg("q_weight"),
+         torch::arg("k_weight"), torch::arg("mask"), torch::arg("out"), torch::arg("hc_mult"),
+         torch::arg("dim"), torch::arg("eps"), torch::arg("hidden_residual") = torch::arg::none()});
 }
