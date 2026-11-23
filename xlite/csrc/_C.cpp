@@ -416,7 +416,7 @@ void _CModel::Init(struct XModelConfig &c, uint32_t rankId)
         if (c.hcMult == 0) {
             throw std::invalid_argument("HYBRID_KDA requires hcMult != 0 (MHC wrapping)");
         }
-        if (!(c.indexKpoolCompress && c.indexKpool > 1)) {
+        if (!c.indexKpoolCompress || c.indexKpool <= 1) {
             throw std::invalid_argument(
                 "HYBRID_KDA requires indexKpoolCompress=true and indexKpool>1");
         }

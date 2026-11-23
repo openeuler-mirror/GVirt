@@ -1532,7 +1532,7 @@ void XModel::ForwardAttnIndexerKpool(XRuntime &rt, uint32_t layer, XTensor &hidd
         maxKvLen = std::max(maxKvLen, rt._hostLens[i] + rt._cachedLensHost[i]);
     }
     bool isLong = maxKvLen > _c.indexTopK;
-    if (!isLong || !(_c.indexKpoolCompress && _c.indexKpool > 1)) {
+    if (!isLong || !_c.indexKpoolCompress || _c.indexKpool <= 1) {
         rt.dsaPerLayerTopk = nullptr;
         rt.PutTensor(q);
         rt.PutTensor(weights);
