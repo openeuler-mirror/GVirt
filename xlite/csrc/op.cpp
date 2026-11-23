@@ -2827,7 +2827,7 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                         XTensor &blockTables, XTensor &sync, uint32_t nHeads, uint32_t headDim,
                         uint32_t blockSize, uint32_t batch, uint32_t topK, uint8_t skipDenseTopk,
                         const XTensor &kScaleCache, uint32_t compressRatio, uint8_t kvSplit,
-                        uint8_t qTile, uint8_t packTail, uint32_t outStride, uint8_t reluQk)
+                        uint8_t qTile, uint8_t packTail, uint8_t reluQk, uint32_t outStride)
 {
     if (IsDummyRuntime(rt)) {
         return;

@@ -41,8 +41,8 @@ indexer_topk(
     topK,
     kv_split=0,  # 0 = serial query-tile mode, 1 = (tile, chunk) relay mode
     pack_tail=0,
-    out_stride=0,
     relu_qk=1,  # HYBRID_KDA packTail 契约, 见概述
+    out_stride=0,
 )
 ```
 

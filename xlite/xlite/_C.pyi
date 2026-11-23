@@ -3959,8 +3959,8 @@ def indexer_topk(
     kv_split: int = 0,
     q_tile: int = 0,
     pack_tail: int = 0,
-    out_stride: int = 0,
     relu_qk: int = 1,
+    out_stride: int = 0,
 ) -> None:
     """Fused indexer scores + top-k selection over cached keys.
 
@@ -4039,6 +4039,9 @@ def indexer_topk(
             ``compress_ratio`` token lanes and append the PKI causal tail.
             Requires ``compress_ratio >= 2``; the logical row width is
             ``top_k * compress_ratio + compress_ratio - 1``.
+        relu_qk (int): Apply per-head ReLU to the fused indexer scores before
+            top-k selection. ``1`` keeps the existing DSA behavior; the
+            HYBRID_KDA packTail path passes ``0``. Defaults to ``1``.
         out_stride (int): Output row pitch in int32 lanes when
             ``pack_tail=1``; it must equal the logical width rounded up to
             128 lanes, and ``topk_indices.shape[1]`` must match. ``0`` is

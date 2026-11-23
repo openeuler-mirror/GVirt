@@ -2944,7 +2944,7 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
                  uint32_t blockSize, uint32_t batch, uint32_t topK,
                  const std::optional<at::Tensor> &kScaleCache = std::nullopt,
                  uint32_t compressRatio = 1, uint8_t kvSplit = 0, uint8_t qTile = 0,
-                 uint8_t packTail = 0, uint32_t outStride = 0, uint8_t reluQk = 1)
+                 uint8_t packTail = 0, uint8_t reluQk = 1, uint32_t outStride = 0)
 {
     XTensor _q, _kCache, _weight, _topkIndices, _queryStartLoc, _lens, _cachedLens, _blockTables,
         _ks;
@@ -2995,7 +2995,7 @@ void IndexerTopK(XRuntime &rt, at::Tensor &q, at::Tensor &kCache, at::Tensor &we
     XliteOpIndexerTopK(rt, _q, _kCache, _weight, scores, lastTopk, seqPositions, _topkIndices,
                        _queryStartLoc, _lens, _cachedLens, _blockTables, sync, nHeads, headDim,
                        blockSize, batch, topK, 0, _ks, compressRatio, kvSplit, qTile, packTail,
-                       outStride, reluQk);
+                       reluQk, outStride);
     rt.Synchronize();
     rt.PutTensor(sync);
     rt.PutTensor(lastTopk);
@@ -4943,8 +4943,8 @@ TORCH_LIBRARY(xlite_sabi, m)
               torch::arg("kv_split") = static_cast<int64_t>(0),
               torch::arg("q_tile") = static_cast<int64_t>(0),
               torch::arg("pack_tail") = static_cast<int64_t>(0),
-              torch::arg("out_stride") = static_cast<int64_t>(0),
-              torch::arg("relu_qk") = static_cast<int64_t>(1)})
+              torch::arg("relu_qk") = static_cast<int64_t>(1),
+              torch::arg("out_stride") = static_cast<int64_t>(0)})
         .def("muls", muls_op,
              {torch::arg("rt"), torch::arg("input"), torch::arg("scale"), torch::arg("output"),
               torch::arg("calc_offset") = static_cast<int64_t>(0),
