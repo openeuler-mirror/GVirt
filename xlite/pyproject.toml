@@ -44,6 +44,7 @@ dev = [
     "torch-npu>=2.5.1",           # make sure (torch: build version <= runtime version)
     "mypy",
     "pre-commit",
+    "pytest",
 ]
 
 [project.urls]

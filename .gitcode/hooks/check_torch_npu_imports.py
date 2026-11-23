@@ -27,13 +27,21 @@ def check_file(path: Path) -> list[str]:
                 if alias.name.split(".")[0] == "torch_npu" and torch_npu_line is None:
                     torch_npu_line = node.lineno
                     uses_npu = True
-        elif isinstance(node, ast.ImportFrom) and node.module and node.module.split(".")[0] == "torch_npu":
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and node.module
+            and node.module.split(".")[0] == "torch_npu"
+        ):
             if torch_npu_line is None:
                 torch_npu_line = node.lineno
             uses_npu = True
-        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-            if node.value.id == "torch" and node.attr == "npu":
-                uses_npu = True
+        elif (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "torch"
+            and node.attr == "npu"
+        ):
+            uses_npu = True
 
     if not uses_npu:
         return []
@@ -42,12 +50,16 @@ def check_file(path: Path) -> list[str]:
     if torch_line is None:
         return [f"{path}:{torch_npu_line}: imports torch_npu without `import torch`"]
     if torch_npu_line < torch_line:
-        return [f"{path}: `import torch_npu` (line {torch_npu_line}) must follow `import torch` (line {torch_line})"]
+        return [
+            f"{path}: `import torch_npu` (line {torch_npu_line}) must follow `import torch` (line {torch_line})"
+        ]
     return []
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Check torch/torch_npu import order in test scripts")
+    parser = argparse.ArgumentParser(
+        description="Check torch/torch_npu import order in test scripts"
+    )
     parser.add_argument("files", nargs="*")
     args = parser.parse_args()
 
