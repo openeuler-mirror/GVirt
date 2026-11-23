@@ -37,7 +37,7 @@ inline uint64_t HcMeanUbNeed(uint32_t hcMult, uint32_t hidden, uint32_t dtypeSiz
 inline void RequireContiguous(const XTensor &t, const char *name)
 {
     size_t expect = 1;
-    for (int64_t i = (int64_t)t.shape.size() - 1; i >= 0; i--) {
+    for (int64_t i = static_cast<int64_t>(t.shape.size()) - 1; i >= 0; i--) {
         if (t.shape[i] > 1 && t.stride[i] != expect) {
             throw std::runtime_error(std::string(name) + ": non-contiguous descriptor " +
                                      t.ToStr());
@@ -51,7 +51,7 @@ inline void RequireContiguous(const XTensor &t, const char *name)
 inline void RequireDim0Pitched(const XTensor &t, const char *name)
 {
     size_t expect = 1;
-    for (int64_t i = (int64_t)t.shape.size() - 1; i >= 1; i--) {
+    for (int64_t i = static_cast<int64_t>(t.shape.size()) - 1; i >= 1; i--) {
         if (t.shape[i] > 1 && t.stride[i] != expect) {
             throw std::runtime_error(std::string(name) +
                                      ": non-dense inner dims (dim0-pitched cache contract)");
