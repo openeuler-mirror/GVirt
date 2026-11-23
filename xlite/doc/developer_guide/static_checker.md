@@ -3,7 +3,8 @@
 ## Overview
 
 All xlite lint checks run through [pre-commit](https://pre-commit.com/), driven by a single
-configuration file at `xlite/.pre-commit-config.yaml` (next to the other lint configs).
+configuration file at `xlite/.pre-commit-config.yaml` (next to the other lint configs; covered
+by the CI harness version digest via `.gitcode/ci.toml`).
 The same hooks run locally (on every commit) and in CI, so a PR that passes locally passes
 the bot. A symlink at the repo root (`.pre-commit-config.yaml` → `xlite/.pre-commit-config.yaml`)
 keeps the standard pre-commit entry points working from any checkout; edit the file under
@@ -23,35 +24,44 @@ keeps the standard pre-commit entry points working from any checkout; edit the f
 | `check-torch-npu-imports` | `xlite/tests/**` (enforces `import torch` before `import torch_npu`) | pre-commit |
 | `mypy` | `xlite/xlite/**` package | manual (CI) |
 | `clang-tidy` | `xlite/csrc/**` (skips `csrc/kernels/` and `csrc/ascend.h`; needs a build tree) | manual (CI) |
+| `binding-contract` | binding-layer probes (`tests/funcs/binding_contract.py`) against the most local built xlite — the checked tree's build if present, the installed copy otherwise; skipped when no module is importable (the CI device phase probes the freshly built PR package; the probe itself does no device work) | manual (CI) |
+| `check-definition-drift` | check-definition files, incl. any nested discovery-based config (no-op in one's own checkout) | pre-commit + manual |
 | `signoff-commit` | appends `Signed-off-by` when missing | prepare-commit-msg |
 
 Stages: `pre-commit` hooks run on every local commit; `manual` hooks run only in CI
-(`python xlite/tests/run_static_checks.py` or `pre-commit run --all-files --hook-stage manual`).
+(`python .gitcode/run_static_checks.py` or `pre-commit run --all-files --hook-stage manual`).
 
 ## Usage
 
-One-time setup (from any directory in the repo):
+One-time setup (from any directory in the repo). `--install-hooks` also builds every hook environment up front — the first commit then needs no network, and env-build failures (e.g. behind a proxy) surface here with a clear message instead of stalling the first commit:
 
 ```bash
-pre-commit install
+pre-commit install --install-hooks
 ```
 
 After that, hooks run automatically on `git commit`. Hooks that modify files
 (`ruff-check`, `ruff-format`, `markdownlint`) fail the commit and leave the fixes
 in the working tree — `git add` the touched files and commit again.
 
-Full pre-PR verification (CI parity, includes mypy and clang-tidy):
+Fast whole-tree check of the commit-time set (no CANN build tree, no mypy or clang-tidy; no node either with `SKIP=markdownlint`):
 
 ```bash
-python xlite/tests/run_static_checks.py            # or: pre-commit run --all-files --hook-stage manual
-python xlite/tests/run_static_checks.py --cpp-only
-python xlite/tests/run_static_checks.py --python-only
+pre-commit run --all-files                     # commit-stage hooks over the whole tree
+SKIP=markdownlint pre-commit run --all-files  # node-less environments
+```
+
+Full pre-PR verification (CI parity, includes mypy and clang-tidy). Runs from the repository root or from `xlite/` (whose `.gitcode` symlinks to `../.gitcode`):
+
+```bash
+python .gitcode/run_static_checks.py            # or: pre-commit run --all-files --hook-stage manual
+python .gitcode/run_static_checks.py --cpp-only
+python .gitcode/run_static_checks.py --python-only
 ```
 
 Run specific hooks on specific files:
 
 ```bash
-pre-commit run ruff-check --files xlite/tests/pr_ci_bot.py
+pre-commit run ruff-check --files .gitcode/run_ci_checks.py
 ```
 
 ## Fixing findings
@@ -82,7 +92,8 @@ via `per-file-ignores`); C++ stays at the `.clang-format` limit of 100 columns.
 
 ## CI
 
-`tests/pr_ci_bot.py` polls open GitCode PRs, runs `tests/run_static_checks.py` plus the
-vllm-ascend integration mypy check in an isolated worktree per PR, runs the accuracy tests
-when the static checks pass, and posts one concise comment per commit with per-check statuses
-and failure output only.
+.gitcode/pr_ci_bot.py polls open GitCode PRs and checks each in an isolated worktree with the
+CI harness from `.gitcode/` (the master copy by default; a PR's own copy only when its author
+is a `.gitcode` owner or an owner commented `/ci`). The harness runs the static checks, the
+vllm-ascend integration mypy check, and — when those pass — the accuracy tests, posting one
+concise comment per commit with per-check statuses and failure output only.

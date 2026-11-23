@@ -1,0 +1,43 @@
+# CI harness configuration, read from the trusted .gitcode copy by
+# pr_ci_bot.py and .gitcode/run_ci_checks.py. Paths are CI-runner-local;
+# this file is part of the harness content digest (a change re-checks
+# every open PR), except the digest_exclude entries below.
+
+[harness]
+# .gitcode files excluded from the harness content digest. Entries match
+# the path relative to .gitcode or the file name; everything else —
+# including files in nested directories — is included.
+#
+# CODEOWNERS: trust metadata, never check behavior.
+# pr_ci_bot.py: the entry script is deployed separately, so the running
+#   copy defines the behavior — the bot comment marker already records its
+#   hash (re-checks fire on deploy, not on master merges), and a codeowner
+#   can force a re-check with a `/rerun` comment when needed.
+digest_exclude = ["CODEOWNERS", "pr_ci_bot.py"]
+# Harness files outside .gitcode, relative to the repository root; symlinks
+# resolve to the real file. The pre-commit config defines the checks, so it
+# belongs to the harness version even though it lives with the dev configs
+# under xlite/.
+digest_include = ["xlite/.pre-commit-config.yaml"]
+
+[accuracy]
+# qwen3_0.6B weights location on the CI runner (.gitcode/run_accuracy.sh
+# fallback default; the harness exports XLITE_ACCURACY_CKPT from here).
+weights = "/mnt/nvme0n1/models/Qwen3-0.6B"
+
+[integration]
+# Local checkouts used by the vllm-ascend bridge mypy check.
+vllm_ascend_dir = "/workspaces/code/opencode/vllm-ascend"
+vllm_dir = "/workspaces/code/opencode/vllm"
+
+[timeouts]
+# Seconds, per check phase.
+static = 1800
+mypy = 1800
+build = 1800
+accuracy = 1200
+
+[tidy]
+# Parallel clang-tidy analysis processes per static run. The hook's own
+# default is min(16, cpus); the CI machines have the RAM to run far more.
+jobs = 128

@@ -38,10 +38,11 @@ inline uint64_t SoftmaxPingPongUbNeed(uint32_t len, uint32_t topK)
     const uint32_t v = VECTOR_MAX_BYTESIZE;
     len = len > topK ? len : topK;
     uint64_t need = ROUND_UP((uint64_t)len * 2, v) * 4 + ROUND_UP((uint64_t)len * 4, v) +
-                    (((uint64_t)len * 4 + v - 1) / v / 2) * v + (uint64_t)v * 5;
+                    ((static_cast<uint64_t>(len) * 4 + v - 1) / v / 2) * v +
+                    static_cast<uint64_t>(v) * 5;
     if (topK != 0) {
         need += ROUND_UP((uint64_t)topK * 4, v) * 4 +  // indices0/1 + fp32 + currIndices
-                ROUND_UP((uint64_t)topK * 2, v) + (uint64_t)v * 5 +
+                ROUND_UP((uint64_t)topK * 2, v) + static_cast<uint64_t>(v) * 5 +
                 ((topK + SOFTMAX_MASK_CHUNK - 1) / SOFTMAX_MASK_CHUNK) * SOFTMAX_MASK_CHUNK / 8 * 2;
     }
     return need;
@@ -1299,6 +1300,15 @@ void XliteOpCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &compressK
                  compressKCache.stride[0], dense ? 1u : 0u, rt._attnZeroBuffer.ptr);
 }
 
+// 0 without top-k; the explicit topkStride when given, else the logical topK width.
+static uint32_t EffectiveTopkStride(uint32_t topK, uint32_t topkStride)
+{
+    if (topK == 0) {
+        return 0;
+    }
+    return topkStride != 0 ? topkStride : topK;
+}
+
 // Unified MLA decode kernel entry. dense=false walks the paged KV cache via
 // blockTables (with optional top-k token selection); dense=true reads a
 // per-batch contiguous KV cache (gathered by gather_sparse_kv_cache), where
@@ -1313,7 +1323,7 @@ void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, 
     if (IsDummyRuntime(rt)) {
         return;
     }
-    uint32_t effectiveTopkStride = topK == 0 ? 0 : (topkStride != 0 ? topkStride : topK);
+    uint32_t effectiveTopkStride = EffectiveTopkStride(topK, topkStride);
     if (!dense || (topK != 0 && topkIndices.ptr != nullptr)) {
         if (topK != 0 && maxSeqLen > MAX_SOFTMAX_PINGPONG_LEN) {
             throw std::runtime_error(
@@ -1387,7 +1397,7 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
                                  std::to_string(tileSizeOfCachedKV) + " > " +
                                  std::to_string(MAX_SOFTMAX_PINGPONG_LEN));
     }
-    uint32_t effectiveTopkStride = topK == 0 ? 0 : (topkStride != 0 ? topkStride : topK);
+    uint32_t effectiveTopkStride = EffectiveTopkStride(topK, topkStride);
     if (effectiveTopkStride < topK) {
         throw std::runtime_error(std::string(__func__) +
                                  ": topkStride must be >= topK (logical top-k width)");

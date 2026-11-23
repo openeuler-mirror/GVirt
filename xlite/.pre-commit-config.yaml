@@ -4,7 +4,7 @@ default_install_hook_types:
 
 default_stages:
   - pre-commit # Run locally
-  - manual # Run in CI (python xlite/tests/run_static_checks.py)
+  - manual # Run in CI (python .gitcode/run_static_checks.py)
 
 exclude: '^(\.agents|\.claude)/.*'
 
@@ -58,19 +58,19 @@ repos:
     hooks:
       - id: check-cpp-copyright
         name: check-cpp-copyright
-        entry: python3 xlite/tests/hooks/check_cpp_headers.py --check-copyright
+        entry: python3 .gitcode/hooks/check_cpp_headers.py --check-copyright
         language: system
         files: ^xlite/csrc/.+\.(c|cc|cpp|h|hpp)$
 
       - id: check-cpp-header-guard
         name: check-cpp-header-guard
-        entry: python3 xlite/tests/hooks/check_cpp_headers.py --check-header-guard
+        entry: python3 .gitcode/hooks/check_cpp_headers.py --check-header-guard
         language: system
         files: ^xlite/csrc/.+\.h$
 
       - id: check-torch-npu-imports
         name: check-torch-npu-imports
-        entry: python3 xlite/tests/hooks/check_torch_npu_imports.py
+        entry: python3 .gitcode/hooks/check_torch_npu_imports.py
         language: system
         files: ^xlite/tests/.+\.py$
 
@@ -84,11 +84,31 @@ repos:
       # clang-tidy comes from the hook env; keep in sync with the mirrors-clang-format rev.
       - id: clang-tidy
         name: clang-tidy
-        entry: python3 xlite/tests/hooks/run_clang_tidy.py
+        entry: python3 .gitcode/hooks/run_clang_tidy.py
         language: python
         require_serial: true # one process: it ensures the build tree before analyzing any file
         additional_dependencies: ['clang-tidy==22.1.8']
         files: ^xlite/csrc/.+\.(cpp|cc|c|h|hpp)$
+        stages: [manual]
+
+      # Definitions are frozen to this hook's own tree: with the CI's derived
+      # config it runs from the trusted copy and fails when the checked tree's
+      # rule files differ; in a developer's own checkout it is a no-op.
+      - id: check-definition-drift
+        name: check-definition-drift
+        entry: python3 .gitcode/hooks/check_definition_drift.py
+        language: system
+        pass_filenames: false
+
+      # Binding-layer probes against the most local built xlite (skipped
+      # when none is importable); the CI device phase runs the same probe
+      # against the freshly built PR package.
+      - id: binding-contract
+        name: binding-contract
+        entry: python3 .gitcode/hooks/run_binding_contract.py
+        language: system
+        pass_filenames: false
+        files: ^xlite/(csrc/_C\.cpp|csrc/runtime\.h|csrc/model\.h|xlite/_C\.(py|pyi)|tests/funcs/binding_contract\.py)$
         stages: [manual]
 
       - id: signoff-commit

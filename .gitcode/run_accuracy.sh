@@ -3,6 +3,9 @@
 export FORWARD_BACKEND=xlite
 export HCCL_DETERMINISTIC=true
 export LCCL_DETERMINISTIC=true
+# Weights location on the CI runner; the harness exports it from
+# .gitcode/ci.toml ([accuracy] weights). Overridable for local runs.
+CKPT_PATH="${XLITE_ACCURACY_CKPT:-/mnt/nvme0n1/models/Qwen3-0.6B}"
 
 function run_qwen3_0.6B() {
     tp=$1
@@ -28,9 +31,9 @@ function run_qwen3_0.6B() {
     }' > tests/test_config.json
 
     if [ ${tp} -gt 1 ]; then
-        torchrun --nproc_per_node=${tp} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3 --ckpt-path /mnt/nvme0n1/models/Qwen3-0.6B/ --config tests/test_config.json --input-file tests/${file}.json --max-new-tokens ${max_tokens} --temperature ${temperature} --no-prefix | tee tests/${file}.log
+        torchrun --nproc_per_node=${tp} --nnodes=1 --node_rank=0 --master_addr=127.0.0.1 tests/generate.py --model qwen3 --ckpt-path ${CKPT_PATH}/ --config tests/test_config.json --input-file tests/${file}.json --max-new-tokens ${max_tokens} --temperature ${temperature} --no-prefix | tee tests/${file}.log
     else
-        python tests/generate.py --model qwen3 --ckpt-path /mnt/nvme0n1/models/Qwen3-0.6B/ --config tests/test_config.json --input-file tests/${file}.json --max-new-tokens ${max_tokens} --temperature ${temperature} --no-prefix | tee tests/${file}.log
+        python tests/generate.py --model qwen3 --ckpt-path ${CKPT_PATH}/ --config tests/test_config.json --input-file tests/${file}.json --max-new-tokens ${max_tokens} --temperature ${temperature} --no-prefix | tee tests/${file}.log
     fi
 }
 

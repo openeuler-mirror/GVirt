@@ -1,0 +1,8 @@
+# Owners of the CI harness, parsed by pr_ci_bot.py from the master copy
+# only — a PR cannot grant its own harness trust. An owner's `/ci` comment
+# lets a PR be checked with its own .gitcode copy (as does PR authorship by
+# an owner); an owner's `/ci all` comment additionally runs the slow
+# integration mypy check; an owner's or the PR author's `/rerun` comment
+# forces one re-check even when the existing CI comment is fresh. Not part
+# of the harness content digest.
+/.gitcode  @changdawei1 @fusijie @hao-mingzhe @lulina1 @uuzWY @wangxiaoran_8936

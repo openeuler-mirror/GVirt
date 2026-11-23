@@ -82,7 +82,7 @@ XLITE_DEBUG_ON=all cmake -B build && cmake --build build -j "${MAX_JOBS:-128}"
 ## 功能验证
 
 ```bash
-bash tests/run_accuracy.sh
+bash .gitcode/run_accuracy.sh
 ```
 
 ## 张量布局语义
@@ -141,8 +141,9 @@ PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu/ python setup.py bdist_
 代码检查基于 [pre-commit](https://pre-commit.com/)（配置见 `xlite/.pre-commit-config.yaml`，仓库根目录的 `.pre-commit-config.yaml` 为其符号链接），覆盖 Python、C/C++、Markdown 与拼写检查：
 
 ```bash
-pre-commit install                                # 一次性安装，之后每次 commit 自动检查
-python tests/run_static_checks.py                 # 提交 PR 前运行全部检查（与 CI 一致）
+pre-commit install --install-hooks                # 一次性安装并预构建全部 hook 环境，之后每次 commit 自动检查
+pre-commit run --all-files                        # 提交态全树快检（无需 CANN 构建树/mypy/clang-tidy；无 node 环境时前置 SKIP=markdownlint）
+python .gitcode/run_static_checks.py              # 提交 PR 前运行全部检查（与 CI 一致）
 ```
 
 详见 [静态检查说明](static_checker.md)。

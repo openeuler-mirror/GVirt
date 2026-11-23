@@ -18,3 +18,4 @@ pyyaml>=6.0
 torch-npu>=2.5.1
 mypy
 pre-commit
+pytest
