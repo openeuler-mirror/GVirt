@@ -33,6 +33,16 @@ inline uint64_t HcMeanUbNeed(uint32_t hcMult, uint32_t hidden, uint32_t dtypeSiz
            ROUND_UP((uint64_t)hidden * 4, UB_BUF_ALIGN_SIZE);
 }
 
+// Host mirror of the engram_gate kernel UB layout: 12 bf16 row buffers
+// (h/key/val/res/out ping-pong + qw/kw), 3 fp32 buffers (qwF + calcH/calcKey
+// scratch), and 4 scalar landing slots (rstdH/K/mag/gate).
+inline uint64_t EngramGateUbNeed(uint32_t dim, uint32_t dtypeSize)
+{
+    return ROUND_UP((uint64_t)dim * dtypeSize, UB_BUF_ALIGN_SIZE) * 12 +
+           ROUND_UP((uint64_t)dim * 4, UB_BUF_ALIGN_SIZE) * 3 +
+           ROUND_UP((uint64_t)4, UB_BUF_ALIGN_SIZE) * 4;
+}
+
 inline uint64_t SoftmaxPingPongUbNeed(uint32_t len, uint32_t topK)
 {
     const uint32_t v = VECTOR_MAX_BYTESIZE;
@@ -4246,4 +4256,72 @@ void XliteOpKpoolTailCompressAndSpill(XRuntime &rt, XTensor &tailCache, XTensor 
     launchSpill(PickMinBlockNum(rt.aivNum, numReqs * cap), rt.stream, tailCache.ptr, k.ptr,
                 gate.ptr, queryStartLoc.ptr, lens.ptr, tailBlockTable.ptr, positions.ptr, numReqs,
                 numTokens, headDim, cap, tailBlocks, k.shape[1], gate.shape[1], tailStride);
+}
+
+void XliteOpEngramGate(XRuntime &rt, XTensor &hidden, XTensor &hiddenResidual, XTensor &kv,
+                       XTensor &qWeight, XTensor &kWeight, XTensor &mask, XTensor &out,
+                       uint32_t hcMult, uint32_t dim, float eps)
+{
+    if (IsDummyRuntime(rt) || hidden.numel == 0) {
+        return;
+    }
+    // hidden/out: [T, HC, DIM] bf16; kv: [T, (HC+1)*DIM] bf16; qw/kw: [HC, DIM] bf16;
+    // mask: [T] int32. hiddenResidual: same shape as hidden, or empty (ptr==nullptr)
+    // to alias hidden (unrotated path). All bf16 except mask — V4.1 is a bf16 w8a8 model.
+    if (hidden.shape.size() != 3 || out.shape.size() != 3 || kv.shape.size() != 2) {
+        throw std::runtime_error(std::string(__func__) + ": hidden/out must be 3D, kv 2D");
+    }
+    if (hidden.shape[1] != hcMult || hidden.shape[2] != dim) {
+        throw std::runtime_error(std::string(__func__) + ": hidden shape mismatch with hcMult/dim");
+    }
+    if (hidden.shape[0] != out.shape[0] || hidden.shape[1] != out.shape[1] ||
+        hidden.shape[2] != out.shape[2]) {
+        throw std::runtime_error(std::string(__func__) + ": hidden/out shape mismatch");
+    }
+    if (kv.shape[0] != hidden.shape[0] || kv.shape[1] != (hcMult + 1) * dim) {
+        throw std::runtime_error(std::string(__func__) + ": kv shape mismatch");
+    }
+    if (qWeight.shape.size() != 2 || qWeight.shape[0] != hcMult || qWeight.shape[1] != dim ||
+        kWeight.shape.size() != 2 || kWeight.shape[0] != hcMult || kWeight.shape[1] != dim) {
+        throw std::runtime_error(std::string(__func__) + ": q/k weight must be [hcMult, dim]");
+    }
+    if (mask.shape.size() != 1 || mask.shape[0] != hidden.shape[0]) {
+        throw std::runtime_error(std::string(__func__) + ": mask must be [numTokens]");
+    }
+    if (mask.dtype != INT32) {
+        throw std::runtime_error(std::string(__func__) + ": mask must be INT32");
+    }
+    // When provided, hiddenResidual must match hidden's shape/dtype (residual-stream basis
+    // for the inject add). An empty XTensor (ptr==nullptr) aliases hidden.
+    const bool hasResid = hiddenResidual.ptr != nullptr;
+    if (hasResid) {
+        if (hiddenResidual.shape != hidden.shape || hiddenResidual.dtype != hidden.dtype) {
+            throw std::runtime_error(std::string(__func__) +
+                                     ": hiddenResidual must match hidden shape/dtype");
+        }
+    }
+    // The kernel converts in 64-element vector repeats (VECTOR_MAX_NUM_OF_FP32) with
+    // no tail handling and loads each DIM row whole into UB. Mirror the kernel's UB
+    // budget so a non-aligned or oversized dim is diagnosed here instead of corrupting
+    // UB (same pattern as HcMeanCollapse).
+    if (dim % 64 != 0) {
+        throw std::runtime_error(std::string(__func__) + ": dim must be a multiple of 64, got " +
+                                 std::to_string(dim));
+    }
+    if (EngramGateUbNeed(dim, 2) + 512 > UB_SIZE) {
+        throw std::runtime_error(std::string(__func__) + ": exceeds kernel UB budget");
+    }
+    if (!EachXDtype(BF16, hidden, kv, qWeight, kWeight, out)) {
+        std::string err_str = DBG_PREFIX + XT_STR(hidden) + XT_STR(kv) + XT_STR(qWeight) +
+                              XT_STR(kWeight) + XT_STR(out);
+        throw std::runtime_error(err_str + "not supported!");
+    }
+    const uint32_t numTokens = static_cast<uint32_t>(hidden.shape[0]);
+    // Work = numTokens * hcMult (one block per (token, branch) pair). hiddenResidual.ptr
+    // is forwarded as-is; the kernel treats nullptr as "alias hidden" (no extra GM load).
+    const uint32_t totalWork = numTokens * hcMult;
+    const uint32_t blockNum = PickMinBlockNum(rt.aivNum, totalWork);
+    aclrtlaunch_engram_gate_bfloat16_t(blockNum, rt.stream, hidden.ptr,
+                                       hasResid ? hiddenResidual.ptr : nullptr, kv.ptr, qWeight.ptr,
+                                       kWeight.ptr, mask.ptr, out.ptr, numTokens, hcMult, dim, eps);
 }

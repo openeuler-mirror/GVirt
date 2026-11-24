@@ -4935,3 +4935,48 @@ def kpool_tail_compress_and_spill(
     multiple of kpool; headDim <= 256 and kpool <= 8 (kernel budget). The binding synchronizes.
     """
     ...
+
+def engram_gate(
+    rt: Runtime,
+    hidden: torch.Tensor,
+    kv: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    mask: torch.Tensor,
+    out: torch.Tensor,
+    hc_mult: int,
+    dim: int,
+    eps: float,
+    hidden_residual: torch.Tensor = ...,
+) -> None:
+    """DeepSeek-V4.1 engram fused gate + residual inject (AIV), post-wkv.
+
+    Per (token, hc-branch)::
+
+        rstd = rsqrt(mean(h^2)+eps) * rsqrt(mean(key^2)+eps)
+        dot  = sum(h * (qw*kw) * key) * rstd * dim^-0.5
+        gate = sigmoid(copysign(sqrt(max(|dot|, 1e-6)), dot))
+        gate = mask ? gate : 0
+        out  = hidden_residual + gate * value
+
+    ``hidden`` is the gate-math basis; ``hidden_residual`` is the residual-stream basis
+    for the inject add. For rotated checkpoints (value_projection_rotated), the caller
+    passes the un-rotated hidden as ``hidden`` and the rotated residual as
+    ``hidden_residual``; for unrotated checkpoints, ``hidden_residual`` is omitted
+    (defaults to aliasing ``hidden``).
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        hidden (torch.Tensor): Gate-math hidden ``[T, hc_mult, dim]`` bf16.
+        kv (torch.Tensor): post-wkv ``[T, (hc_mult+1)*dim]`` (hc_mult*dim key ++ dim value).
+        q_weight (torch.Tensor): ``[hc_mult, dim]`` bf16.
+        k_weight (torch.Tensor): ``[hc_mult, dim]`` bf16.
+        mask (torch.Tensor): ``[T]`` int32 token eligibility (nonzero = active).
+        out (torch.Tensor): ``[T, hc_mult, dim]`` bf16 output.
+        hc_mult (int): Hyper-connection multiplier.
+        dim (int): Hidden dimension.
+        eps (float): RMSNorm epsilon.
+        hidden_residual (torch.Tensor): residual-stream-basis hidden ``[T, hc_mult, dim]``
+            bf16, or undefined (aliases ``hidden``).
+    """
+    ...
