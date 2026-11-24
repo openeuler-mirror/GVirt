@@ -63,7 +63,7 @@ dtype 记法:仅 BF16 单路径(`csrc/kernels/mla_cache_c8_bfloat16_t.cpp`),`Dty
 | 变量 | shape(每套) | dtype | 乒乓套数 | 单套大小 | 占用(B) |
 |---|---|---|---|---|---|
 | `inputs` | `(latentDim,)`=(512,) | Dtype | 2(事件0/1) | `ROUND_UP(latentDim*sizeof(Dtype),256)` | 2048 |
-| `packed` | 656 B 混合行(INT8 latent|BF16 PE|FP32 scale) | int8 视图 | 2(事件0/1) | `ROUND_UP(cacheBytes,256)` | 1536 |
+| `packed` | 656 B 混合行(INT8 latent\|BF16 PE\|FP32 scale) | int8 视图 | 2(事件0/1) | `ROUND_UP(cacheBytes,256)` | 1536 |
 | `xBuf` | `(latentDim,)` | float | 2 | `ROUND_UP(latentDim*sizeof(float),32)` | 4096 |
 | `tmpBuf` | `(groupSize,)`=(128,) | float | 2 | `ROUND_UP(groupSize*sizeof(float),32)` | 1024 |
 | `amaxBufs` | 1 个 256B repeat | float | 2 | `VECTOR_REPEAT_BYTESIZE` | 512 |

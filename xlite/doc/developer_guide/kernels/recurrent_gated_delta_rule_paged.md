@@ -59,9 +59,9 @@ state 与 g 可独立为 FP32(由 `stateFp32` / `gateFp32` launch 标志选择);
 
 - **decode**:state tile 双缓冲乒乓(`EVENT_ID3/4`):计算第 `t` 个 tile 前 `LoadStateIssue` 预取第 `t+1` 块(`LoadStateFinish` 等待并按需转 FP32),当前块计算完立即 `StoreStateIssue` 异步写回 GM——写回入队后以同号 `set_flag(PIPE_MTE3, PIPE_MTE2)` 报告缓冲空闲,下一次 `LoadStateIssue` 以 `wait_flag(PIPE_MTE3, PIPE_MTE2)` 等 DMA 写完(循环前对两个 eid 预置该方向 `set_flag`,循环后两条 `wait_flag` 等末次写回;`FinishStore` 的 `EVENT_ID0` 排空只用于 `StoreVector`/`StoreState` 串行路径,不参与此乒乓)。
 - **prefill**:
-  - **门控批量预取**(`LoadGates`):每 `gateChunk = MIN(256, GATE_CAP/Hv)` 个 token 的 `exp(g)` 与 beta 一次成批搬入 UB 行 `decayRow`/`betaRow`(FP32,元素数 `n*Hv <= GATE_CAP`),避免逐 token 标量读 GM;
-  - **q/k/v 乒乓预取**(`PrefetchIssue`/`PrefetchFinish`):FP16/BF16 经 `qStage/kStage/vStage` 中转,计算 token `i` 时预取 `i+1` 的三组输入,GM 加载与 V 计算重叠;每 token 的 64 行输出经 `StoreVector` 逐 token 写回;
-  - state 单份驻留(`stateF`),仅段末一次提交。
+    - **门控批量预取**(`LoadGates`):每 `gateChunk = MIN(256, GATE_CAP/Hv)` 个 token 的 `exp(g)` 与 beta 一次成批搬入 UB 行 `decayRow`/`betaRow`(FP32,元素数 `n*Hv <= GATE_CAP`),避免逐 token 标量读 GM;
+    - **q/k/v 乒乓预取**(`PrefetchIssue`/`PrefetchFinish`):FP16/BF16 经 `qStage/kStage/vStage` 中转,计算 token `i` 时预取 `i+1` 的三组输入,GM 加载与 V 计算重叠;每 token 的 64 行输出经 `StoreVector` 逐 token 写回;
+    - state 单份驻留(`stateF`),仅段末一次提交。
 
 ### 核心向量步骤(单 token,`ProcessHead` / `ProcessPrefill` 内联)
 

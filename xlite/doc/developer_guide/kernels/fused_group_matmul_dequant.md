@@ -6,7 +6,7 @@
 
 模型侧派发入口为 `XliteOpGroupMatmulDeQuant`（`csrc/model.cpp` ForwardMoE INT8 路径，w13/w2 两处调用）：deqScales 非空且收益函数 `FusedGroupMatmulDequantBeneficial(m, n, k)`（`csrc/auto_tuner.h`，与 dense 侧 `FusedMatmulDeQuantBeneficial` 统一管理）判定有收益时走本算子，否则回退串行 `XliteOpGroupMatmul + XliteOpDeQuant` 两 launch 链（串行链应用动态 token 收缩 `num`，融合核消费全部计数行）。INT8 输入有两种互斥来源：量化前移（`hoistQuant`，INT8 且 hiddenSize%32==0 时默认开启，`XLITE_DISABLE_MOE_QUANT_HOIST=1` 关闭）时 `expertsSorted` 在 dispatch permutation 中已被量化为 INT8（per-token scale 在 `expertsScale`）；未前移时先 `XliteOpQuantDyn` 再进派发入口。w2 输入 `h2` 由 SiluAndMul 现算、恒为 BF16，不受前移影响，恒走 QuantDyn 路径。收益函数 `FusedGroupMatmulDequantBeneficial(m, n, k)` 现行判据为 **`m >= 4096 && k >= 1024 && n >= 2048`**。标定口径沿用 DevSpd+3us（SerDev/(FusDev+3us)，融合侧计一次 launch 气泡），依据 26.11.17 gmd_single 全网格——当前两段融合核实现下的全 5-g 重测：g∈{1,4,8,16,32} × m 10 档（1~16384）× (n,k)∈{1024,2048,4096,6144}² × native/vllm 共 1600 配置，correctness 全过，全网格 Dev+3us geomean 随 g 单调（g=1 0.926x → g=32 0.999x）。m≥4096∧k≥1024 放行区 geomean 1.058x（g=1）→ 1.134x（g=32；native 1.144x），封禁区（m<4096 或 k<1024）0.81~0.88x（融合亏损、保持串行）；放行区内残余回退点集中在 n=1024 小形状（最差 0.925x、4-9 个/g），`n >= 2048` 下限将其排除在放行区外；5-g（g=1..32）放行区审计均成立，g 不参与判据。生产命中面（GLM-5.2 w13 (4096,6144)/w2 (6144,2048)、DS-V4-Flash w13 (4096,4096)/w2 (4096,2048)）均满足三下限。e2e 佐证（GLM-5.2-w8a8 8 卡 A/B，13 配置）：串行锚点档（m<4096）ratio 0.994~1.000 零回退，融合档全胜（长 prefill +0.35~+1.15%，短序列大 batch bs16/32@512 +3.0~+3.1%）；e2e 命中面全部 n≥4096，n≥2048 下限不改变其派发。m 取 host 侧期望路由行数（均衡路由均值 tokens×top-k/EP，由模型侧 `expectedRows` 传入；精确值 sum(counts[start:end)) 仅设备侧可知，缓冲容量 x.shape[0] 为最坏情形不可用作 m）。
 
-```
+```text
 AIC b:         per-expert matmul walk (输入已量化, 进入即开始; 与独立 group_matmul 相同) → out (FP16 视图)
                --C2V flag 8 per tile (挂 PIPE_FIX, 骑 CopyToGm 之后)-->
 AIV 2b/2b+1:   dequant 镜像 walk (FP16 → BF16 原位, 乘 outScale)
@@ -18,7 +18,7 @@ Python 入口 `fused_group_matmul_dequant(rt, in_, weights, scales, counts, star
 
 | 参数 | 方向 | Shape | Dtype | 说明 |
 |---|---|---|---|---|
-| in_ (x_quant) | 输入 | `[m, in_dim]` | int8 | 已量化的激活（`quant_dynamic` 或 dispatch 前移产出），行按 expert 分段（`counts` 前缀） |
+| in_(x_quant) | 输入 | `[m, in_dim]` | int8 | 已量化的激活（`quant_dynamic` 或 dispatch 前移产出），行按 expert 分段（`counts` 前缀） |
 | weights | 输入 | 每 expert `[out_dim, in_dim]`（或转置/NZ） | int8 | per-expert 权重指针数组 |
 | scales | 输入 | 每 expert `[2*out_dim]` | float32 | FixPipe 反量化 scale（FP32 按 uint64 交错存储，同 group_matmul） |
 | counts | 输入 | `[num_experts]` | int32 | per-expert 行数（kernel 读 uint32），`sum(counts[start:end))` 须等于 m |

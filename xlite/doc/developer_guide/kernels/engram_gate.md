@@ -6,7 +6,7 @@ DeepSeek-V4.1 engram post-wkv 融合 gate + 残差 inject 算子(核内模板 `e
 
 核心数学(每 token `t`、每 hc branch `b`,共 `HC` 个 branch):
 
-```
+```text
 rstd   = rsqrt(Σh²/DIM+eps) * rsqrt(Σkey²/DIM+eps)
 dot    = Σ(h * (qw*kw) * key) * rstd * DIM^-0.5
 mag    = sqrt(max(|dot|, 1e-6))
@@ -65,7 +65,7 @@ engram_gate_<dtype>(GM_ADDR hidden, GM_ADDR hiddenResidual, GM_ADDR kv, GM_ADDR 
 
 **kv 的 interleaved 布局**(与 hidden 的 `[T, HC, DIM]` 不同):
 
-```
+```text
 kv[t] = key[t,0:DIM] | key[t,1:DIM] | ... | key[t,HC-1:DIM] | value[t,:DIM]
         |<-------------- HC*DIM ------------>|  |<------ DIM ------>|
 ```
@@ -94,7 +94,7 @@ kv[t] = key[t,0:DIM] | key[t,1:DIM] | ... | key[t,HC-1:DIM] | value[t,:DIM]
 
 **标量量**(单 fp32,从全 DIM 向量 reduce 出,每个 (t,b) 产生一个):
 
-```
+```text
 hh=Σh²  kk=Σkey²  hk=Σ(h·(qw·kw)·key)  rstdH rstdK rstd dot mag gate
 ```
 
