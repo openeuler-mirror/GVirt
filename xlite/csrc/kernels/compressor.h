@@ -48,7 +48,12 @@ __aicore__ inline uint32_t state_block_id(__gm__ const uint32_t *stateBlockTable
                                           uint32_t maxStateBlocks, uint32_t stateBlockSize,
                                           uint32_t b, uint32_t slot)
 {
-    return stateBlockTable[(uint64_t)b * maxStateBlocks + slot / stateBlockSize];
+    // maxStateBlocks==1 (ring state, V4.1): single page per request, force col=0;
+    // slot/stateBlockSize would OOB into adjacent requests' pages. maxStateBlocks>1
+    // (paged, V4): keep the multi-block column lookup. Row wrap (slot%stateBlockSize)
+    // is the caller's rowInBlock.
+    uint32_t col = (maxStateBlocks == 1) ? 0u : (slot / stateBlockSize);
+    return stateBlockTable[(uint64_t)b * maxStateBlocks + col];
 }
 
 __aicore__ inline __gm__ float *state_row_addr(__gm__ float *state,
