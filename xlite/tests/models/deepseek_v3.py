@@ -27,6 +27,7 @@ from tests.models.weight_utils import (
     hf_model_weights_iterator,
     load_tensor_parallel_weights,
     logger,
+    matrix_nd2nz,
 )
 
 debug = False
@@ -255,10 +256,9 @@ def _pack_w4a8_weight_for_xlite(weight_packed: torch.Tensor) -> torch.Tensor:
     int8 packed param is N-first [N//2, K]; transpose to [K, N//2] then unpack to
     [K, N] for matmul(x[m,k], W[k,n]).
     """
-    ACL_FORMAT_FRACTAL_NZ = 29
     # [N//2, K] -> [K, N] int4 values (int32 container, signed [-8, 7])
     W_int4 = _unpack_int4_weight_i32(weight_packed.t().contiguous())  # [K, N] int32
-    W_nz = torch_npu.npu_format_cast(W_int4.to("npu").to(torch.int32).contiguous(), ACL_FORMAT_FRACTAL_NZ)
+    W_nz = matrix_nd2nz(W_int4.to("npu").to(torch.int32).contiguous())
     return torch_npu.npu_convert_weight_to_int4pack(W_nz)
 
 
