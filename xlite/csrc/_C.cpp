@@ -2601,6 +2601,18 @@ void CastUp(XRuntime &rt, at::Tensor &in, at::Tensor &out)
     rt.PutTensor(inScale);
 }
 
+void CastDown(XRuntime &rt, at::Tensor &in, at::Tensor &out)
+{
+    XTensor _in, _out;
+    XTensor &outScale = rt.GetTensor({1}, XDtypeOf(in), DBG_LOC);
+
+    InitXTensor(_in, in, DBG_LOC);
+    InitXTensor(_out, out, DBG_LOC);
+    XliteOpCastDown(rt, _in, _out, outScale);
+    rt.Synchronize();
+    rt.PutTensor(outScale);
+}
+
 void Permutation(XRuntime &rt, at::Tensor &in, at::Tensor &routing, uint32_t start, uint32_t end,
                  at::Tensor &out, at::Tensor &unpIdx, at::Tensor &counts,
                  std::optional<at::Tensor> scaleIn, std::optional<at::Tensor> scaleOut)
@@ -4957,6 +4969,7 @@ TORCH_LIBRARY(xlite_sabi, m)
               torch::arg("outIndices"), torch::arg("query_lens"), torch::arg("cached_lens"),
               torch::arg("k")})
         .def("cast_up", op<&CastUp>, {torch::arg("rt"), torch::arg("in_"), torch::arg("out")})
+        .def("cast_down", op<&CastDown>, {torch::arg("rt"), torch::arg("in_"), torch::arg("out")})
         .def("permutation", op<&Permutation>,
              {torch::arg("rt"), torch::arg("in_"), torch::arg("routing"), torch::arg("start"),
               torch::arg("end"), torch::arg("out"), torch::arg("unp_idx"), torch::arg("counts"),

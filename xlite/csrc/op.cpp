@@ -980,7 +980,15 @@ void XliteOpSiluAndMul(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &n
 
 void XliteOpCastDown(XRuntime &rt, XTensor &in, XTensor &out, XTensor &outScale)
 {
-    throw std::runtime_error(std::string(__func__) + ": TODO");
+    if (IsDummyRuntime(rt)) {
+        return;
+    }
+    if (in.dtype == FP32 && out.dtype == BF16) {
+        aclrtlaunch_cast_float_bfloat16_t(rt.aivNum, rt.stream, in.ptr, out.ptr, in.numel);
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(out) + XT_STR(outScale);
+        throw std::runtime_error(err_str + "not supported!");
+    }
 }
 
 void XliteOpCastUp(XRuntime &rt, XTensor &in, XTensor &inScale, XTensor &out)

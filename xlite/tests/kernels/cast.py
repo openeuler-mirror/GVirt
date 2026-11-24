@@ -14,7 +14,7 @@ import sys
 import torch
 import torch_npu  # noqa: F401
 
-from xlite._C import Runtime, cast_up, matmul
+from xlite._C import Runtime, cast_down, cast_up, matmul
 
 rt = Runtime(0, size=500)
 torch.npu.set_device(0)
@@ -69,5 +69,32 @@ print(
     f"{'PASS' if bad3 == 0 and close else 'FAIL'}"
 )
 ok &= bad3 == 0 and close
+
+# S4-cast_down-tailoverread: fp32->bf16 cast. vconv over-reads UB past the GM->UB load;
+# with tile_size already 16-aligned the trigger is length mod 16 in (0,8], where the
+# block-aligned write (ceil-to-16 bf16) reaches past the load (ceil-to-8 fp32) and flushes
+# the garbage tail to GM. Corruption lands only in the padding lanes past `length`, so the
+# kernel sees `length` via a narrowed view while the backing storage spans the rounded
+# footprint, and the full footprint (not just [0,length)) is compared; two-input alternation
+# ensures stale UB differs from the expected tail. Reverting cast.h's load-count fix
+# re-corrupts the trigger lengths (8/20/24/40962/40966) but leaves the safe ones (16/12/32/40960).
+bad4 = 0
+for length in (8, 20, 24, 40962, 40966, 16, 12, 32, 40960):
+    footprint = ((length + 15) // 16) * 16
+    a = torch.randn(footprint, dtype=torch.float, device="npu:0")
+    b = torch.randn(footprint, dtype=torch.float, device="npu:0") * -1.5
+    ya = torch.empty(footprint, dtype=torch.bfloat16, device="npu:0")
+    yb = torch.empty(footprint, dtype=torch.bfloat16, device="npu:0")
+    torch.npu.synchronize()
+    av, bv = a.narrow(0, 0, length), b.narrow(0, 0, length)
+    yav, ybv = ya.narrow(0, 0, length), yb.narrow(0, 0, length)
+    for _ in range(20):
+        cast_down(rt, av, yav)
+        cast_down(rt, bv, ybv)
+        torch.npu.synchronize()
+        bad4 += int(not torch.allclose(a.to(torch.bfloat16), ya, atol=1e-2, rtol=1e-2))
+        bad4 += int(not torch.allclose(b.to(torch.bfloat16), yb, atol=1e-2, rtol=1e-2))
+print(f"[S4-cast_down-tailoverread] footprint sweep mismatches={bad4} -> {'PASS' if bad4 == 0 else 'FAIL'}")
+ok &= bad4 == 0
 
 sys.exit(0 if ok else 1)
