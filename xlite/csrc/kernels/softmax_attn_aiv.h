@@ -472,13 +472,6 @@ inline __aicore__ void RunAivSoftmaxPingPong(
                     pipe_barrier(PIPE_V);
                 }
                 __ubuf__ uint16_t *currOut = (__ubuf__ uint16_t *)(out[curr] + swaSegWidth);
-                // Positions not covered by the topk indices must read as 0 in the
-                // SV pass: out[] is a reused ping-pong buffer and the scatter below
-                // only writes the topk-hit slots, so leftovers from the previous row
-                // (topK < actualCalcLen) would leak into the sum.
-                vector_dup(out[curr] + swaSegWidth, Dtype(0),
-                           DIV_ROUND_UP(origActualCalcLen - swaSegWidth, pad), 1, 1, 8, 0);
-                pipe_barrier(PIPE_V);
                 set_flag(PIPE_V, PIPE_S, EVENT_ID0);
                 wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
 
