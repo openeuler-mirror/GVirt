@@ -6,6 +6,8 @@
 
 | Skill | 文件 | 用途 |
 |---|---|---|
+| data-levels-and-transfer | [skills/data-levels-and-transfer/SKILL.md](skills/data-levels-and-transfer/SKILL.md) | Ascend NPU 数据层级(GM/L2/L1/L0A/L0B/L0C/UB/BiasTable/Fixpipe buffer)与 MTE1/MTE2/MTE3/FixPipe 搬运单元:哪个 buffer 存什么、哪条 pipe 搬运、数据路径是否存在(如 L0C→GM→UB vs L0C→L1)、32B block/16KB burst 搬运口径 |
+| cube-optimization | [skills/cube-optimization/SKILL.md](skills/cube-optimization/SKILL.md) | Cube(Mmad)单元工作原理与调优:16×16 分块、GM→L1→L0A/L0B→L0C→GM 五级流水、ND/NZ 分形布局、bias 表/fixpipe 反量化融合,以及 tiling/swizzle/双缓冲/L0-L1 预算等优化手段 |
 | debug-accuracy | [skills/debug-accuracy/SKILL.md](skills/debug-accuracy/SKILL.md) | 通过对比 xlite 与 torch_npu 后端输出,系统性定位 xlite 精度问题 |
 | update-kernel-docs | [skills/update-kernel-docs/SKILL.md](skills/update-kernel-docs/SKILL.md) | 生成 / 刷新 `xlite/doc/developer_guide/kernels/` 下的算子实现原理文档 |
 | optimize-vector-kernel | [skills/optimize-vector-kernel/SKILL.md](skills/optimize-vector-kernel/SKILL.md) | 优化昇腾 910B3(arch 2201)向量核算子的 UB bank 冲突(constexpr 布局、多行批处理、A/B 位一致验证) |
