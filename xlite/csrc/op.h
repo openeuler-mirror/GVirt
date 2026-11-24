@@ -261,7 +261,8 @@ void XliteOpRepeatInterleave(XRuntime &rt, XTensor &in, XTensor &out, uint32_t n
                              uint32_t nKHeads, uint32_t nVHeads, uint32_t headBytes);
 void XliteOpSplit(XRuntime &rt, XTensor &in, const std::vector<XTensor> &outputs,
                   const std::vector<size_t> &sizes, uint32_t numPackets);
-void XliteOpSigmoidGateMul(XRuntime &rt, XTensor &attn, XTensor &gate, XTensor &out);
+void XliteOpSigmoidGateMul(XRuntime &rt, XTensor &attn, XTensor &gate, XTensor &out,
+                           XTensor *add = nullptr);
 void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weight,
                           XTensor &scores, XTensor &queryStartLoc, XTensor &lens,
                           XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads,

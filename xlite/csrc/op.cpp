@@ -3156,7 +3156,7 @@ void XliteOpBetaDecay(XRuntime &rt, XTensor &b, XTensor &a, XTensor &A_log, XTen
                  seqlen, num_v_heads);
 }
 
-void XliteOpSigmoidGateMul(XRuntime &rt, XTensor &attn, XTensor &gate, XTensor &out)
+void XliteOpSigmoidGateMul(XRuntime &rt, XTensor &attn, XTensor &gate, XTensor &out, XTensor *add)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -3172,18 +3172,22 @@ void XliteOpSigmoidGateMul(XRuntime &rt, XTensor &attn, XTensor &gate, XTensor &
         throw std::runtime_error(std::string(__func__) +
                                  ": gate last dim must be 1 (broadcast) or match attn dim");
     }
+    if (add != nullptr && (add->shape.size() != 2 || add->shape[0] != attn.shape[0] ||
+                           add->shape[1] != attn.shape[1])) {
+        throw std::runtime_error(std::string(__func__) + ": add must be 2D and match attn shape");
+    }
     KERNEL_PTR_TYPE(sigmoid_gate_mul) * launchKernel;
-    if (EachXDtype(FP16, attn, gate, out)) {
+    if (EachXDtype(FP16, attn, gate, out) && (add == nullptr || add->dtype == FP16)) {
         launchKernel = aclrtlaunch_sigmoid_gate_mul_float16_t;
-    } else if (EachXDtype(BF16, attn, gate, out)) {
+    } else if (EachXDtype(BF16, attn, gate, out) && (add == nullptr || add->dtype == BF16)) {
         launchKernel = aclrtlaunch_sigmoid_gate_mul_bfloat16_t;
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(attn) + XT_STR(gate) + XT_STR(out);
         throw std::runtime_error(err_str + "not supported!");
     }
     launchKernel(PickMinBlockNum(rt.aivNum, attn.shape[0]), rt.stream, attn.ptr, gate.ptr, out.ptr,
-                 static_cast<uint32_t>(attn.shape[0]), static_cast<uint32_t>(attn.shape[1]),
-                 static_cast<uint32_t>(gate.shape[1]));
+                 add != nullptr ? add->ptr : nullptr, static_cast<uint32_t>(attn.shape[0]),
+                 static_cast<uint32_t>(attn.shape[1]), static_cast<uint32_t>(gate.shape[1]));
 }
 
 void XliteOpRecurrentGatedDeltaRulePaged(XRuntime &rt, XTensor &query, XTensor &key, XTensor &value,
