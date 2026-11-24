@@ -199,7 +199,7 @@ def run_case(
         batch_indices = np.arange(batch, dtype=np.uint32).reshape(-1, 1)
         block_indices = np.arange(max_num_blocks, dtype=np.uint32)
         block_tables_array = batch_indices * max_num_blocks + block_indices
-        block_tables = torch.tensor(block_tables_array.tolist(), dtype=torch.int32).flatten()
+        block_tables = torch.tensor(block_tables_array.tolist(), dtype=torch.int32)
 
         qr_xlite = torch.empty(total_query_len, N_HEADS, ROPE)
         wukT_xlite = wkvb[:, :NOPE].reshape(N_HEADS, NOPE, KV_LORA).contiguous()

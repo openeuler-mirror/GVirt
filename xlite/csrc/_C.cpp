@@ -2171,17 +2171,12 @@ static uint32_t SliceBlockTableToLens(XTensor &blockTables, const XTensor &lens,
                                       const XTensor &cachedLens, uint32_t blockSize,
                                       uint32_t compressRatio = 1)
 {
+    blockTables.AtLeast2D();
     uint32_t blocks = DIV_ROUND_UP(DeriveMaxSeqLen(lens, cachedLens) / compressRatio, blockSize);
-    if (blockTables.shape.size() == 1) {
-        // Flat batch-major table (test path): the kernel walks request rows by
-        // stride[0] (see XliteOpFlashMLAV2), so a flat table must be viewed as
-        // [batch, blocks] rows first — AtLeast2D would make it a single row with
-        // stride 1 and every request after the first would read request 0's table.
-        if (blocks > 0) {
-            blockTables.View({blockTables.numel / blocks, blocks});
-        }
-    } else {
-        blockTables.AtLeast2D();
+    const size_t batch = lens.numel;
+    if (blockTables.shape.size() != 2 || blockTables.shape[0] < batch) {
+        throw std::runtime_error(std::string(__func__) +
+                                 ": blockTables must be 1-D single-row or 2-D with rows >= batch");
     }
     if (blocks > 0) {  // 0 = no complete compressed block: nothing valid to narrow
         blockTables.SliceView(0, blocks, 1);
