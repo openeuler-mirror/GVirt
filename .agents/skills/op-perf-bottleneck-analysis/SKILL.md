@@ -17,7 +17,7 @@ description: 定位 NPU 算子性能瓶颈并给出优化方向：用 msprof app
 
 ## 前置准备
 
-1. **worktree**：步骤 2/5 需要临时注释 kernel 代码，属代码修改，必须先建 worktree（全局 CLAUDE.md 规则）：
+1. **worktree**：步骤 3/6 需要临时注释 kernel 代码，属代码修改，必须先建 worktree（全局 CLAUDE.md 规则）：
    ```bash
    cd <主仓库>/xlite
    git worktree add ../xlite-wt-<op>-perf -b wt/<op>-perf
@@ -62,12 +62,12 @@ msprof --delay=8 --duration=5 --output=../../xlite/agent_log_scripts/<op>_perf \
   - decode：query_len=1，cached_lens 取短/长（如 3186 / 16384 / 32768 / 65536 / 131072）；
   - mixed：同 batch 内 decode + prefill 混合（有则覆盖）。
 
-采集完成后（post-processing 约 10s）解析主仓库 `xlite/agent_log_scripts/<op>_perf/PROF_*/mindstudio_profiler_output/op_summary_*.csv`：每个 kernel 发射一行。先核对行数覆盖全部负载发射——缺行说明发射超出采集窗口尾部（`--duration` 不足，加大重测）或发射点整个落在窗口外（`-T` 过大，采不到任何行），缺行无报错且会让后续步骤整体错位。核对无误后再按发射顺序（Task Start Time）对齐回负载 case。关键列：
+采集完成后（post-processing 约 10s）解析主仓库 `xlite/agent_log_scripts/<op>_perf/PROF_*/mindstudio_profiler_output/op_summary_*.csv`：每个 kernel 发射一行。先核对行数覆盖全部负载发射——缺行说明发射超出采集窗口尾部（`--duration` 不足，加大重测）或发射点整个落在窗口外（`-T` 过大，采不到任何行），缺行无报错且会让后续步骤整体错位。核对无误后再按发射顺序（Task Start Time）对齐回负载 case。注意 block 列名随 CANN 版本而异：cann-9.1.0 为 `Block Num` / `Mix Block Num`，8.3 等旧版为 `Block Dim` / `Mix Block Dim`（切换版本未知，以本机实际表头为准，后文两种写法同指此列）。关键列：
 
 | 列 | 含义 |
 |---|---|
 | Task Duration(us) | 任务总时长，瓶颈分析锚点 |
-| Task Type | AIC / AIV / MIX_AIC / MIX_AIV（MIX 判别依据，配合 Mix Block dim）|
+| Task Type | AIC / AIV / MIX_AIC / MIX_AIV（MIX 判别依据，配合 Mix Block Num/Dim）|
 | aicore_time / aiv_time | AIC / AIV 侧时长 |
 | aic_mac_time (ratio) | AIC Cube 矩阵计算流水 |
 | aic_scalar_time (ratio) | AIC 标量流水（地址/循环/分支）|
@@ -142,19 +142,19 @@ for key in sorted(groups):
 
 pipeline 级结论以核间均衡为前提：不均衡产生的核间空泡会被后续步骤误读为等待/同步/标量开销。基线解析完成后，对每个主要负载 case 依次做：
 
-1. **核利用率 = Block Num / 物理 AIC 核数**（op_summary 的 Block Num 列；910B3 AIC=24）。Block Num < 核数说明任务数少于核数、有核闲置（欠划分），小 shape 算子常见——先把任务切细，任何流水优化都无济于事。
+1. **核利用率 = Block Num / 物理 AIC 核数**（取 op_summary 的 Block Num 列，旧版 CANN 如 8.3 为 Block Dim；910B3 AIC=24）。Block Num < 核数说明任务数少于核数、有核闲置（欠划分），小 shape 算子常见——先把任务切细，任何流水优化都无济于事。
 2. **核间均衡度 = aicore_time / Task Duration**（纯 AIC kernel；AIV/MIX 侧用 `aiv_time` 同理）。**aicore_time 就是「全部核的活跃时长平均」，即平均核忙时**——matmul 实测逐实例精确验证 aicore_time = aic_total_cycles / (Block Num × f)（f ≈ 核主频，910B3 ≈1800 cycles/us，与芯片标称一致），msprof 已直接给出该值，直接取比值即可，**不要**再用 aic_total_cycles/主频重算。比值 ≤1、越接近 1 越均衡。首次使用该指标时，建议按上述公式反推做一次**语义交叉验证**（确认本机 msprof 的 aicore_time 确为核平均而非最长核/任务墙钟——不同语义下同样数字的结论完全不同）；验证过一次即可，后续直接用。
-3. **任务分配模型对照**：从 host 侧 tiling/任务划分代码复刻每核任务分布（xlite kernel 均为 `for (idx = GetBlockIdx(); idx < tiles; idx += GetBlockNum())` 的 stride 分配，每核 ceil/floor 任务数；尾 tile 的 mActual/nActual/kLoop 差异单独计入），得理论均衡度 = 平均任务量 / 最忙核任务量。注意 `aic_total_cycles` 只计核的活跃 cycles——核在 DMA 后台传输期间 wait_flag 空转不烧 cycles，所以**搬运主导型 kernel 的实测均衡度天然混有「流水等待空泡」，不能直接当任务不均读**：
+3. **任务分配模型对照**：从 host 侧 tiling/任务划分代码复刻每核任务分布（xlite kernel 典型为 `for (idx = GetBlockIdx(); idx < tiles; idx += GetBlockNum())` 的简单 stride 分配，每核 ceil/floor 任务数；不能按此模型直接复刻的 kernel——如 `group_matmul.h` 为跨 expert 相位偏移的 stride 分配（expert 循环由全体核共同遍历，各 expert tiles 数随 GM counts 动态变化）、attention 系按 query 任务段划分——须按其实际划分代码分析；尾 tile 的 mActual/nActual/kLoop 差异单独计入），得理论均衡度 = 平均任务量 / 最忙核任务量。注意 `aic_total_cycles` 只计核的活跃 cycles——核在 DMA 后台传输期间 wait_flag 空转不烧 cycles，所以**搬运主导型 kernel 的实测均衡度天然混有「流水等待空泡」，不能直接当任务不均读**：
    - 先测**整除对照形状**（tiles 恰整除 Block Num 且无尾 tile）：其均衡度 = 该负载的等待空泡基线（流水/同步问题，归 Step 5 范畴）；
    - 不整除形状相对整除对照的均衡度差 = **纯任务分配不均损失**，才是修任务划分能回收的收益（matmul decode 实测：63 tiles 的 3/2 分配均衡度 0.77，同最忙核流量的 72 tiles 整除对照 0.86 → 任务不均净损失 ~10%，与理论 3/2 分配的 12.5% 同量级）；
    - 计算主导型 kernel（cycles 全烧在 Cube/Mmad 上，如大 m matmul 实测 0.99–1.00）均衡度直接可信，无需对照。
-4. **形状扫描因果验证**（理论对不上或需要钉死时）：构造 tiles 恰整除 Block Num 的均衡形状与不整除形状（总流量相近、最忙核任务量相同或不同），同窗口对比均衡度与 Task Duration；另用 `Duration ≈ 总搬运量 / DRAM 峰值带宽`（910B3 ≈1.6TB/s）判**带宽饱和型**（时长贴着带宽下限、均衡无收益，瓶颈转向搬运总量，如 lm_head 1.49TB/s）。扫描通过 perf 脚本的自定义负载参数发射（如 `tests/perf/matmul.py -W name:n:k:m1,m2`），不改 kernel；注意区分冷/热实例（首发射 L2 全冷更接近生产 decode 逐层换权重的真实态），逐实例看，勿只看中位数。
+4. **形状扫描因果验证**（理论对不上或需要钉死时）：构造 tiles 恰整除 Block Num 的均衡形状与不整除形状（总流量相近、最忙核任务量相同或不同），同窗口对比均衡度与 Task Duration；另用 `Duration ≈ 总搬运量 / DRAM 峰值带宽`（910B3 ≈1.6TB/s）判**带宽饱和型**（时长贴着带宽下限、均衡无收益，瓶颈转向搬运总量，如 lm_head 1.49TB/s）。扫描通过（按前置准备 3 补写的）perf 脚本以自定义负载参数发射，不改 kernel；注意区分冷/热实例（首发射 L2 全冷更接近生产 decode 逐层换权重的真实态），逐实例看，勿只看中位数。
 5. 处置：
    - 任务不均损失显著（≥10%）→ **先修均衡再进 Step 3**：m0/n0 微调使 tiles 整除 Block Num（例：n=16128、n0=256 时 63 tiles 不整除 24 核；n0=224 → 72 tiles 恰整除）、任务切细（每核 ≥3~4 个任务）、尾任务均摊；改后同窗口 A/B 重测均衡度应逼近整除对照、Task Duration 应相应下降。
 
 ## Step 3: MIX 算子 AIC/AIV 关键路径判别（消融法）
 
-Task Type 为 MIX（MIX_AIC/MIX_AIV 或 Mix Block Dim > 0）时执行；纯 AIC/AIV 算子直接进 Step 4。
+Task Type 为 MIX（MIX_AIC/MIX_AIV 或 Mix Block Num/Dim > 0）时执行；纯 AIC/AIV 算子直接进 Step 4。
 
 分别注释 AIC、AIV 的**主代码段**，重测 msprof：
 
