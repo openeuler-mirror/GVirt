@@ -46,6 +46,7 @@ class FakeClient:
     def __init__(self, patch_ok=True):
         self.patched, self.posted = [], []
         self.patch_ok = patch_ok
+        self.next_id = 900
 
     def patch_pr_comment(self, comment_id, body):
         self.patched.append((comment_id, body))
@@ -53,7 +54,8 @@ class FakeClient:
 
     def post_pr_comment(self, pr_number, body):
         self.posted.append((pr_number, body))
-        return True
+        self.next_id += 1
+        return {"id": self.next_id}
 
 
 class FakeResponse:
@@ -449,7 +451,7 @@ def test_ci_results_post_fresh_by_default():
     folded away in a long thread with no notification."""
     client = FakeClient()
     own = bot_comment(11, "bot", "<!-- gvirt-ci-bot:v:sha -->")
-    pr_ci_bot.post_comment(client, 653, [own], "RESULTS", "post")
+    pr_ci_bot.post_comment(client, 653, [own], "RESULTS", "post", "a" * 40)
     assert client.posted == [(653, "RESULTS")] and not client.patched
 
 
@@ -462,14 +464,16 @@ def test_replace_mode_edits_own_newest_comment_in_place():
     older = bot_comment(11, "bot", "<!-- gvirt-ci-bot:v:sha -->")
     newer = bot_comment(12, "bot", "<!-- gvirt-ci-bot:w:sha -->")
     alien = bot_comment(44, "svc-bot", "<!-- gvirt-ci-bot:x:sha -->")
-    pr_ci_bot.post_comment(client, 653, [newer, alien, older], "NEW", "replace")
+    pr_ci_bot.post_comment(
+        client, 653, [newer, alien, older], "NEW", "replace", "a" * 40
+    )
     assert client.patched == [(12, "NEW")] and not client.posted
 
 
 def test_replace_mode_posts_when_account_owns_no_comment():
     client = FakeClient()
     alien = bot_comment(44, "svc-bot", "<!-- gvirt-ci-bot:x:sha -->")
-    pr_ci_bot.post_comment(client, 653, [alien], "NEW", "replace")
+    pr_ci_bot.post_comment(client, 653, [alien], "NEW", "replace", "a" * 40)
     assert client.posted == [(653, "NEW")] and not client.patched
 
 
@@ -479,7 +483,7 @@ def test_replace_mode_falls_back_to_posting_when_edit_fails():
     delivered, not lost."""
     client = FakeClient(patch_ok=False)
     own = bot_comment(11, "bot", "<!-- gvirt-ci-bot:v:sha -->")
-    pr_ci_bot.post_comment(client, 653, [own], "NEW", "replace")
+    pr_ci_bot.post_comment(client, 653, [own], "NEW", "replace", "a" * 40)
     assert client.posted == [(653, "NEW")]
 
 
@@ -1142,7 +1146,7 @@ def run_process_pr(monkeypatch, tmp_path, comments, checks, stale_base=False):
         "owners": {"lulina1"},
         "digest": "d" * 64,
         "script": tmp_path / "master-script.py",
-        "sha": "m" * 40,
+        "sha": "e" * 40,
         "digest_exclude": set(),
         "digest_include": [],
     }
@@ -1159,3 +1163,783 @@ def test_process_pr_nudge_survives_check_objects(tmp_path, monkeypatch):
     logs = run_process_pr(monkeypatch, tmp_path, [], checks, stale_base=True)
     assert any("Rebase onto the latest master" in line for line in logs)
     assert any("dry run, comment would be:" in line for line in logs)
+
+
+# --- request notes and command acks ------------------------------------------
+
+
+def marker_comment(
+    cid, request, sha, login="bot", created="2026-11-24T10:00:00+08:00", updated=None
+):
+    body = pr_ci_bot.build_comment(
+        sha, sample_checks(), "h", [], "d" * 64, "e" * 40, request, "ci"
+    )
+    return {
+        "id": cid,
+        "user": {"login": login},
+        "body": body,
+        "created_at": created,
+        "updated_at": updated or created,
+    }
+
+
+def test_request_consumed_by_any_marker():
+    assert pr_ci_bot.request_consumed([], 0)
+    assert not pr_ci_bot.request_consumed([], 5)
+    served = [{"id": 1, "user": {}, "body": marker_comment(1, 5, "c" * 40)["body"]}]
+    assert pr_ci_bot.request_consumed(served, 5)
+    assert not pr_ci_bot.request_consumed(served, 6)
+    legacy = [
+        {
+            "id": 1,
+            "user": {},
+            "body": "### CI results\n<!-- gvirt-ci-bot:1bef49e286be:abcdef -->",
+        }
+    ]
+    assert not pr_ci_bot.request_consumed(legacy, 1)
+
+
+def test_command_label_classification():
+    assert pr_ci_bot.command_label("/ci all") == "/ci all"
+    assert pr_ci_bot.command_label("/ci all extra") == "/ci all"
+    assert pr_ci_bot.command_label("  /ci") == "/ci"
+    assert pr_ci_bot.command_label("/rerun") == "/rerun"
+    assert pr_ci_bot.command_label("/cider") is None
+    assert pr_ci_bot.command_label("✅ `/rerun` consumed") is None
+    assert pr_ci_bot.command_label("review comment") is None
+
+
+def test_ack_commands_serves_only_consumed_authorized():
+    client = FakeClient()
+    comments = [
+        {"id": 1, "user": {"login": "openeuler-ci-bot"}, "body": "welcome"},
+        {"id": 2, "user": {"login": "lulina1"}, "body": "/rerun"},
+        marker_comment(3, 2, "c" * 40),
+        {"id": 4, "user": {"login": "lulina1"}, "body": "/ci"},
+        {"id": 5, "user": {"login": "someone"}, "body": "/rerun"},
+        {"id": 6, "user": {"login": "author"}, "body": "/rerun"},
+    ]
+    pr_ci_bot.ack_commands(client, 700, comments, {"lulina1"}, "author")
+    assert len(client.posted) == 1
+    pr, body = client.posted[0]
+    assert pr == 700
+    assert (
+        "✅ `/rerun` (comment 2) consumed — CI results in [comment 3](https://atomgit.com/openeuler/GVirt/pull/700#tid-3)."
+        in body
+    )
+    assert "<!-- gvirt-ci-ack:2 -->" in body
+
+
+def test_ack_commands_any_account_ack_counts():
+    client = FakeClient()
+    comments = [
+        {"id": 2, "user": {"login": "lulina1"}, "body": "/rerun"},
+        {
+            "id": 3,
+            "user": {"login": "other-bot"},
+            "body": "✅ `/rerun` consumed\n<!-- gvirt-ci-ack:2 -->",
+        },
+        marker_comment(5, 2, "c" * 40),
+    ]
+    pr_ci_bot.ack_commands(client, 700, comments, {"lulina1"}, "author")
+    assert client.posted == []
+
+
+def test_ack_commands_posted_id_extends_anchor():
+    client = FakeClient()
+    comments = [
+        {"id": 2, "user": {"login": "lulina1"}, "body": "/rerun"},
+        marker_comment(3, 2, "c" * 40),
+        {"id": 4, "user": {"login": "lulina1"}, "body": "/ci all"},
+    ]
+    pr_ci_bot.ack_commands(client, 700, comments, {"lulina1"}, "author", 9)
+    assert [body for _, body in client.posted] == [
+        "✅ `/rerun` (comment 2) consumed — CI results in [comment 9](https://atomgit.com/openeuler/GVirt/pull/700#tid-9).\n<!-- gvirt-ci-ack:2 -->",
+        "✅ `/ci all` (comment 4) consumed — CI results in [comment 9](https://atomgit.com/openeuler/GVirt/pull/700#tid-9).\n<!-- gvirt-ci-ack:4 -->",
+    ]
+
+
+def test_ack_commands_dry_run_posts_nothing():
+    client = FakeClient()
+    comments = [
+        {"id": 2, "user": {"login": "lulina1"}, "body": "/rerun"},
+        marker_comment(3, 2, "c" * 40),
+    ]
+    pr_ci_bot.ack_commands(client, 700, comments, {"lulina1"}, "author", dry_run=True)
+    assert client.posted == []
+
+
+def test_post_comment_returns_delivered_id():
+    client = FakeClient()
+    assert pr_ci_bot.post_comment(client, 653, [], "RESULTS", "post", "a" * 40) == (
+        901,
+        False,
+        None,
+    )
+    own = bot_comment(11, "bot", "<!-- gvirt-ci-bot:v:sha -->")
+    assert pr_ci_bot.post_comment(client, 653, [own], "NEW", "replace", "a" * 40) == (
+        11,
+        True,
+        None,
+    )
+
+
+def test_ack_link_uses_platform_comment_url_with_discussion():
+    """The ack link matches the platform's comment URL (atomgit pull page,
+    ?did=<discussion>#tid-<id>): the delivered target's discussion comes
+    from the posting response, a back-fill anchor's from the fetched
+    comment object; without either the link still points at the right
+    comment."""
+    client = FakeClient()
+    anchor = sha_marker_comment(3, "c" * 40)
+    anchor["discussion_id"] = "d1"
+    pr_ci_bot.ack_commands(
+        client,
+        700,
+        [{"id": 2, "user": {"login": "lulina1"}, "body": "/rerun"}, anchor],
+        {"lulina1"},
+        "author",
+    )
+    ((_, body),) = client.posted
+    assert (
+        "[comment 3](https://atomgit.com/openeuler/GVirt/pull/700?did=d1#tid-3)" in body
+    )
+    client = FakeClient()
+    pr_ci_bot.ack_commands(
+        client,
+        700,
+        [{"id": 2, "user": {"login": "lulina1"}, "body": "/rerun"}, anchor],
+        {"lulina1"},
+        "author",
+        9,
+        False,
+        False,
+        True,
+        "d9",
+    )
+    ((_, body),) = client.posted
+    assert (
+        "[comment 9](https://atomgit.com/openeuler/GVirt/pull/700?did=d9#tid-9)" in body
+    )
+
+
+def test_process_pr_request_note_only_when_unconsumed(tmp_path, monkeypatch):
+    """The note names the consuming comment and fires only while the
+    request is unserved — a run triggered by a push no longer re-announces
+    a /rerun an earlier check already consumed (the ac8dab63 echo)."""
+    rerun = {"id": 20, "user": {"login": "lulina1"}, "body": "/rerun"}
+    logs = run_process_pr(
+        monkeypatch,
+        tmp_path,
+        [marker_comment(10, 5, "c" * 40), rerun],
+        sample_checks(),
+    )
+    assert any("Re-check requested by @lulina1 (comment 20)." in l for l in logs)
+
+
+def test_process_pr_request_note_absent_when_consumed(tmp_path, monkeypatch):
+    rerun = {"id": 20, "user": {"login": "lulina1"}, "body": "/rerun"}
+    logs = run_process_pr(
+        monkeypatch,
+        tmp_path,
+        [marker_comment(10, 20, "c" * 40), rerun],
+        sample_checks(),
+    )
+    assert not any("Re-check requested" in l for l in logs)
+    assert not any("re-check requested in comment" in l for l in logs)
+
+
+def test_process_pr_acks_consumed_commands_in_dry_run(tmp_path, monkeypatch):
+    rerun = {"id": 20, "user": {"login": "lulina1"}, "body": "/rerun"}
+    logs = run_process_pr(
+        monkeypatch,
+        tmp_path,
+        [rerun, marker_comment(30, 20, "c" * 40)],
+        sample_checks(),
+    )
+    assert any("would ack `/rerun` comment 20" in l for l in logs)
+
+
+def test_process_pr_skip_path_acks(tmp_path, monkeypatch):
+    """A fresh, skipped PR still back-fills missing acks: the pass runs on
+    every scan, not only when a check posts."""
+    rerun = {"id": 20, "user": {"login": "lulina1"}, "body": "/rerun"}
+    logs = run_process_pr(
+        monkeypatch,
+        tmp_path,
+        [rerun, marker_comment(30, 20, "b" * 40)],
+        sample_checks(),
+    )
+    assert any("already covers this commit and harness, skipping" in l for l in logs)
+    assert any("would ack `/rerun` comment 20" in l for l in logs)
+
+
+def test_process_pr_posts_then_acks_with_posted_anchor(tmp_path, monkeypatch):
+    """The full delivery: results post first, then the ack cites the
+    posted comment's id as the anchor — a crash between the two leaves
+    the command looking pending, so the next scan back-fills (retry
+    semantics preserved)."""
+    rerun = {"id": 20, "user": {"login": "lulina1"}, "body": "/rerun"}
+    client = FakeClient()
+    client.get_pr_head = lambda n: {"sha": "b" * 40}
+    client.get_pr_comments = lambda n: [marker_comment(10, 5, "c" * 40), rerun]
+    client.get_pr_files = lambda n: []
+    monkeypatch.setattr(pr_ci_bot, "log", lambda msg: None)
+    monkeypatch.setattr(pr_ci_bot, "fetch_ref", lambda *a, **k: "b" * 40)
+    monkeypatch.setattr(pr_ci_bot, "prepare_worktree", lambda *a, **k: tmp_path / "wt")
+    monkeypatch.setattr(pr_ci_bot, "remove_worktree", lambda *a, **k: None)
+    monkeypatch.setattr(
+        pr_ci_bot, "run_harness", lambda script, wt, args: sample_checks()
+    )
+    monkeypatch.setattr(pr_ci_bot, "base_is_stale", lambda *a, **k: False)
+    args = argparse.Namespace(
+        local_test=True,
+        dry_run=False,
+        refs_repo=str(tmp_path / "refs.git"),
+        worktree_root=str(tmp_path),
+        comment_mode="post",
+        keep_worktrees=False,
+    )
+    pr = {
+        "number": 712,
+        "title": "t",
+        "draft": False,
+        "user": {"login": "someone"},
+        "head": {"repo": {"full_name": "fork/repo"}, "ref": "branch"},
+    }
+    master = {
+        "owners": {"lulina1"},
+        "digest": "d" * 64,
+        "script": tmp_path / "master-script.py",
+        "sha": "e" * 40,
+        "digest_exclude": set(),
+        "digest_include": [],
+    }
+    pr_ci_bot.process_pr(client, pr, args, master)
+    results_body, ack_body = [body for _, body in client.posted]
+    assert "Re-check requested by @lulina1 (comment 20)." in results_body
+    assert (
+        "✅ `/rerun` (comment 20) consumed — CI results in [comment 901](https://atomgit.com/openeuler/GVirt/pull/712#tid-901)."
+        in ack_body
+    )
+    assert "<!-- gvirt-ci-ack:20 -->" in ack_body
+
+
+# --- advance-mode delivery ----------------------------------------------------
+
+
+def sha_marker_comment(cid, sha, login="bot", request=0):
+    body = pr_ci_bot.build_comment(
+        sha, sample_checks(), "h", [], "d" * 64, "e" * 40, request, "ci"
+    )
+    return {"id": cid, "user": {"login": login}, "body": body}
+
+
+def test_advance_overwrites_own_same_sha_comment():
+    """One comment per head sha: a re-check of an unchanged head (harness
+    update, /rerun) overwrites this account's same-sha verdict in place
+    instead of stacking a new comment."""
+    client = FakeClient()
+    same = sha_marker_comment(11, "a" * 40)
+    other = sha_marker_comment(12, "f" * 40)
+    assert pr_ci_bot.post_comment(
+        client, 653, [same, other], "NEW", "advance", "a" * 40
+    ) == (11, True, None)
+    assert client.patched == [(11, "NEW")] and not client.posted
+
+
+def test_advance_posts_when_no_same_sha_comment():
+    client = FakeClient()
+    other = sha_marker_comment(12, "f" * 40)
+    assert pr_ci_bot.post_comment(client, 653, [other], "NEW", "advance", "a" * 40) == (
+        901,
+        False,
+        None,
+    )
+    assert client.posted == [(653, "NEW")] and not client.patched
+
+
+def test_advance_cannot_edit_another_accounts_same_sha_comment():
+    """The platform allows author-only edits, so a second account's
+    re-check of the same head falls back to posting."""
+    client = FakeClient()
+    alien = sha_marker_comment(11, "a" * 40, login="svc-bot")
+    assert pr_ci_bot.post_comment(client, 653, [alien], "NEW", "advance", "a" * 40) == (
+        901,
+        False,
+        None,
+    )
+    assert client.posted == [(653, "NEW")] and not client.patched
+
+
+def test_advance_falls_back_to_posting_when_edit_fails():
+    client = FakeClient(patch_ok=False)
+    same = sha_marker_comment(11, "a" * 40)
+    assert pr_ci_bot.post_comment(client, 653, [same], "NEW", "advance", "a" * 40) == (
+        901,
+        False,
+        None,
+    )
+    assert client.posted == [(653, "NEW")]
+
+
+def test_ack_commands_note_in_place_delivery():
+    client = FakeClient()
+    comments = [
+        {"id": 2, "user": {"login": "lulina1"}, "body": "/rerun"},
+        sha_marker_comment(3, "c" * 40),
+    ]
+    pr_ci_bot.ack_commands(client, 700, comments, {"lulina1"}, "author", 9, True)
+    assert [body for _, body in client.posted] == [
+        (
+            "✅ `/rerun` (comment 2) consumed — CI results updated in place in "
+            "[comment 9](https://atomgit.com/openeuler/GVirt/pull/700#tid-9)."
+            "\n<!-- gvirt-ci-ack:2 -->"
+        )
+    ]
+
+
+def test_process_pr_rerun_updates_same_sha_comment_in_place(tmp_path, monkeypatch):
+    """The advance policy's /rerun case end-to-end: the re-check of an
+    unchanged head overwrites this account's same-sha verdict comment, and
+    the /rerun ack says the results were updated in place with a link."""
+    rerun = {"id": 20, "user": {"login": "lulina1"}, "body": "/rerun"}
+    same_sha = sha_marker_comment(30, "b" * 40, request=5)
+    client = FakeClient()
+    client.get_pr_head = lambda n: {"sha": "b" * 40}
+    client.get_pr_comments = lambda n: [rerun, same_sha]
+    client.get_pr_files = lambda n: []
+    monkeypatch.setattr(pr_ci_bot, "log", lambda msg: None)
+    monkeypatch.setattr(pr_ci_bot, "fetch_ref", lambda *a, **k: "b" * 40)
+    monkeypatch.setattr(pr_ci_bot, "prepare_worktree", lambda *a, **k: tmp_path / "wt")
+    monkeypatch.setattr(pr_ci_bot, "remove_worktree", lambda *a, **k: None)
+    monkeypatch.setattr(
+        pr_ci_bot, "run_harness", lambda script, wt, args: sample_checks()
+    )
+    monkeypatch.setattr(pr_ci_bot, "base_is_stale", lambda *a, **k: False)
+    monkeypatch.setattr(pr_ci_bot, "ref_contains", lambda *a, **k: True)
+    args = argparse.Namespace(
+        local_test=True,
+        dry_run=False,
+        refs_repo=str(tmp_path / "refs.git"),
+        worktree_root=str(tmp_path),
+        comment_mode="advance",
+        keep_worktrees=False,
+    )
+    pr = {
+        "number": 712,
+        "title": "t",
+        "draft": False,
+        "user": {"login": "lulina1"},
+        "head": {"repo": {"full_name": "fork/repo"}, "ref": "branch"},
+    }
+    master = {
+        "owners": {"lulina1"},
+        "digest": "d" * 64,
+        "harness_anchor": "a" * 40,
+        "script": tmp_path / "master-script.py",
+        "sha": "e" * 40,
+        "digest_exclude": set(),
+        "digest_include": [],
+    }
+    pr_ci_bot.process_pr(client, pr, args, master)
+    ((target_id, results_body),) = client.patched
+    assert target_id == 30 and "<!-- gvirt-ci-ack:20 -->" not in results_body
+    ((pr_no, ack_body),) = client.posted
+    assert pr_no == 712
+    assert "updated in place in [comment 30]" in ack_body
+    assert "https://atomgit.com/openeuler/GVirt/pull/712#tid-30" in ack_body
+
+
+# --- harness stacking ---------------------------------------------------------
+
+
+def test_newest_harness_commit(tmp_path):
+    """The anchor is the newest master commit under .gitcode (plus the
+    outside includes); non-harness commits never move it; no harness
+    commit at all means None — nothing to be stacked on."""
+    import subprocess
+
+    def sh(*cmd, cwd=None):
+        subprocess.run(cmd, cwd=cwd, check=True, capture_output=True)
+
+    def rev(cwd):
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    repo = tmp_path / "repo"
+    sh("git", "init", "-q", "-b", "master", str(repo))
+    sh("git", "config", "user.email", "t@t", cwd=repo)
+    sh("git", "config", "user.name", "t", cwd=repo)
+    (repo / "README").write_text("x\n")
+    sh("git", "add", ".", cwd=repo)
+    sh("git", "commit", "-qm", "root", cwd=repo)
+    assert pr_ci_bot.newest_harness_commit(repo, "HEAD", []) is None
+    (repo / ".gitcode").mkdir()
+    (repo / ".gitcode" / "CODEOWNERS").write_text("/.gitcode @x\n")
+    sh("git", "add", ".", cwd=repo)
+    sh("git", "commit", "-qm", "harness1", cwd=repo)
+    harness1 = rev(repo)
+    (repo / "README").write_text("y\n")
+    sh("git", "commit", "-qam", "doc", cwd=repo)
+    assert pr_ci_bot.newest_harness_commit(repo, "HEAD", []) == harness1
+    (repo / ".gitcode" / "ci.toml").write_text("[harness]\n")
+    sh("git", "add", ".", cwd=repo)
+    sh("git", "commit", "-qm", "harness2", cwd=repo)
+    harness2 = rev(repo)
+    assert pr_ci_bot.newest_harness_commit(repo, "HEAD", []) == harness2
+
+
+def test_fresh_ci_request_only_unconsumed_owner_commands():
+    served = [
+        {
+            "id": 5,
+            "user": {"login": "lulina1"},
+            "body": "/ci",
+            "created_at": "2026-11-24T09:50:00+08:00",
+        },
+        marker_comment(10, 0, "c" * 40),
+    ]
+    assert pr_ci_bot.fresh_ci_request(served, {"lulina1"}) is None
+    fresh = [
+        marker_comment(10, 0, "c" * 40),
+        {
+            "id": 20,
+            "user": {"login": "lulina1"},
+            "body": "/ci all",
+            "created_at": "2026-11-24T10:30:00+08:00",
+        },
+    ]
+    assert pr_ci_bot.fresh_ci_request(fresh, {"lulina1"}) == 20
+    alien = [
+        {
+            "id": 30,
+            "user": {"login": "someone"},
+            "body": "/ci",
+            "created_at": "2026-11-24T10:40:00+08:00",
+        }
+    ]
+    assert pr_ci_bot.fresh_ci_request([*fresh, *alien], {"lulina1"}) == 20
+
+
+def test_fresh_ci_request_consumed_by_in_place_update():
+    """Id ordering cannot decide /ci consumption: an advance-mode re-check
+    of an unchanged head patches the verdict in place without moving its
+    id — the patch's updated_at is what records that a delivery followed
+    the command."""
+    patched = marker_comment(
+        10,
+        0,
+        "c" * 40,
+        created="2026-11-24T10:00:00+08:00",
+        updated="2026-11-24T11:00:00+08:00",
+    )
+    ci_after_post_before_patch = {
+        "id": 20,
+        "user": {"login": "lulina1"},
+        "body": "/ci",
+        "created_at": "2026-11-24T10:30:00+08:00",
+    }
+    assert (
+        pr_ci_bot.fresh_ci_request([patched, ci_after_post_before_patch], {"lulina1"})
+        is None
+    )
+
+
+def run_stacked_process_pr(
+    monkeypatch,
+    tmp_path,
+    comments,
+    author="lulina1",
+    anchor="a" * 40,
+    contains=None,
+    same_digest=False,
+):
+    """Drive process_pr through the harness-selection block: the worktree
+    carries a .gitcode (PR harness), ref_contains is stubbed, and the
+    harness choice is captured from the script argument run_harness
+    received. same_digest sets master's digest to the PR tree's, the
+    digest-equal fast path. Returns (script, logs)."""
+    wt = tmp_path / "wt"
+    (wt / ".gitcode").mkdir(parents=True, exist_ok=True)
+    (wt / ".gitcode" / "run_ci_checks.py").write_text("# pr harness\n")
+    scripts = []
+    logs = []
+    monkeypatch.setattr(pr_ci_bot, "log", lambda msg: logs.append(msg))
+    monkeypatch.setattr(pr_ci_bot, "fetch_ref", lambda *a, **k: "b" * 40)
+    monkeypatch.setattr(pr_ci_bot, "prepare_worktree", lambda *a, **k: wt)
+    monkeypatch.setattr(pr_ci_bot, "remove_worktree", lambda *a, **k: None)
+    monkeypatch.setattr(
+        pr_ci_bot,
+        "run_harness",
+        lambda script, wt_, args: scripts.append(script) or sample_checks(),
+    )
+    monkeypatch.setattr(pr_ci_bot, "base_is_stale", lambda *a, **k: False)
+    if contains is not None:
+        monkeypatch.setattr(pr_ci_bot, "ref_contains", lambda *a, **k: contains)
+    client = FakeClient()
+    client.get_pr_head = lambda n: {"sha": "b" * 40}
+    client.get_pr_comments = lambda n: comments
+    client.get_pr_files = lambda n: []
+    args = argparse.Namespace(
+        local_test=True,
+        dry_run=True,
+        refs_repo=str(tmp_path / "refs.git"),
+        worktree_root=str(tmp_path),
+        comment_mode="advance",
+        keep_worktrees=False,
+    )
+    pr = {
+        "number": 712,
+        "title": "t",
+        "draft": False,
+        "user": {"login": author},
+        "head": {"repo": {"full_name": "fork/repo"}, "ref": "branch"},
+    }
+    master = {
+        "owners": {"lulina1"},
+        "digest": pr_ci_bot.gitcode_digest(wt, set(), []) if same_digest else "d" * 64,
+        "harness_anchor": anchor,
+        "script": tmp_path / "master-script.py",
+        "sha": "e" * 40,
+        "digest_exclude": set(),
+        "digest_include": [],
+    }
+    pr_ci_bot.process_pr(client, pr, args, master)
+    return scripts[0], logs
+
+
+def test_harness_selection_digest_equal_uses_pr_copy(tmp_path, monkeypatch):
+    """Identical harness content means stacked — the ancestry fetch is
+    never consulted."""
+    monkeypatch.setattr(
+        pr_ci_bot, "ref_contains", lambda *a, **k: pytest.fail("must not fetch")
+    )
+    script, _ = run_stacked_process_pr(monkeypatch, tmp_path, [], same_digest=True)
+    assert script == wt_harness_script(tmp_path)
+
+
+def test_harness_selection_ancestor_uses_pr_copy(tmp_path, monkeypatch):
+    script, _ = run_stacked_process_pr(monkeypatch, tmp_path, [], contains=True)
+    assert script == wt_harness_script(tmp_path)
+
+
+def test_harness_selection_unstacked_falls_back_with_nudge(tmp_path, monkeypatch):
+    """A stale-based harness PR defaults to master's harness and the
+    comment carries the rebase nudge naming the anchor."""
+    script, logs = run_stacked_process_pr(monkeypatch, tmp_path, [], contains=False)
+    assert script == Path(tmp_path / "master-script.py")
+    assert any(
+        "harness base predates the newest harness change" in line for line in logs
+    )
+    assert any("Rebase onto the latest master" in line for line in logs)
+
+
+def test_harness_selection_unstacked_untrusted_pr_gets_nudge(tmp_path, monkeypatch):
+    script, logs = run_stacked_process_pr(
+        monkeypatch, tmp_path, [], author="someone", contains=False
+    )
+    assert script == Path(tmp_path / "master-script.py")
+    assert any("Rebase onto the latest master" in line for line in logs)
+
+
+def test_harness_selection_fresh_ci_escapes_fallback(tmp_path, monkeypatch):
+    """An unconsumed /ci re-approves the PR's own harness even when its
+    base is not stacked; one a delivery already answered does not."""
+    fresh = [
+        marker_comment(10, 0, "c" * 40),
+        {
+            "id": 20,
+            "user": {"login": "lulina1"},
+            "body": "/ci",
+            "created_at": "2026-11-24T10:30:00+08:00",
+        },
+    ]
+    script, _ = run_stacked_process_pr(monkeypatch, tmp_path, fresh, contains=False)
+    assert script == wt_harness_script(tmp_path)
+    consumed = [
+        {
+            "id": 5,
+            "user": {"login": "lulina1"},
+            "body": "/ci",
+            "created_at": "2026-11-24T09:50:00+08:00",
+        },
+        marker_comment(10, 0, "c" * 40),
+    ]
+    script, _ = run_stacked_process_pr(monkeypatch, tmp_path, consumed, contains=False)
+    assert script == Path(tmp_path / "master-script.py")
+
+
+def test_harness_selection_fresh_ci_escape_no_nudge_note(tmp_path, monkeypatch):
+    """When the fresh-/ci escape lets the PR copy run, the stacked note
+    must not claim the checks ran master's harness — the same comment
+    would contradict its own harness line."""
+    fresh = [
+        marker_comment(10, 0, "c" * 40),
+        {
+            "id": 20,
+            "user": {"login": "lulina1"},
+            "body": "/ci",
+            "created_at": "2026-11-24T10:30:00+08:00",
+        },
+    ]
+    script, logs = run_stacked_process_pr(monkeypatch, tmp_path, fresh, contains=False)
+    assert script == wt_harness_script(tmp_path)
+    assert not any("harness base predates" in line for line in logs)
+    no_escape = [
+        marker_comment(10, 0, "c" * 40),
+    ]
+    script, logs = run_stacked_process_pr(
+        monkeypatch, tmp_path, no_escape, contains=False
+    )
+    assert script == Path(tmp_path / "master-script.py")
+    assert any("harness base predates" in line for line in logs)
+
+
+def wt_harness_script(tmp_path):
+    return Path(tmp_path / "wt" / ".gitcode" / "run_ci_checks.py")
+
+
+def test_ref_contains_states(tmp_path):
+    """True when contained, False when provably absent within the fetched
+    window, None when the answer could not be established (fetch
+    failure)."""
+    import subprocess
+
+    def sh(*cmd, cwd=None):
+        subprocess.run(cmd, cwd=cwd, check=True, capture_output=True)
+
+    def rev(cwd):
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    src = tmp_path / "src"
+    sh("git", "init", "-q", "-b", "master", str(src))
+    sh("git", "config", "user.email", "t@t", cwd=src)
+    sh("git", "config", "user.name", "t", cwd=src)
+    (src / "f").write_text("1\n")
+    sh("git", "add", ".", cwd=src)
+    sh("git", "commit", "-qm", "one", cwd=src)
+    root = rev(src)
+    (src / "f").write_text("2\n")
+    sh("git", "commit", "-qam", "two", cwd=src)
+    tip = rev(src)
+    origin = tmp_path / "origin.git"
+    sh("git", "init", "-q", "--bare", str(origin))
+    sh("git", "remote", "add", "origin", str(origin), cwd=src)
+    sh("git", "push", "-q", "origin", "HEAD:refs/heads/pr", cwd=src)
+    (src / "g").write_text("x\n")
+    sh("git", "add", ".", cwd=src)
+    sh("git", "commit", "-qm", "side", cwd=src)
+    side = rev(src)
+    sh("git", "push", "-q", "origin", "HEAD:refs/heads/side", cwd=src)
+    refs = tmp_path / "refs.git"
+    sh("git", "init", "-q", "--bare", str(refs))
+    pr_ci_bot.fetch_ref(
+        refs, str(origin), "refs/heads/pr", "refs/prbot/pr-1", shallow=True
+    )
+    pr_ci_bot.fetch_ref(
+        refs, str(origin), "refs/heads/side", "refs/prbot/side", shallow=True
+    )
+    url = str(origin)
+    assert (
+        pr_ci_bot.ref_contains(refs, url, "refs/heads/pr", "refs/prbot/pr-1", root)
+        is True
+    )
+    assert (
+        pr_ci_bot.ref_contains(refs, url, "refs/heads/pr", "refs/prbot/pr-1", tip)
+        is True
+    )
+    assert (
+        pr_ci_bot.ref_contains(refs, url, "refs/heads/pr", "refs/prbot/pr-1", side)
+        is False
+    )
+    assert (
+        pr_ci_bot.ref_contains(
+            refs, f"{origin}-missing", "refs/heads/pr", "refs/prbot/pr-1", tip
+        )
+        is None
+    )
+
+
+def test_process_pr_rerun_after_verdict_acked_on_in_place_update(tmp_path, monkeypatch):
+    """The main path (round-2 blocking): a /rerun posted AFTER the verdict
+    comment, head unchanged — the advance-mode re-check overwrites the
+    verdict in place (its id never moves) and the delivery-time ack pass
+    serves every command the fetched comments hold. The old id gate would
+    skip it forever and, an in-place edit notifying nobody, the requester
+    would never see any signal."""
+    verdict = sha_marker_comment(30, "b" * 40, request=5)
+    rerun = {"id": 40, "user": {"login": "lulina1"}, "body": "/rerun"}
+    client = FakeClient()
+    client.get_pr_head = lambda n: {"sha": "b" * 40}
+    client.get_pr_comments = lambda n: [verdict, rerun]
+    client.get_pr_files = lambda n: []
+    monkeypatch.setattr(pr_ci_bot, "log", lambda msg: None)
+    monkeypatch.setattr(pr_ci_bot, "fetch_ref", lambda *a, **k: "b" * 40)
+    monkeypatch.setattr(pr_ci_bot, "prepare_worktree", lambda *a, **k: tmp_path / "wt")
+    monkeypatch.setattr(pr_ci_bot, "remove_worktree", lambda *a, **k: None)
+    monkeypatch.setattr(
+        pr_ci_bot, "run_harness", lambda script, wt, args: sample_checks()
+    )
+    monkeypatch.setattr(pr_ci_bot, "base_is_stale", lambda *a, **k: False)
+    monkeypatch.setattr(pr_ci_bot, "ref_contains", lambda *a, **k: True)
+    args = argparse.Namespace(
+        local_test=True,
+        dry_run=False,
+        refs_repo=str(tmp_path / "refs.git"),
+        worktree_root=str(tmp_path),
+        comment_mode="advance",
+        keep_worktrees=False,
+    )
+    pr = {
+        "number": 712,
+        "title": "t",
+        "draft": False,
+        "user": {"login": "lulina1"},
+        "head": {"repo": {"full_name": "fork/repo"}, "ref": "branch"},
+    }
+    master = {
+        "owners": {"lulina1"},
+        "digest": "d" * 64,
+        "harness_anchor": "a" * 40,
+        "script": tmp_path / "master-script.py",
+        "sha": "e" * 40,
+        "digest_exclude": set(),
+        "digest_include": [],
+    }
+    pr_ci_bot.process_pr(client, pr, args, master)
+    ((target_id, results_body),) = client.patched
+    assert target_id == 30 and "<!-- gvirt-ci-ack:40 -->" not in results_body
+    ((pr_no, ack_body),) = client.posted
+    assert pr_no == 712
+    assert "updated in place in [comment 30]" in ack_body
+    assert "https://atomgit.com/openeuler/GVirt/pull/712#tid-30" in ack_body
+    assert "<!-- gvirt-ci-ack:40 -->" in ack_body
+
+
+def test_back_fill_acks_rerun_served_by_in_place_update():
+    """A fresh-skip scan still back-fills a /rerun consumed by an in-place
+    overwrite: the patched verdict's marker records the request it
+    consumed, so the back-fill's request rule serves what the id gate
+    cannot."""
+    client = FakeClient()
+    rerun = {"id": 40, "user": {"login": "lulina1"}, "body": "/rerun"}
+    patched = sha_marker_comment(30, "b" * 40, request=40)
+    pr_ci_bot.ack_commands(client, 700, [rerun, patched], {"lulina1"}, "author")
+    assert len(client.posted) == 1
+    _, body = client.posted[0]
+    assert (
+        "✅ `/rerun` (comment 40) consumed — CI results in "
+        "[comment 30](https://atomgit.com/openeuler/GVirt/pull/700#tid-30)." in body
+    )
