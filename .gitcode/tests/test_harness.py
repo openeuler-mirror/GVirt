@@ -1,6 +1,7 @@
 """Logic tests for the .gitcode CI harness.
 
-Pure functions only — no network, no git, no NPU — covering the digest,
+Pure functions plus local scratch git repositories where the behavior under
+test is git itself — no network, no NPU — covering the digest,
 marker/freshness/suite, comment lifecycle, env scrubbing, output vetting,
 derived-config rewriting and definition-drift detection. Run with:
 pytest .gitcode/tests
@@ -320,39 +321,24 @@ def test_marker_roundtrip_and_staleness():
         "a" * 40, sample_checks(), "h", [], "b" * 64, "c" * 40, 0, "ci"
     )
     own = [{"id": 1, "user": {"login": "bot"}, "body": body}]
-    assert pr_ci_bot.find_fresh_comment(own, "bot", "a" * 40, "b" * 64, 0, "ci")
-    assert not pr_ci_bot.find_fresh_comment(own, "bot", "d" * 40, "b" * 64, 0, "ci")
+    assert pr_ci_bot.find_fresh_comment(own, "a" * 40, "b" * 64, 0, "ci")
+    assert not pr_ci_bot.find_fresh_comment(own, "d" * 40, "b" * 64, 0, "ci")
     legacy = [
         {"id": 1, "user": {"login": "bot"}, "body": "old <!-- gvirt-ci-bot:abc:sha -->"}
     ]
-    assert not pr_ci_bot.find_fresh_comment(legacy, "bot", "a" * 40, "b" * 64, 0, "ci")
+    assert not pr_ci_bot.find_fresh_comment(legacy, "a" * 40, "b" * 64, 0, "ci")
 
 
-def test_fresh_comment_ignores_forged_marker_authors():
-    """The six marker fields are all publicly derivable — freshness only
-    counts comments authored by the bot's own account."""
+def test_freshness_tradeoff_forged_markers_count():
+    """The six marker fields are all publicly derivable, and freshness counts
+    any account's comment for cross-instance convergence — so a forged
+    marker suppresses the check. Deliberate tradeoff: a reviewer can see
+    which account posted the verdict, and /rerun re-verifies on demand."""
     body = pr_ci_bot.build_comment(
         "a" * 40, sample_checks(), "h", [], "b" * 64, "c" * 40, 0, "ci"
     )
     forged = [{"id": 7, "user": {"login": "pr-author"}, "body": body}]
-    assert not pr_ci_bot.find_fresh_comment(forged, "bot", "a" * 40, "b" * 64, 0, "ci")
-    assert pr_ci_bot.find_fresh_comment(
-        [{"id": 7, "user": {"login": "bot"}, "body": body}],
-        "bot",
-        "a" * 40,
-        "b" * 64,
-        0,
-        "ci",
-    )
-
-
-def test_fresh_comment_requires_known_bot_login():
-    body = pr_ci_bot.build_comment(
-        "a" * 40, sample_checks(), "h", [], "b" * 64, "c" * 40, 0, "ci"
-    )
-    comments = [{"id": 1, "user": {"login": "bot"}, "body": body}]
-    # /user failed → authorship unverifiable → nothing counts as fresh.
-    assert not pr_ci_bot.find_fresh_comment(comments, None, "a" * 40, "b" * 64, 0, "ci")
+    assert pr_ci_bot.find_fresh_comment(forged, "a" * 40, "b" * 64, 0, "ci")
 
 
 def test_marker_records_suite_and_all_covers_ci():
@@ -364,13 +350,10 @@ def test_marker_records_suite_and_all_covers_ci():
     )
     assert ":ci -->" in ci_body and ":all -->" in all_body
     all_comment = [{"id": 1, "user": {"login": "bot"}, "body": all_body}]
-    assert pr_ci_bot.find_fresh_comment(all_comment, "bot", "a" * 40, "b" * 64, 0, "ci")
-    assert pr_ci_bot.find_fresh_comment(
-        all_comment, "bot", "a" * 40, "b" * 64, 0, "all"
-    )
+    assert pr_ci_bot.find_fresh_comment(all_comment, "a" * 40, "b" * 64, 0, "ci")
+    assert pr_ci_bot.find_fresh_comment(all_comment, "a" * 40, "b" * 64, 0, "all")
     assert not pr_ci_bot.find_fresh_comment(
         [{"id": 1, "user": {"login": "bot"}, "body": ci_body}],
-        "bot",
         "a" * 40,
         "b" * 64,
         0,
@@ -387,10 +370,10 @@ def test_rerun_one_shot_semantics():
     )
     cs0 = [{"id": 1, "user": {"login": "bot"}, "body": body_r0}]
     cs1 = [{"id": 1, "user": {"login": "bot"}, "body": body_r1}]
-    assert pr_ci_bot.find_fresh_comment(cs0, "bot", "a" * 40, "b" * 64, 0, "ci")
-    assert not pr_ci_bot.find_fresh_comment(cs0, "bot", "a" * 40, "b" * 64, 51, "ci")
-    assert pr_ci_bot.find_fresh_comment(cs1, "bot", "a" * 40, "b" * 64, 51, "ci")
-    assert not pr_ci_bot.find_fresh_comment(cs1, "bot", "a" * 40, "b" * 64, 52, "ci")
+    assert pr_ci_bot.find_fresh_comment(cs0, "a" * 40, "b" * 64, 0, "ci")
+    assert not pr_ci_bot.find_fresh_comment(cs0, "a" * 40, "b" * 64, 51, "ci")
+    assert pr_ci_bot.find_fresh_comment(cs1, "a" * 40, "b" * 64, 51, "ci")
+    assert not pr_ci_bot.find_fresh_comment(cs1, "a" * 40, "b" * 64, 52, "ci")
 
 
 # --- comment shaping, vetting, links ----------------------------------------
@@ -509,6 +492,149 @@ def test_find_bot_comments_across_generations():
     )
     newest = bot_comment(22, "bot", "<!-- gvirt-ci-bot:another:sha -->")
     assert pr_ci_bot.find_bot_comments([plain, legacy, newest]) == [legacy, newest]
+
+
+def test_instance_lock_admits_one_scan_at_a_time(tmp_path):
+    """Two overlapping scans both judge a PR not-fresh before either posts
+    (the comment-listing race that burst-posted duplicates with the old
+    bot) — the lock must admit exactly one holder and release on close."""
+    first = pr_ci_bot.acquire_instance_lock(tmp_path)
+    assert first is not None
+    assert pr_ci_bot.acquire_instance_lock(tmp_path) is None
+    first.close()
+    third = pr_ci_bot.acquire_instance_lock(tmp_path)
+    assert third is not None
+    third.close()
+
+
+def test_base_is_stale(tmp_path):
+    """A failed check plus an old base earns the author a rebase nudge: the
+    depth-1 head fetch grafts the tip parentless, so the helper re-fetches
+    bounded-deeper and asks ancestry — old bases are stale, bases carrying
+    the current master tip are not."""
+    import subprocess
+
+    def sh(*cmd, cwd=None):
+        subprocess.run(cmd, cwd=cwd, check=True, capture_output=True)
+
+    def rev(cwd):
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    fork = tmp_path / "fork"
+    fork.mkdir()
+    sh("git", "init", "-q", "-b", "master", str(fork))
+    sh("git", "config", "user.email", "t@t", cwd=fork)
+    sh("git", "config", "user.name", "t", cwd=fork)
+    (fork / "f").write_text("base\n")
+    sh("git", "add", ".", cwd=fork)
+    sh("git", "commit", "-qm", "base", cwd=fork)
+    sh("git", "checkout", "-qb", "old", cwd=fork)
+    (fork / "g").write_text("pr\n")
+    sh("git", "add", ".", cwd=fork)
+    sh("git", "commit", "-qm", "pr", cwd=fork)
+    sh("git", "checkout", "-q", "master", cwd=fork)
+    (fork / "f").write_text("master-moved\n")
+    sh("git", "commit", "-qam", "master moved", cwd=fork)
+    master_sha = rev(fork)
+    sh("git", "checkout", "-qb", "fresh", "master", cwd=fork)
+    (fork / "h").write_text("pr2\n")
+    sh("git", "add", ".", cwd=fork)
+    sh("git", "commit", "-qm", "pr2", cwd=fork)
+
+    refs = tmp_path / "ci-refs.git"
+    subprocess.run(
+        ["git", "init", "-q", "--bare", str(refs)], check=True, capture_output=True
+    )
+    for ref in ("old", "fresh"):
+        pr_ci_bot.fetch_ref(refs, str(fork), ref, f"refs/prbot/pr-{ref}", shallow=True)
+    assert (
+        pr_ci_bot.base_is_stale(refs, str(fork), "old", "refs/prbot/pr-old", master_sha)
+        is True
+    )
+    assert (
+        pr_ci_bot.base_is_stale(
+            refs, str(fork), "fresh", "refs/prbot/pr-fresh", master_sha
+        )
+        is False
+    )
+
+
+def test_stale_reason_names_the_mismatched_marker_fields():
+    """The re-check diagnostic: a same-head comment whose version differs
+    (a new bot build re-verifying by design) must be named as such, not
+    left to look like a fresh PR head."""
+    body = pr_ci_bot.build_comment(
+        "a" * 40, sample_checks(), "h", [], "b" * 64, "c" * 40, 0, "ci"
+    )
+    own = bot_comment(11, "bot", body)
+    version = pr_ci_bot.BOT_TAG_RE.search(body).group("version")
+    assert version != "deadbeef1234"
+    reason = pr_ci_bot.stale_reason([own], "a" * 40, "deadbeef1234", "b" * 64, 0, "ci")
+    assert reason and f"version {version}!=deadbeef1234" in reason
+    assert pr_ci_bot.stale_reason([own], "z" * 40, version, "b" * 64, 0, "ci") is None
+    assert pr_ci_bot.stale_reason([], "a" * 40, version, "b" * 64, 0, "ci") is None
+
+
+def test_freshness_acknowledges_another_bot_account():
+    """Cross-instance convergence: a fresh verdict posted by one bot account
+    is acknowledged by any other instance, instead of every account
+    re-checking and duplicating the results."""
+    body = pr_ci_bot.build_comment(
+        "a" * 40, sample_checks(), "h", [], "b" * 64, "c" * 40, 0, "ci"
+    )
+    other = bot_comment(11, "cibot1", body)
+    assert (
+        pr_ci_bot.find_fresh_comment([other], "a" * 40, "b" * 64, 0, "ci") is not None
+    )
+    # A differing version still re-verifies: the other instance runs a
+    # different build, and the marker records which one checked.
+    stale = bot_comment(12, "cibot1", body.replace(pr_ci_bot.BOT_VERSION, "a" * 12))
+    assert pr_ci_bot.find_fresh_comment([stale], "a" * 40, "b" * 64, 0, "ci") is None
+
+
+def test_client_login_override_and_resolution_failure(monkeypatch):
+    """--login supplies the account for tokens whose GET /user is
+    scope-blocked; a failed resolution records why, so the startup warning
+    can tell the operator exactly what to fix instead of silently degrading
+    replace mode."""
+    monkeypatch.setattr(
+        pr_ci_bot.GitCodeClient, "get", lambda self, path: {"login": "from-api"}
+    )
+    assert pr_ci_bot.GitCodeClient("t").login == "from-api"
+    assert pr_ci_bot.GitCodeClient("t", login="manual").login == "manual"
+
+    def boom(self, path):
+        raise pr_ci_bot.requests.HTTPError("403 Forbidden")
+
+    monkeypatch.setattr(pr_ci_bot.GitCodeClient, "get", boom)
+    failed = pr_ci_bot.GitCodeClient("t")
+    assert failed.login is None and "403" in failed.login_error
+
+
+def test_freshness_matches_the_recorded_715_marker(monkeypatch):
+    """Regression pin with the exact marker the deployed bot recorded on
+    !715 (head 2064002b, trusted run, harness digest f78dcfe7): a run with
+    the same version, digest, request and suite must skip — if a manual
+    rerun re-checks, one of those inputs differs, not the matching logic."""
+    sha = "2064002bb2b477c95232f30c14d5a7d2e3b80a40"
+    digest = "f78dcfe7ea910545f06a754dd7a0b787ca528b0d3cedd8c712d7daaee0f56e6a"
+    marker = f"abffe439ca84:{sha}:{digest}:{sha}:0:ci"
+    comment = {
+        "id": 203164004,
+        "user": {"login": "lulina2"},
+        "body": f"### CI results for [`{sha[:8]}`]\n<!-- gvirt-ci-bot:{marker} -->",
+    }
+    monkeypatch.setattr(pr_ci_bot, "BOT_VERSION", "abffe439ca84")
+    assert pr_ci_bot.find_fresh_comment([comment], sha, digest, 0, "ci") is not None
+    assert (
+        pr_ci_bot.stale_reason([comment], sha, "abffe439ca84", digest, 0, "ci") is None
+    )
 
 
 # --- derived config and definition drift -------------------------------------
@@ -936,3 +1062,43 @@ def test_tidy_verdict_store_gated_on_full_analysis_set(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "argv", ["run_clang_tidy.py", *full])
     assert tidy.main() == 0
     assert tidy.load_verdict(store, "k" * 64)["clean"] is True
+
+
+def test_tidy_findings_are_worktree_relative(monkeypatch, tmp_path):
+    """clang-tidy prints the compile database's absolute paths; the verdict
+    cache is shared across worktrees, so the findings text must never embed
+    this worktree's path (a cache hit would post the populating worktree's
+    paths under another head — seen live on PR !705)."""
+
+    class FakeProc:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    root = tidy_tree(tmp_path, "a")
+    monkeypatch.chdir(root)
+    tidy = tidy_hook(monkeypatch, root)
+
+    def fake_run(cmd, cwd=None, capture_output=True, text=True, check=False):
+        # The real clang-tidy prints paths under this worktree's xlite root.
+        return FakeProc(
+            f"{tidy.XLITE_ROOT}/csrc/op.cpp:41:23: warning: C-style casts are "
+            "discouraged; use static_cast [modernize-avoid-c-style-cast]\n"
+        )
+
+    monkeypatch.setattr(tidy.subprocess, "run", fake_run)
+    clean_a, findings_a = tidy.analyze(tidy.analysis_files())
+    assert not clean_a
+    assert "csrc/op.cpp:41:23: warning" in findings_a
+    assert f"{root}/xlite/" not in findings_a
+
+    # Identical content in a second worktree produces byte-identical text:
+    # the cache entry it stores carries no trace of either path.
+    root_b = tidy_tree(tmp_path, "b")
+    monkeypatch.chdir(root_b)
+    monkeypatch.setattr(tidy, "XLITE_ROOT", root_b / "xlite")
+    monkeypatch.setattr(tidy, "TIDY_CONFIG", root_b / "xlite" / ".clang-tidy")
+    clean_b, findings_b = tidy.analyze(tidy.analysis_files())
+    assert not clean_b and findings_b == findings_a

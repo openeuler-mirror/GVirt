@@ -43,7 +43,7 @@ repos:
     rev: v0.42.0 # newest line supporting node >=18; 0.45+/0.50+ need node 20/22
     hooks:
       - id: markdownlint
-        stages: [pre-commit] # local only — CI has no node dependency (container node is old; nodeenv downloads are proxy-blocked). Node-less contributors: SKIP=markdownlint git commit
+        stages: [manual] # CI only (the manual stage is the CI entry): local commits never need node. CI machines need node >=18 on PATH — language_version: system fails fast when absent instead of a nodeenv download
         language_version: system
         args: [--config, xlite/.markdownlint.yaml, --fix]
 

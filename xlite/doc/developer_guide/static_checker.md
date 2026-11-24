@@ -18,7 +18,7 @@ keeps the standard pre-commit entry points working from any checkout; edit the f
 | `check-merge-conflict`, `check-yaml`, `check-json`, `check-toml`, `check-added-large-files`, `detect-private-key`, `check-ast`, `debug-statements` | all files | pre-commit |
 | `ruff-check` (`--fix`) + `ruff-format` | Python | pre-commit |
 | `clang-format` | `xlite/csrc/**` C/C++ | pre-commit |
-| `markdownlint` (`--fix`) | Markdown (`xlite/.markdownlint.yaml`) | pre-commit |
+| `markdownlint` (`--fix`) | Markdown (`xlite/.markdownlint.yaml`) | manual (CI) |
 | `codespell` | all text files (`xlite/pyproject.toml` `[tool.codespell]`) | pre-commit |
 | `check-cpp-copyright`, `check-cpp-header-guard` | `xlite/csrc/**` | pre-commit |
 | `check-torch-npu-imports` | `xlite/tests/**` (enforces `import torch` before `import torch_npu`) | pre-commit |
@@ -33,21 +33,20 @@ Stages: `pre-commit` hooks run on every local commit; `manual` hooks run only in
 
 ## Usage
 
-One-time setup (from any directory in the repo). `--install-hooks` also builds every hook environment up front — the first commit then needs no network, and env-build failures (e.g. behind a proxy) surface here with a clear message instead of stalling the first commit:
+One-time setup (from any directory in the repo). `--install-hooks` also builds every hook environment up front — the first commit then needs no network, and env-build failures (e.g. behind a proxy) surface here with a clear message instead of stalling the first commit. On node-less machines use plain `pre-commit install`: environments build lazily per stage, and the CI-only hooks (markdownlint) never build locally at all:
 
 ```bash
-pre-commit install --install-hooks
+pre-commit install --install-hooks   # node-less machines: pre-commit install
 ```
 
 After that, hooks run automatically on `git commit`. Hooks that modify files
-(`ruff-check`, `ruff-format`, `markdownlint`) fail the commit and leave the fixes
+(`ruff-check`, `ruff-format`) fail the commit and leave the fixes
 in the working tree — `git add` the touched files and commit again.
 
-Fast whole-tree check of the commit-time set (no CANN build tree, no mypy or clang-tidy; no node either with `SKIP=markdownlint`):
+Fast whole-tree check of the commit-time set (no CANN build tree, no mypy, no clang-tidy, no node):
 
 ```bash
 pre-commit run --all-files                     # commit-stage hooks over the whole tree
-SKIP=markdownlint pre-commit run --all-files  # node-less environments
 ```
 
 Full pre-PR verification (CI parity, includes mypy and clang-tidy). Runs from the repository root or from `xlite/` (whose `.gitcode` symlinks to `../.gitcode`):
@@ -69,7 +68,7 @@ pre-commit run ruff-check --files .gitcode/run_ci_checks.py
 - Python lint/format: most findings are fixed by `pre-commit run ruff-check ruff-format --files <files>`; the rest need manual edits.
 - C++ format: `clang-format -i <file>` under `xlite/` (or `git clang-format` for staged changes).
 - clang-tidy: `clang-tidy -p=build --fix <file>` under `xlite/` (requires a build tree).
-- Markdown: `pre-commit run markdownlint --files <file>` auto-fixes spacing/structure issues.
+- Markdown: `pre-commit run markdownlint --hook-stage manual --files <file>` auto-fixes spacing/structure issues (needs node ≥18 locally — the hook is CI-only).
 - Spelling: `codespell -i 3 <file>` interactive fixes; project vocabulary lives in `[tool.codespell]` of `xlite/pyproject.toml`.
 
 The checking hooks for clang-format and clang-tidy run from pre-commit-managed environments
