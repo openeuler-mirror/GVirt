@@ -288,7 +288,7 @@ public:
     XTensor _indexerHadamard;
     XTensor _dsaTopkBuffer;  // int32, buffer for storing topk results, allocated via aclrtMalloc
     uint32_t _dsaTopkWidth = 0;          // logical topk width (outWidth / top_k)
-    uint32_t _dsaTopkStride = 0;         // physical row stride (outStride / topk_stride)
+    uint32_t _dsaTopkStride = 0;         // physical row stride for topk buffer allocation
     XTensor *dsaPerLayerTopk = nullptr;  // ptr to the **current** layer's topk result, either a
                                          // nullptr (no topk needed) or a ptr to _dsaTopkBuffer
     XTensor _attnZeroBuffer;

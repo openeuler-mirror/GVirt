@@ -2239,8 +2239,7 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
            at::Tensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim, uint32_t nopeHeadDim,
            uint32_t vHeadDim, uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, float scale,
            at::Tensor &topkIndices, uint32_t topK, bool weightNz, bool enableFlashAttention,
-           uint32_t tileSizeOfCachedKV, bool dense, const std::optional<at::Tensor> &kScaleCache,
-           uint32_t topkStride = 0)
+           uint32_t tileSizeOfCachedKV, bool dense, const std::optional<at::Tensor> &kScaleCache)
 {
     (void)weightNz;  // deprecated no-op: nz is auto-detected from the weight format
     XTensor _qWithQr, _qr, _kCache, _peCache, _wukT, _wuv, _output, _queryStartLoc, _lens,
@@ -2290,7 +2289,7 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
             rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, topK}, XDtypeOf(qWithQr), DBG_LOC);
         XliteOpMLAV2(rt, qAbsorb, _qr, kDense, peDense, qk, oAbsorb, _queryStartLoc, _lens,
                      _cachedLens, _blockTables, nHeads, ropeHeadDim, kvLoraRank, blockSize, batch,
-                     topK, scale, 0, XTensor(), dense, true, topkStride);
+                     topK, scale, 0, XTensor(), dense, true);
         rt.PutTensor(qk);
         rt.PutTensor(peDense);
         rt.PutTensor(kDense);
@@ -2310,7 +2309,7 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
         }
         XliteOpMLAV2(rt, qAbsorb, _qr, *k, *pe, qk, oAbsorb, _queryStartLoc, _lens, _cachedLens,
                      *table, nHeads, ropeHeadDim, kvLoraRank, blockSize, batch,
-                     maxNumBlocks * blockSize, scale, topK, _topkIndices, c8, false, topkStride);
+                     maxNumBlocks * blockSize, scale, topK, _topkIndices, c8, false);
         if (c8) {
             rt.PutTensor(*pe);
             rt.PutTensor(*k);
@@ -2342,7 +2341,7 @@ void MLAV2(XRuntime &rt, at::Tensor &qWithQr, at::Tensor &qr, at::Tensor &kCache
         XliteOpFlashMLAV2(rt, qAbsorb, _qr, *k, *pe, qk, sv, max, sum, lastMax, lastSum, sync,
                           oAbsorb, _queryStartLoc, _lens, _cachedLens, *table, nHeads, ropeHeadDim,
                           kvLoraRank, blockSize, batch, scale, tileSizeOfCachedKV, topK,
-                          _topkIndices, c8, topkStride);
+                          _topkIndices, c8);
         if (c8) {
             rt.PutTensor(*pe);
             rt.PutTensor(*k);
@@ -5126,8 +5125,7 @@ TORCH_LIBRARY(xlite_sabi, m)
               torch::arg("enable_flash_attention") = false,
               torch::arg("tile_size_of_cached_kv") = static_cast<int64_t>(8192),
               torch::arg("dense") = false,
-              torch::arg("k_scale_cache") = torch::arg::none(),
-              torch::arg("topk_stride") = static_cast<int64_t>(0)})
+              torch::arg("k_scale_cache") = torch::arg::none()})
         .def("dsa_cp_gather_mla", op<&DsaCpGatherMLA>,
              {torch::arg("rt"), torch::arg("q_absorb"), torch::arg("qr"), torch::arg("k_cache"),
               torch::arg("pe_cache"), torch::arg("output"), torch::arg("query_start_loc"),

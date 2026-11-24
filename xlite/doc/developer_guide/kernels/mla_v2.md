@@ -70,7 +70,7 @@ mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, oAbsorb,
 | qr | 输入 | `[total_tokens, nHeads, ropeHeadDim]` | BF16 | Q 的 RoPE 部分 |
 | kCache | 输入 | sparse: `[numBlocks, blockSize, kvLoraRank]`;dense: `[batch, maxSeqLen, kvLoraRank]` | BF16 | latent K cache |
 | peCache | 输入 | sparse: `[numBlocks, blockSize, ropeHeadDim]`;dense: `[batch, maxSeqLen, ropeHeadDim]` | BF16 | RoPE 后的 K cache |
-| topkIndices | 输入(可选) | `[total_tokens, topK]` | INT32 | DSA 每行 query 的 top-k token 下标(升序),topK>0 时使用，与缓存布局无关 |
+| topkIndices | 输入(可选) | `[total_tokens, ROUND_UP(topK, TOPK_RUN_ALIGN)]` | INT32 | DSA 每行 query 的 top-k token 下标(升序),topK>0 时使用，与缓存布局无关；行距由 kernel 从 `topK` 派生为 `topkStride = ROUND_UP(topK, TOPK_RUN_ALIGN)`(GLM5 kpool: 2051→2176) |
 | qk | workspace | `[aicNum * XLITE_MAX_M0 * 2, maxSeqLen]` | BF16 | QK 分数缓冲;sparse 或 C8 完整展开时 `maxSeqLen = blockTables.shape[1] * blockSize`(运行期行宽,`shape[1]` 已由 PrepareAttn 收窄),Gather Decode 时 `maxSeqLen = indexTopK`(见 `csrc/_C.cpp` 的 `MLAV2` dense 分支,关键字 `rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, topK}`) |
 | oAbsorb | 输出 | `[total_tokens, nHeads, kvLoraRank]` | BF16 | softmax(QK)·kCache |
 | queryStartLoc / queryLens / cachedLens | 输入 | `[batch]` | INT32 | 同 attention |
@@ -83,8 +83,7 @@ mla_v2_<dtype>(qAbsorb, qr, kCache, peCache, topkIndices, qk, oAbsorb,
 | blockTableStride | 标量 | - | uint32 | blockTables 的行跨度(元素数),host 取 `blockTables.stride[0]`,仅用于 sparse 行寻址(dense 置 0) |
 | maxSeqLen | 标量 | - | uint32 | qk workspace 行宽与 dense 长度:sparse 时为 `blockTables.shape[1] * blockSize`(qk workspace 行宽;V2 的 `shape[1]` 已由 PrepareAttn 收窄到运行期宽度),dense 时为连续 cache 每批容量(Gather Decode 为 indexTopK，C8 完整展开为调用方分配的容量) |
 | scale | 标量 | - | float | `(nopeHeadDim + ropeHeadDim)^-0.5` |
-| topK | 标量 | - | uint32 | DSA 逻辑 top-k 选择数;`calcLen > topK` 时走 sparse。启用 Top-K 选择时 host 要求 `maxSeqLen ≤ MAX_SOFTMAX_PINGPONG_LEN=10496`(见 `csrc/op.cpp` 的 `XliteOpMLAV2`,关键字 `MAX_SOFTMAX_PINGPONG_LEN`)。Python `dense=True` 仍要求 topK > 0，收集后以该值为 maxSeqLen、以 `topK=0` 调用内核；C8 完整展开保留原 topK 和索引 |
-| topkStride | 标量 | - | uint32 | topkIndices 物理行距;GLM5 packTail 为 2176(逻辑 topK=2051)。`0` 回退到 `topK`;host 要求 `topkStride ≥ topK`、`topkStride ≤ MAX_TOPK_RUN_NUM=2176` 且为 128 的倍数 |
+| topK | 标量 | - | uint32 | DSA 逻辑 top-k 选择数;`calcLen > topK` 时走 sparse。kernel 内派生 `topkStride = ROUND_UP(topK, TOPK_RUN_ALIGN)`，用于 `topkIndices` 行寻址与 mask 宽度。启用 Top-K 选择时 host 要求 `maxSeqLen ≤ MAX_SOFTMAX_PINGPONG_LEN=10496`(见 `csrc/op.cpp` 的 `XliteOpMLAV2`,关键字 `MAX_SOFTMAX_PINGPONG_LEN`)。Python `dense=True` 仍要求 topK > 0，收集后以该值为 maxSeqLen、以 `topK=0` 调用内核；C8 完整展开保留原 topK 和索引 |
 | kCacheStride / peCacheStride | 标量 | - | uint32 | kCache / peCache 的 dim-0 跨度(元素数),块或 batch 基址 = 序号 × 跨度:sparse 为每物理块跨度(连续时等于 blockSize×kvLoraRank / blockSize×ropeHeadDim),dense 为每 batch 跨度(连续时等于 maxSeqLen×kvLoraRank / maxSeqLen×ropeHeadDim);非连续时由宿主传入真实跨距 |
 | dense | 标量 | - | uint32 | 1=dense cache(`[batch, maxSeqLen, ...]`,batch 起点 = b×kCacheStride,由 gather_sparse_kv_cache 收集,blockTable 不使用),0=paged(见 `csrc/op.cpp` 的 `XliteOpMLAV2`,关键字 `dense`) |
 | densePerQuery | 标量 | - | uint32 | dense 时选择缓存行布局：1=每 query 一行，0=每请求一行；SFA-C8 完整展开使用 0 |
@@ -242,7 +241,7 @@ mla_v2 的 maxBuf/sumBuf 传 nullptr(saveMaxSum=false),`maxOut`/`sumOut` 槽位�
 - **L0 三级峰值全部顶满(100%)**:BF16 下 `qkk0=128`、`XLITE_MAX_M0=MAX_N0=128` 使 QK 相位 L0A/L0B 各恰 64KB、SV 相位 L0B 亦恰满 64KB(`svn0=256` 单份即 32768 B、双份顶满),两相位 L0C(CO1)各恰 128KB——M/N/K 任一维度增大都会先撞 L0;host 侧 `nHeads <= XLITE_MAX_M0` 校验(`csrc/op.cpp` 的 `XliteOpMLAV2`,关键字 `nHeads > XLITE_MAX_M0`)正是「单 token 全部头必须落进一个 M0 tile」的容量前提;
 - L1 峰值在 QK 相位 442368 B(84.4%),大头是双份 K 预取 `akl1bBuf`(262144 B,占 QK 相位 59%);SV 相位仅 262144 B(50%),与 QK 相位自偏移 0 复用同一物理 L1,无需按两组求和;
 - AIV UB 峰值在全量 softmax 路径:in/out/calc/calcDst 按 `MAX_SUB_CONTEXT_SIZE=16256` 定长合计 162560 B,加 max/sum 两槽共 163584 B(159.75KB,83.2%);top-k 路径 153344 B(78.0%)随运行期 len/topK 缩放;
-- top-k 路径的容量来源是 host 校验 `maxSeqLen <= MAX_SOFTMAX_PINGPONG_LEN=10496` 与 `topkStride <= MAX_TOPK_RUN_NUM=2176`(`csrc/op.cpp` 的 `XliteOpMLAV2`),并用 `SoftmaxPingPongUbNeed(max(len, topkStride), topkStride)` 按运行期形状复核。按上限组合(len=10496、topK=2048)代入布局为 185600 B ≤ `UB_SIZE`(余 11008 B;旧上限 11776 的同组合实占 203520 B 越界,旧 static_assert 公式漏计 `indicesFp32` 槽位 8192 B 而误判通过——已随上限收紧到 10496 并补全断言公式一并修复);kpool 行距补齐到 topkStride=2176 时 `topkMask0`/`topkMask1` 各 512 B,同组合峰值为 189696 B,仍余 6912 B;mla_v2 实际服务的短序列(maxSeqLen ≤ 8192,占 153344 B)尚有 43264 B 余量。
+- top-k 路径的容量来源是 host 校验 `maxSeqLen <= MAX_SOFTMAX_PINGPONG_LEN=10496` 与 `topkStride = ROUND_UP(topK, TOPK_RUN_ALIGN) <= MAX_TOPK_RUN_NUM=2176`(`csrc/op.cpp` 的 `XliteOpMLAV2`),并用 `SoftmaxPingPongUbNeed(max(len, topkStride), topkStride)` 按运行期形状复核。按上限组合(len=10496、topK=2048)代入布局为 185600 B ≤ `UB_SIZE`(余 11008 B;旧上限 11776 的同组合实占 203520 B 越界,旧 static_assert 公式漏计 `indicesFp32` 槽位 8192 B 而误判通过——已随上限收紧到 10496 并补全断言公式一并修复);kpool 行距补齐到 topkStride=2176 时 `topkMask0`/`topkMask1` 各 512 B,同组合峰值为 189696 B,仍余 6912 B;mla_v2 实际服务的短序列(maxSeqLen ≤ 8192,占 153344 B)尚有 43264 B 余量。
 
 ## DSA-CP MLA
 

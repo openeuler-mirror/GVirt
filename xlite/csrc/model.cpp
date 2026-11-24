@@ -926,7 +926,6 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
     XTensor *topkIndices = rt.dsaPerLayerTopk;
     // Runtime owns the topk buffer geometry. No topk row means topK=0 (dense).
     uint32_t topkWidth = topkIndices != nullptr ? rt._dsaTopkWidth : 0;
-    uint32_t topkStride = topkIndices != nullptr ? rt._dsaTopkStride : 0;
     rt.PutTensor(attnNormQc);
 
     XTensor &qAbsorb = rt.GetTensor({hiddenState.shape[0], nLocalHeads * _c.kvLoraRank},
@@ -971,7 +970,7 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
         XliteOpMLAV2(rt, qAbsorb, qPe, kDense, peDense, qkDense, oAbsorb, rt._attnQueryStartLoc,
                      rt._attnLens, rt._attnCachedLens, rt._attnBlockTables[0], nLocalHeads,
                      _c.ropeHeadDim, _c.kvLoraRank, _c.blockSizes[0], rt._batch, topkWidth,
-                     _c.softmaxScale, 0, XTensor(), true, true, topkWidth);
+                     _c.softmaxScale, 0, XTensor(), true, true);
         rt.PutTensor(qkDense);
         rt.PutTensor(peDense);
         rt.PutTensor(kDense);
@@ -982,7 +981,7 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
                      rt._attnLens, rt._attnCachedLens, rt._attnBlockTables[0], nLocalHeads,
                      _c.ropeHeadDim, _c.kvLoraRank, _c.blockSizes[0], rt._batch,
                      maxNumBlocks * _c.blockSizes[0], _c.softmaxScale, topkWidth,
-                     topkIndices == nullptr ? XTensor() : *topkIndices, false, true, topkStride);
+                     topkIndices == nullptr ? XTensor() : *topkIndices, false, true);
         rt.PutTensor(qk);
     } else {
         XTensor &qk = rt.GetTensor({rt.aicNum * XLITE_MAX_M0 * 2, rt._tileSizeOfCachedKV},
@@ -997,8 +996,7 @@ void XModel::ForwardAttnMLAV2(XRuntime &rt, uint32_t layer,
                           _sync, oAbsorb, rt._attnQueryStartLoc, rt._attnLens, rt._attnCachedLens,
                           rt._attnBlockTables[0], nLocalHeads, _c.ropeHeadDim, _c.kvLoraRank,
                           _c.blockSizes[0], rt._batch, _c.softmaxScale, rt._tileSizeOfCachedKV,
-                          topkWidth, topkIndices == nullptr ? XTensor() : *topkIndices, false,
-                          topkStride);
+                          topkWidth, topkIndices == nullptr ? XTensor() : *topkIndices, false);
         rt.PutTensor(lastSum);
         rt.PutTensor(lastMax);
         rt.PutTensor(sum);

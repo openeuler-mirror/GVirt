@@ -81,7 +81,7 @@ WORKS = [
     ("decode-b4-21k-allmiss", [21000] * 4, [1] * 4, False, False, "all-miss"),
 ]
 
-# (top_k logical selection width, topk_stride physical row width)
+# (top_k logical selection width, test-local physical row width)
 TOPK_CASES = [(2048, 2048), (2051, 2176)]
 
 # Both sides sit ~2.5% from the fp32 truth on these ill-conditioned elements
@@ -299,7 +299,6 @@ def run_case(
         scale,
         topk_indices,
         top_k=top_k,
-        topk_stride=topk_stride,
         nz=WEIGHT_NZ,
         enable_flash_attention=ENABLE_FLASH,
         tile_size_of_cached_kv=TILE_SIZE,
