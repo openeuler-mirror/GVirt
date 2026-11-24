@@ -29,9 +29,10 @@ digest_exclude` list, plus the `digest_include` entries kept outside
 matter, the combination is order-independent, symlinked entries resolve
 to the real file, and a binary in the set is an error), and the commit
 the harness came from. A comment is fresh when head sha and digest match
-the current target; when only the recorded commit moved (identical
-content), the results still hold and the next real change posts a new
-comment. The digest is content-based, so freshness never needs to
+the current target, whatever bot account posted it — a second instance
+acknowledges the first's verdict instead of duplicating it; when only the
+recorded commit moved (identical content), the results still hold and the
+next real change posts a new comment. The digest is content-based, so freshness never needs to
 resolve a commit from the git graph (rebased or vanished commits still
 compare); the recorded commit stays as a hyperlinked graph reference.
 pr_ci_bot.py itself is excluded from the digest: it is the entry script
@@ -81,6 +82,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -89,6 +91,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 import tomllib
 from pathlib import Path
 
@@ -131,7 +134,24 @@ STATUS_EMOJI = {"passed": "✅", "failed": "❌", "skipped": "⏭️"}
 
 
 def log(message: str) -> None:
-    print(message, flush=True)
+    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}", flush=True)
+
+
+def acquire_instance_lock(root: Path):
+    """One scan at a time. Two concurrent scans both judge a PR not-fresh
+    before either posts (the comment-listing propagation race that
+    burst-posted duplicates with the old bot) — the lock makes overlapping
+    instances structurally impossible. flock releases on process death, so a
+    killed scan never leaves a stale lock. Returns the held file handle, or
+    None when another instance holds it."""
+    root.mkdir(parents=True, exist_ok=True)
+    lock_file = (root / "bot.lock").open("w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock_file.close()
+        return None
+    return lock_file
 
 
 class Check:
@@ -184,17 +204,24 @@ def tail(text: str, max_lines: int = COMMENT_MAX_LINES) -> str:
 
 
 class GitCodeClient:
-    def __init__(self, token: str):
+    def __init__(self, token: str, login: str | None = None):
         self.session = requests.Session()
         self.session.headers["Authorization"] = f"Bearer {token}"
-        # Freshness is author-filtered: only this account's comments can
-        # count as a current verdict, so a marker copied into anyone else's
-        # comment never satisfies it. None (fetch failed) disables freshness
-        # — every check re-runs and posts.
+        # Freshness acknowledges any bot account's marker comment
+        # (cross-instance convergence), so the login is only needed to
+        # target this account's own comments in replace mode. --login
+        # supplies it for tokens whose GET /user is scope-blocked
+        # (fine-grained PATs often exclude the user-info scope);
+        # login_error records why resolution failed for the startup log.
+        self.login_error = None
+        if login is not None:
+            self.login = login
+            return
         try:
             self.login = self.get("/user").get("login")
-        except requests.RequestException:
+        except requests.RequestException as e:
             self.login = None
+            self.login_error = str(e)
 
     def request(
         self,
@@ -311,7 +338,6 @@ def vet_output(text: str) -> str:
 
 def find_fresh_comment(
     comments: list,
-    author: str | None,
     head_sha: str,
     digest: str,
     request: int,
@@ -320,18 +346,16 @@ def find_fresh_comment(
     """The bot comment that already covers this head sha, harness digest,
     /rerun request and suite — an `all` run also covers a `ci` request,
     never the other way around — with its parsed marker; None when the PR
-    needs a re-check. Only comments authored by this bot's account count:
-    the marker's six fields are all publicly derivable, so a marker copied
-    into anyone else's comment must never satisfy freshness — and when the
-    account's login is unknown, no comment can. Comments from earlier bot
+    needs a re-check. Any bot account's comment counts, so a second instance
+    (another deployment or token) acknowledges the first's verdict instead
+    of duplicating it; the tradeoff is that a forged marker would also
+    suppress the check — every field is publicly derivable — accepted for
+    cross-instance convergence (a reviewer can see which account posted the
+    verdict, and /rerun re-verifies on demand). Comments from earlier bot
     generations (no marker or a marker without the newer fields) never
     match, so the next check posts a new comment rather than treating
     them as current."""
-    if author is None:
-        return None
     for comment in comments:
-        if (comment.get("user") or {}).get("login") != author:
-            continue
         m = BOT_TAG_RE.search(comment.get("body", ""))
         if (
             m
@@ -360,6 +384,43 @@ def latest_rerun_request(comments: list, allowed: set[str]):
         if is_rerun and (latest is None or comment["id"] > latest[0]):
             latest = (comment["id"], author)
     return latest
+
+
+def stale_reason(
+    comments: list,
+    sha: str,
+    version: str,
+    digest: str,
+    request: int,
+    suite: str,
+) -> str | None:
+    """The operator-facing reason the newest bot comment on this very head
+    does not count as fresh — None when there is no comment to explain.
+    Answers 'it re-checked despite its comment': a differing version is a
+    new bot build re-verifying by design, a differing digest a harness
+    update, a differing request a fresh /rerun."""
+    newest = None
+    for c in comments:
+        m = BOT_TAG_RE.search(c.get("body") or "")
+        if (
+            m
+            and m.group("sha") == sha
+            and (newest is None or c.get("id", 0) > newest[0])
+        ):
+            newest = (c.get("id", 0), m)
+    if newest is None:
+        return None
+    m = newest[1]
+    fields = []
+    if m.group("version") != version:
+        fields.append(f"version {m.group('version')}!={version}")
+    if m.group("digest") != digest:
+        fields.append("harness digest")
+    if m.group("request") != str(request):
+        fields.append(f"request {m.group('request')}!={request}")
+    if not (m.group("suite") == suite or m.group("suite") == "all"):
+        fields.append(f"suite {m.group('suite')}!={suite}")
+    return ", ".join(fields) if fields else None
 
 
 CI_REQUEST_RE = re.compile(r"/ci\b")
@@ -554,6 +615,37 @@ def fetch_ref(
     return git(repo_dir, ["rev-parse", local_ref])
 
 
+def base_is_stale(
+    repo_dir: Path, url: str, ref: str, local_ref: str, master_sha: str
+) -> bool:
+    """Whether the PR branched from a master older than the current tip.
+    The depth-1 head fetch grafts the tip parentless, so ancestry needs a
+    bounded re-fetch at a larger depth — failed PRs only, the extra objects
+    ride the rebase nudge, which never blocks; if the deepened history
+    still misses the tip, the base is old beyond the bound, stale by any
+    measure."""
+    try:
+        git(
+            repo_dir,
+            [
+                "fetch",
+                "--no-tags",
+                "--force",
+                "--depth",
+                "301",
+                url,
+                f"+{ref}:{local_ref}",
+            ],
+            timeout=120,
+        )
+        git(
+            repo_dir, ["merge-base", "--is-ancestor", master_sha, local_ref], timeout=60
+        )
+        return False
+    except (RuntimeError, subprocess.TimeoutExpired):
+        return True
+
+
 def prepare_worktree(repo_dir: Path, sha: str, worktree_root: Path, name: str) -> Path:
     worktree_root.mkdir(parents=True, exist_ok=True)
     wt = worktree_root / name
@@ -733,7 +825,7 @@ def process_pr(
     )
 
     if not trusted and find_fresh_comment(
-        comments, client.login, head_sha, master["digest"], request, suite
+        comments, head_sha, master["digest"], request, suite
     ):
         log(
             f"PR #{pr_number}: CI comment already covers this commit and harness, skipping"
@@ -775,11 +867,14 @@ def process_pr(
         else:
             script, source, digest = master["script"], master["sha"], master["digest"]
             harness = f"master `.gitcode` @ {tree_link(master['sha'])}"
-        if find_fresh_comment(comments, client.login, sha, digest, request, suite):
+        if find_fresh_comment(comments, sha, digest, request, suite):
             log(
                 f"PR #{pr_number}: CI comment already covers this commit and harness, skipping"
             )
             return
+        reason = stale_reason(comments, sha, BOT_VERSION, digest, request, suite)
+        if reason:
+            log(f"PR #{pr_number}: re-checking {sha[:8]} (stale comment: {reason})")
 
         checks = run_harness(script, wt, args)
         if script == master["script"] and touches_gitcode(
@@ -788,6 +883,18 @@ def process_pr(
             notes.append(
                 f"This PR updates `.gitcode`, but the checks ran the trusted master copy at {tree_link(master['sha'])}. "
                 "Ask a `.gitcode` owner to comment `/ci` to re-check with this PR's harness."
+            )
+        if any(check["status"] == "failed" for check in checks) and base_is_stale(
+            Path(args.refs_repo),
+            f"https://gitcode.com/{repo_path}.git",
+            pr["head"]["ref"],
+            f"refs/prbot/pr-{pr_number}",
+            master["sha"],
+        ):
+            notes.append(
+                f"This PR branched from a master older than the current tip ({master['sha'][:8]}) — "
+                "the failing findings may come from the base rather than this PR's changes. "
+                "Rebase onto the latest master and push to clear them."
             )
 
         body = build_comment(
@@ -817,6 +924,14 @@ def main() -> int:
         "-t",
         default=os.environ.get("GITCODE_TOKEN"),
         help="GitCode API token (or GITCODE_TOKEN)",
+    )
+    parser.add_argument(
+        "--login",
+        default=None,
+        help="The account this token posts as, for tokens whose GET /user is "
+        "blocked by scope (fine-grained PATs often exclude the user-info "
+        "scope) — used only to target this account's own comments in "
+        "replace mode",
     )
     parser.add_argument(
         "--comment-mode",
@@ -918,9 +1033,20 @@ def main() -> int:
     # relative --worktree-root would otherwise be mkdir'd against the shell
     # cwd but resolved by git against the repo dir.
     args.worktree_root = str(root)
+    lock = acquire_instance_lock(root)
+    if lock is None:
+        log(f"another scan holds {root / 'bot.lock'}; exiting")
+        return 0
     configure_shared_caches(root)
 
-    client = GitCodeClient(args.token)
+    client = GitCodeClient(args.token, login=args.login)
+    if client.login is None:
+        log(
+            "WARNING: cannot resolve this token's own login "
+            f"({client.login_error or 'no login in the GET /user response'}) — "
+            "freshness acknowledges any bot account's comment, but replace-mode "
+            "delivery degrades to posting; pass --login <account> to name it"
+        )
     log(f"Repository: {REPO_OWNER}/{REPO_NAME}")
 
     # Every fetch and worktree happens in a dedicated bare repository under
@@ -962,6 +1088,7 @@ def main() -> int:
 
     if args.pr is not None:
         for number in args.pr:
+            started = time.monotonic()
             try:
                 pr = client.get(f"/repos/{REPO_OWNER}/{REPO_NAME}/pulls/{number}")
             except requests.HTTPError as e:
@@ -973,15 +1100,18 @@ def main() -> int:
                 process_pr(client, pr, args, master)
             except Exception as e:  # noqa: BLE001 — one bad PR must not stop the rest
                 log(f"PR #{number}: unexpected error: {e}")
+            log(f"PR #{number}: done in {time.monotonic() - started:.1f}s")
         return 0
 
     prs = client.get_open_prs()
     log(f"Found {len(prs)} open PR(s)")
     for pr in prs:
+        started = time.monotonic()
         try:
             process_pr(client, pr, args, master)
         except Exception as e:  # noqa: BLE001 — keep the loop alive for the remaining PRs
             log(f"PR #{pr.get('number')}: unexpected error: {e}")
+        log(f"PR #{pr.get('number')}: done in {time.monotonic() - started:.1f}s")
     return 0
 
 

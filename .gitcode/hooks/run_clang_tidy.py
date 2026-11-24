@@ -202,7 +202,10 @@ def analyze(files: list[Path]) -> tuple[bool, str]:
             text=True,
             check=False,
         )
-        output = result.stdout + result.stderr
+        # clang-tidy prints the compile database's absolute paths; verdicts are
+        # cached across worktrees, so strip this worktree's prefix — else a
+        # cache hit posts the populating worktree's paths under another head.
+        output = (result.stdout + result.stderr).replace(str(XLITE_ROOT) + "/", "")
         hits = [line for line in output.splitlines() if TIDY_FINDING.search(line)]
         if result.returncode != 0:
             text = f"clang-tidy failed for {rel} (exit {result.returncode}):\n" + (
