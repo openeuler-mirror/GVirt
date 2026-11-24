@@ -32,6 +32,7 @@ import time
 import torch
 import torch_npu
 
+from tests.models.weight_utils import matrix_nd2nz
 from xlite._C import (
     Runtime,
     dequant,
@@ -49,7 +50,6 @@ dev_id = 0
 rt = Runtime(dev_id, size=500)
 torch.npu.set_device(dev_id)
 
-ACL_FORMAT_FRACTAL_NZ = 29
 WARMUP_ROUNDS = 1
 REPS = 10
 OP_ORDER = [
@@ -124,7 +124,7 @@ def run_config(label, m, n, k, is_dyn, has_bias):
     x = torch.randn(m, k, dtype=torch.bfloat16, device=f"npu:{dev_id}") * 2.0
     weight_ref = torch.randint(-8, 8, (n, k), dtype=torch.int8, device=f"npu:{dev_id}")
     # 与模型部署一致: transpose=True + NZ 布局
-    y_in = torch_npu.npu_format_cast(weight_ref.t().contiguous(), ACL_FORMAT_FRACTAL_NZ)
+    y_in = matrix_nd2nz(weight_ref.t().contiguous())
 
     if has_bias:
         bias = torch.randint(-64, 64, (n,), dtype=torch.int32, device=f"npu:{dev_id}")

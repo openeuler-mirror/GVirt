@@ -3,6 +3,7 @@
 """Utilities for downloading and initializing model weights."""
 
 import glob
+import importlib.util
 import json
 import logging
 import os
@@ -46,8 +47,42 @@ def rearrange_matrix(matrix, n0, k_block_size=16):
     return final_reshaped.view(matrix.size(0), matrix.size(1))
 
 
+_ge_paths_probed = False
+
+
+def _ensure_cann_ge_paths():
+    """Restore te/tbe importability; `PYTHONPATH=<repo>` invocations strip the CANN python dirs."""
+    global _ge_paths_probed
+    # find_spec, never an actual import: te/__init__ pulls CANN shared libs and
+    # a sick install raises (OSError/RuntimeError), which would crash the bare
+    # matrix_nd2nz callers in the model tests. One attempt per process: model
+    # loads call matrix_nd2nz per layer/expert.
+    if _ge_paths_probed or importlib.util.find_spec("te") is not None:
+        _ge_paths_probed = True
+        return
+    homes = [
+        *filter(None, (os.environ.get("ASCEND_HOME_PATH"), os.environ.get("ASCEND_TOOLKIT_HOME"))),
+        "/usr/local/Ascend/ascend-toolkit/latest",
+    ]
+    for home in homes:
+        pkg_dir = os.path.join(home, "python", "site-packages")
+        if pkg_dir in sys.path or not os.path.isdir(os.path.join(pkg_dir, "te")):
+            continue
+        sys.path.append(pkg_dir)
+        if importlib.util.find_spec("te") is not None:
+            _ge_paths_probed = True
+            return
+        sys.path.remove(pkg_dir)
+    print(f"weight_utils: no site-packages under {', '.join(homes)} provides te; NZ casts will fail")
+    _ge_paths_probed = True
+
+
 def matrix_nd2nz(matrix):
     """nd2nz"""
+    # GE stays broken for the whole process once a cast failed without te/tbe;
+    # torch_npu 2.9 leaves ALLOW_INTERNAL_FORMAT unset (casts silently no-op).
+    _ensure_cann_ge_paths()
+    torch.npu.config.allow_internal_format = True
     return torch_npu.npu_format_cast(matrix, ACL_FORMAT_FRACTAL_NZ)
 
 
@@ -76,14 +111,14 @@ def require_nz_format(tensor, context):
 
 # One-shot matrix_nd2nz availability sentinel. Two environment shapes leave
 # an "NZ" case unable to actually cover NZ: npu_format_cast either silently
-# no-ops (internal-format option unset; caught per case by is_nz_format) or,
-# with the GE op-compile infrastructure missing (te/tbe not importable),
-# raises RuntimeError (AclSetCompileopt ... error code 500001) for every
-# dtype x option combination — before any tag probe could run. The sentinel
-# probes that second shape lazily, once per process, with a dedicated small
-# tensor whose only failure mode is environmental; per-case casts after a
-# passing sentinel are deliberately NOT wrapped, so genuine non-compile
-# exceptions still propagate.
+# no-ops (caught per case by is_nz_format) or, with the GE op-compile
+# infrastructure missing (te/tbe not importable), raises RuntimeError
+# (AclSetCompileopt ... error code 500001) for every dtype x option
+# combination — before any tag probe could run. The sentinel probes that
+# second shape lazily, once per process, with a dedicated small tensor whose
+# only failure mode is environmental; per-case casts after a passing sentinel
+# are deliberately NOT wrapped, so genuine non-compile exceptions still
+# propagate.
 _nd2nz_unavailable_reason: str | None = None
 _nd2nz_probe_done = False
 
