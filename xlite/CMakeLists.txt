@@ -26,6 +26,19 @@ message(STATUS "ASCEND_CANN_PACKAGE_PATH: ${ASCEND_CANN_PACKAGE_PATH}")
 option(XLITE_BENCH_TIMED "Build in-kernel timed micro-benchmark variants" OFF)
 
 find_program(CCACHE_FOUND ccache)
+# find_program caches its result: a build dir configured while ccache was
+# installed keeps launching the removed binary (make error 127). Re-search
+# when the cached path no longer exists.
+if(CCACHE_FOUND AND NOT EXISTS "${CCACHE_FOUND}")
+    message(STATUS "Stale cached ccache '${CCACHE_FOUND}' no longer exists; re-searching")
+    unset(CCACHE_FOUND CACHE)
+    find_program(CCACHE_FOUND ccache)
+    if(CCACHE_FOUND)
+        message(STATUS "Found ccache: ${CCACHE_FOUND}")
+    else()
+        message(STATUS "ccache not found; building without a compiler cache")
+    endif()
+endif()
 if (CCACHE_FOUND)
     set(CMAKE_CXX_COMPILER_LAUNCHER ccache)
 endif()

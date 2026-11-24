@@ -62,6 +62,8 @@ cmake --install build
 python tests/kernels/add.py
 ```
 
+ccache 为可选的编译加速项：cmake 配置阶段自动探测（`find_program`），未安装则不启用，构建不依赖 ccache。复用的构建目录（如 `build/` 或 `XLITE_BUILD_TEMP` 指定的稳定构建树）若在配置后 ccache 被移除，重新配置时会自动校验缓存路径并重新探测，无需手动清理构建目录。
+
 ### 调试构建
 
 xlite 的调试能力集中在 `csrc/debug.{h,cpp}` 模块：提供 rank 感知、配色、单次 flush 的原子打印（避免多 rank /多线程输出交错），以及张量检查算子（`XDEBUG_PRINT*` / `XDEBUG_CHECK_NAN_INF` 等，附带 NaN/Inf/大值检测）。调试代码默认不编译，通过 `XLITE_DEBUG_ON` 环境变量按类别开启——这是一个**编译期**开关，仅在 cmake 配置阶段读取，改值后需重新配置并编译。
