@@ -1,14 +1,14 @@
 ---
 name: op-perf-bottleneck-analysis
-description: 定位 NPU 算子性能瓶颈并给出优化方向：用 msprof application 模式跑 tests/perf 单算子用例，采集主要负载（单/多 batch、长短序列 prefill/decode）基线；MIX 算子通过注释 AIC/AIV 主代码段（保留核间同步与框架）判别关键路径；再按各 pipeline time(us) 与 Task Duration(us) 的 max/sum 关系判断流水并行性；最后对瓶颈流水线逐段消融定位代码段，输出瓶颈结论与优化手段建议。当用户要求分析算子性能瓶颈、定位 kernel 慢的原因、给算子优化方向时使用。
+description: 定位 NPU 算子性能瓶颈并给出优化方向：用 msprof application 模式跑 tests/perf 单算子用例，采集主要负载（单/多 batch、长短序列 prefill/decode）基线；先评估多核负载均衡（核利用率 + 核间均衡度 + 任务分配模型对照，区分任务独裁型/带宽饱和型，不均衡先修任务划分再谈流水）；MIX 算子通过注释 AIC/AIV 主代码段（保留核间同步与框架）判别关键路径；再按各 pipeline time(us) 与 Task Duration(us) 的 max/sum 关系判断流水并行性；最后对瓶颈流水线逐段消融定位代码段，输出瓶颈结论与优化手段建议。当用户要求分析算子性能瓶颈、定位 kernel 慢的原因、给算子优化方向时使用。
 ---
 
 # 算子性能瓶颈分析
 
-按五步推进，每一步都以 msprof 实测数据为依据，禁止凭代码阅读直接下结论：
+按六步推进，每一步都以 msprof 实测数据为依据，禁止凭代码阅读直接下结论：
 
 ```
-负载基线采集 → MIX 判别 AIC/AIV 关键路径 → pipeline 级分析 → 流水并行性判断 → 代码段定位
+负载基线采集 → 多核负载均衡分析 → MIX 判别 AIC/AIV 关键路径 → pipeline 级分析 → 流水并行性判断 → 代码段定位
 ```
 
 ## 输入
@@ -138,9 +138,23 @@ for key in sorted(groups):
           f"{g['aiv_vec_ratio']/d:>9.2f}{g['aiv_mte2_ratio']/d:>8.2f}{g['aiv_mte3_ratio']/d:>8.2f}")
 ```
 
-## Step 2: MIX 算子 AIC/AIV 关键路径判别（消融法）
+## Step 2: 多核负载均衡分析（先于 pipeline 分析）
 
-Task Type 为 MIX（MIX_AIC/MIX_AIV 或 Mix Block Dim > 0）时执行；纯 AIC/AIV 算子直接进 Step 3。
+pipeline 级结论以核间均衡为前提：不均衡产生的核间空泡会被后续步骤误读为等待/同步/标量开销。基线解析完成后，对每个主要负载 case 依次做：
+
+1. **核利用率 = Block Num / 物理 AIC 核数**（op_summary 的 Block Num 列；910B3 AIC=24）。Block Num < 核数说明任务数少于核数、有核闲置（欠划分），小 shape 算子常见——先把任务切细，任何流水优化都无济于事。
+2. **核间均衡度 = aicore_time / Task Duration**（纯 AIC kernel；AIV/MIX 侧用 `aiv_time` 同理）。**aicore_time 就是「全部核的活跃时长平均」，即平均核忙时**——matmul 实测逐实例精确验证 aicore_time = aic_total_cycles / (Block Num × f)（f ≈ 核主频，910B3 ≈1800 cycles/us，与芯片标称一致），msprof 已直接给出该值，直接取比值即可，**不要**再用 aic_total_cycles/主频重算。比值 ≤1、越接近 1 越均衡。首次使用该指标时，建议按上述公式反推做一次**语义交叉验证**（确认本机 msprof 的 aicore_time 确为核平均而非最长核/任务墙钟——不同语义下同样数字的结论完全不同）；验证过一次即可，后续直接用。
+3. **任务分配模型对照**：从 host 侧 tiling/任务划分代码复刻每核任务分布（xlite kernel 均为 `for (idx = GetBlockIdx(); idx < tiles; idx += GetBlockNum())` 的 stride 分配，每核 ceil/floor 任务数；尾 tile 的 mActual/nActual/kLoop 差异单独计入），得理论均衡度 = 平均任务量 / 最忙核任务量。注意 `aic_total_cycles` 只计核的活跃 cycles——核在 DMA 后台传输期间 wait_flag 空转不烧 cycles，所以**搬运主导型 kernel 的实测均衡度天然混有「流水等待空泡」，不能直接当任务不均读**：
+   - 先测**整除对照形状**（tiles 恰整除 Block Num 且无尾 tile）：其均衡度 = 该负载的等待空泡基线（流水/同步问题，归 Step 5 范畴）；
+   - 不整除形状相对整除对照的均衡度差 = **纯任务分配不均损失**，才是修任务划分能回收的收益（matmul decode 实测：63 tiles 的 3/2 分配均衡度 0.77，同最忙核流量的 72 tiles 整除对照 0.86 → 任务不均净损失 ~10%，与理论 3/2 分配的 12.5% 同量级）；
+   - 计算主导型 kernel（cycles 全烧在 Cube/Mmad 上，如大 m matmul 实测 0.99–1.00）均衡度直接可信，无需对照。
+4. **形状扫描因果验证**（理论对不上或需要钉死时）：构造 tiles 恰整除 Block Num 的均衡形状与不整除形状（总流量相近、最忙核任务量相同或不同），同窗口对比均衡度与 Task Duration；另用 `Duration ≈ 总搬运量 / DRAM 峰值带宽`（910B3 ≈1.6TB/s）判**带宽饱和型**（时长贴着带宽下限、均衡无收益，瓶颈转向搬运总量，如 lm_head 1.49TB/s）。扫描通过 perf 脚本的自定义负载参数发射（如 `tests/perf/matmul.py -W name:n:k:m1,m2`），不改 kernel；注意区分冷/热实例（首发射 L2 全冷更接近生产 decode 逐层换权重的真实态），逐实例看，勿只看中位数。
+5. 处置：
+   - 任务不均损失显著（≥10%）→ **先修均衡再进 Step 3**：m0/n0 微调使 tiles 整除 Block Num（例：n=16128、n0=256 时 63 tiles 不整除 24 核；n0=224 → 72 tiles 恰整除）、任务切细（每核 ≥3~4 个任务）、尾任务均摊；改后同窗口 A/B 重测均衡度应逼近整除对照、Task Duration 应相应下降。
+
+## Step 3: MIX 算子 AIC/AIV 关键路径判别（消融法）
+
+Task Type 为 MIX（MIX_AIC/MIX_AIV 或 Mix Block Dim > 0）时执行；纯 AIC/AIV 算子直接进 Step 4。
 
 分别注释 AIC、AIV 的**主代码段**，重测 msprof：
 
@@ -151,7 +165,7 @@ Task Type 为 MIX（MIX_AIC/MIX_AIV 或 Mix Block Dim > 0）时执行；纯 AIC/
 
 判读（D = Task Duration 中位数，本机噪声 ±12% 内视为无差别）：
 
-- D(纯AIC) ≈ D(完整) → AIV 被 AIC 完全掩盖，**AIC 是关键路径**，进 Step 3 分析 AIC 各流水；
+- D(纯AIC) ≈ D(完整) → AIV 被 AIC 完全掩盖，**AIC 是关键路径**，进 Step 4 分析 AIC 各流水；
 - D(纯AIV) ≈ D(完整) → AIC 被掩盖，**AIV 是关键路径**，按 aiv_vec / aiv_scalar / aiv_mte2 / aiv_mte3 同法分析；
 - 两者都明显小于 D(完整) → 两侧都在关键路径（串行接力或各占时段），分别分析。
 
@@ -159,26 +173,26 @@ Task Type 为 MIX（MIX_AIC/MIX_AIV 或 Mix Block Dim > 0）时执行；纯 AIC/
 
 **所有消融版本与完整版本同窗口交替测试**（完整 → 消融 → 再完整），防机器状态漂移污染对比。
 
-## Step 3: pipeline 级瓶颈分析
+## Step 4: pipeline 级瓶颈分析
 
 对关键路径侧（以 AIC 为例）从 op_summary 取各 pipeline time(us)：
 
 1. 找出 time 最大的 pipeline（mac / scalar / mte1 / mte2 / fixpipe 之一）；
 2. 看该最大值是否**接近 Task Duration(us)**（或该侧 aicore_time）：
    - 接近 → 该流水主导任务时长，是瓶颈流水；
-   - 明显小于 → 时长耗在流水之外（等待/同步/尾空泡），进 Step 4 检查流水组织。
+   - 明显小于 → 时长耗在流水之外（等待/同步/尾空泡），进 Step 5 检查流水组织；若 Step 2 已发现任务不均/欠划分，先修均衡再回看本步。
 
-注意：pipeline time 是该流水线的活跃时长（含 stall），多条流水的 time 可以重叠；单看某条 ratio 高不能直接断言串行，须结合 Step 4。
+注意：pipeline time 是该流水线的活跃时长（含 stall），多条流水的 time 可以重叠；单看某条 ratio 高不能直接断言串行，须结合 Step 5。
 
-## Step 4: 流水并行性判断（先于代码段优化）
+## Step 5: 流水并行性判断（先于代码段优化）
 
 比较 Task Duration 与各 pipeline time 的关系：
 
 | 观察 | 结论 | 动作 |
 |---|---|---|
-| Task Duration ≈ 各 pipeline time 之**和**（如 mte1+mac+fixpipe ≈ 总时长，sum/max 接近流水条数）| 流水**没有并行**，串行接力 | 先优化流水线间的并行方式与同步点（见下），优化后重测再进 Step 5 |
-| Task Duration ≈ max(pipeline time)，sum >> Task Duration | 流水已充分并行 | 瓶颈=最长流水，直接进 Step 5 |
-| max(pipeline) 与 sum 都对不上 Task Duration | 时长耗在等待/同步/尾空泡 | 检查核间同步开销、任务划分是否留空泡、尾块处理 |
+| Task Duration ≈ 各 pipeline time 之**和**（如 mte1+mac+fixpipe ≈ 总时长，sum/max 接近流水条数）| 流水**没有并行**，串行接力 | 先优化流水线间的并行方式与同步点（见下），优化后重测再进 Step 6 |
+| Task Duration ≈ max(pipeline time)，sum >> Task Duration | 流水已充分并行 | 瓶颈=最长流水，直接进 Step 6 |
+| max(pipeline) 与 sum 都对不上 Task Duration | 时长耗在等待/同步/尾空泡 | 检查核间同步开销、任务划分是否留空泡、尾块处理；Step 2 的整除对照形状所测得的等待空泡基线属于此类 |
 
 流水未并行时的优化顺序：
 
@@ -186,7 +200,7 @@ Task Type 为 MIX（MIX_AIC/MIX_AIV 或 Mix Block Dim > 0）时执行；纯 AIC/
 2. **同步点**：消除不必要的 `pipe_barrier(PIPE_ALL)`，粗粒度同步改 set_flag/wait_flag 定向同步，收窄同步区间；
 3. 每改一版同窗口 A/B 重测：Task Duration 应下降，且 sum(pipeline time)/Task Duration 比值应**上升**（串行接力时 ≈1，充分并行后趋近流水条数 n，见上表两种判型的定义）——重叠度上升，以此验证流水真的并行了。
 
-## Step 5: 瓶颈流水线内的代码段定位（逐段消融）
+## Step 6: 瓶颈流水线内的代码段定位（逐段消融）
 
 流水并行性达标后，对最大 time 的流水线定位具体代码段。若该流水线内有多个代码步骤（多段 LoadData / copy_loop / matmul / fixpipe 步骤等）：
 
@@ -201,13 +215,15 @@ Task Type 为 MIX（MIX_AIC/MIX_AIV 或 Mix Block Dim > 0）时执行；纯 AIC/
 分析结论落盘主仓库 `xlite/agent_log_scripts/<op>_perf/report.md`（勿放 worktree 内），包含：
 
 1. **瓶颈结论**：哪个负载下、AIC 还是 AIV、哪条 pipeline、哪段代码；附每步关键数据表（Task Duration / 各 pipeline time 与 ratio / 消融对照），并注明数据来源 PROF 目录与测试命令，保证可复现；
-2. **优化手段建议**（按分析层级给）：
+2. **多核负载均衡**：每负载的核利用率与核间均衡度表、理论任务分配对照、整除对照形状的等待空泡基线、任务独裁型/带宽饱和型判别结论，以及均衡修复建议（若适用）；
+3. **优化手段建议**（按分析层级给）：
+   - 欠划分/任务不均 → tiles 切细、tiling 参数微调整除 Block Num、尾任务均摊（见 Step 2 处置）；
    - 搬运类流水（mte1/mte2/fixpipe）主导 → 减少搬运量：合并 LoadData、Nd2Nz 等布局变换、L1/L0 跨任务驻留、预取掩盖；
    - 计算类流水（mac）主导 → 算法等价变换减计算量、tile 重排提高 Cube 利用率；
    - 标量流水（scalar）主导 → 地址/循环计算外提、常量折叠、整除改乘法/参数透传；
-   - 流水未并行 → 按 Step 4 的并行方式与同步点改造；
+   - 流水未并行 → 按 Step 5 的并行方式与同步点改造；
    - 等待/空泡主导 → 核间同步减粒度、任务划分均衡化；
-3. **下一步实验**：每条建议附验证方法（改哪里、怎么测、预期哪个指标变化、如何排除 ±12% 噪声）。
+4. **下一步实验**：每条建议附验证方法（改哪里、怎么测、预期哪个指标变化、如何排除 ±12% 噪声）。
 
 ## 注意事项
 
