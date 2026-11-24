@@ -21,7 +21,7 @@ TOPK_GROUPS = 4
 TOPK = 8
 BATCH_SIZE = 16
 
-for n_routed_experts in [160, 256]:
+for n_routed_experts in [160, 256, 384]:
     START = 0
     END = n_routed_experts
     for dtype in [torch.float, torch.bfloat16, torch.int8]:
@@ -150,3 +150,42 @@ for n_routed_experts in [160, 256]:
             print(f">>>>>\nunpermutation error: {e}\n>>>>>")
             print(f"torch_npu: {standard_token_sorted}")
             print(f"xlite: {token_sorted}")
+
+# Multi-tile stress at 384 experts: n_tokens spans 3 UB-fitted tiles (max_token_tile=3719,
+# 8192 = 2*3719 + 754 tail), exercising permutation1's tile loop + tail beyond the single-tile
+# 384@16 case. Counts-only: the signal that tiling drops/double-counts tokens. Small DIM_MT
+# keeps buffers lean (permutation1 is DIM-independent). Vectorized bitmap — the scalar .item()
+# loop above is too slow at 8k tokens. (unpermutation at 8k tokens is a separate pre-existing
+# failure at 256 experts too, independent of this fix, so it's not asserted here.)
+N_TOKENS = 8192
+N_EXPERTS = 384
+DIM_MT = 256
+START = 0
+END = N_EXPERTS
+x = torch.randn(N_TOKENS, DIM_MT, dtype=torch.bfloat16, device="npu:0")
+weight = torch.randn(N_EXPERTS, DIM_MT, dtype=torch.bfloat16, device="npu:0")
+bias = torch.randn(N_EXPERTS, dtype=torch.bfloat16, device="npu:0")
+scores = (F.linear(x, weight, None)).sigmoid() + bias
+indices = torch.topk(scores, TOPK, dim=-1)[1]
+counts = torch.bincount(indices.flatten(), minlength=N_EXPERTS)
+
+one_hot = torch.zeros(N_TOKENS, N_EXPERTS, dtype=torch.int64)
+one_hot.scatter_(1, indices.cpu(), 1)
+powers = 1 << torch.arange(32)
+routing_xlite = (one_hot.view(N_TOKENS, N_EXPERTS // 32, 32) * powers).sum(dim=-1).to(torch.int32).to("npu:0")
+
+unp_idx = torch.empty(N_EXPERTS, N_TOKENS + 1, dtype=torch.int32, device="npu:0")
+experts_sorted = torch.empty(N_TOKENS * TOPK, DIM_MT, dtype=torch.bfloat16, device="npu:0")
+experts_counts = torch.empty(N_EXPERTS, 1, dtype=torch.int32, device="npu:0")
+torch.npu.synchronize()
+permutation(rt, x, routing_xlite, START, END, experts_sorted, unp_idx, experts_counts)
+torch.npu.synchronize()
+experts_counts = experts_counts.view(N_EXPERTS).to(dtype=torch.int64)
+
+print(f"multi-tile n_tokens={N_TOKENS} n_routed_experts={N_EXPERTS} permutation executed!")
+try:
+    torch.testing.assert_close(counts, experts_counts, atol=1e-5, rtol=1e-3)
+except AssertionError as e:
+    print(f">>>>>\npermutation error: {e}\n>>>>>")
+    print(f"torch_npu: {counts}")
+    print(f"xlite: {experts_counts}")

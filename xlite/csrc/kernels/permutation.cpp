@@ -17,11 +17,23 @@ __aicore__ inline void permutation1(GM_ADDR input, GM_ADDR routing_map, GM_ADDR 
     set_mask_norm();
     set_vector_mask((uint64_t)-1, (uint64_t)-1);
 
+    // TOKEN_TILE=4096 overflows UB at 384 experts (routing bitmap alone = 192KB = UB_SIZE →
+    // vector-core 507035). Fit the tile to UB for the actual expert count, capped at TOKEN_TILE
+    // so small-expert models (e.g. V4, 256) keep the original 4096 tile.
+    uint32_t per_token_bytes = n_routed_experts / 8 + sizeof(uint32_t);
+    uint32_t max_token_tile = (UB_SIZE - n_routed_experts * sizeof(uint32_t)) / per_token_bytes;
+    max_token_tile =
+        max_token_tile > BLOCK_SIZE ? max_token_tile - BLOCK_SIZE : 1;  // headroom for ROUND_UP
+    if (max_token_tile > TOKEN_TILE)
+        max_token_tile = TOKEN_TILE;
+    if (max_token_tile == 0)
+        max_token_tile = 1;
+
     __ubuf__ uint32_t *c = (__ubuf__ uint32_t *)get_imm(0);
     __ubuf__ uint64_t *routing = (__ubuf__ uint64_t *)get_imm(n_routed_experts * sizeof(uint32_t));
     __ubuf__ uint32_t *routing_count =
         (__ubuf__ uint32_t *)get_imm(n_routed_experts * sizeof(uint32_t) +
-                                     ROUND_UP(TOKEN_TILE * n_routed_experts / 8, BLOCK_SIZE));
+                                     ROUND_UP(max_token_tile * n_routed_experts / 8, BLOCK_SIZE));
 
     uint32_t experts_local = (experts_end_idx - experts_start_idx) / block_num;
     uint32_t experts_remain = (experts_end_idx - experts_start_idx) % block_num;
@@ -49,10 +61,10 @@ __aicore__ inline void permutation1(GM_ADDR input, GM_ADDR routing_map, GM_ADDR 
     set_flag(PIPE_V, PIPE_S, EVENT_ID0);
     wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
 
-    for (uint32_t token_start = 0; token_start < n_tokens; token_start += TOKEN_TILE) {
+    for (uint32_t token_start = 0; token_start < n_tokens; token_start += max_token_tile) {
         GM_ADDR routing_map_tile = routing_map + token_start * n_routed_experts / 8;
         uint32_t token_tile =
-            (token_start + TOKEN_TILE > n_tokens) ? n_tokens - token_start : TOKEN_TILE;
+            (token_start + max_token_tile > n_tokens) ? n_tokens - token_start : max_token_tile;
         copy_gm_to_ubuf(routing, routing_map_tile, 0, 1,
                         DIV_ROUND_UP(token_tile * n_routed_experts / 8, BLOCK_SIZE), 0, 0);
         set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
