@@ -2428,6 +2428,14 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
     XTensor num = rt.enableMoEAllToAll ? XTensor() : XTensor({1}, INT32, unpIdx.ptr);
     bool quantHoisted = (expertsSorted.dtype == INT8) && (expertsScalePtr != nullptr);
 
+    // Host-side expectation of routed rows on this rank, for the fused-vs-serial
+    // benefit dispatch in XliteOpGroupMatmulDeQuant: every token (across DP)
+    // emits nActExperts routing entries spread over moeEpSize ranks, so the
+    // balanced-routing mean of sum(counts[start:end)) is tokens*nAct/ep. The exact
+    // sum is device-side only; expertsSorted.shape[0] is the (much larger)
+    // worst-case buffer capacity and must not be used as m.
+    uint64_t expectedRows = static_cast<uint64_t>(m) * _c.defDpSize * _c.nActExperts / _c.moeEpSize;
+
     // routed experts
     XTensor *h13Ptr;
     if (moeReDtype == INT4) {
@@ -2440,31 +2448,41 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
                       _moeREUpGateScaleBias, h13, moeREUpGate[layer][start].nz);
         h13Ptr = &h13;
     } else if (moeReDtype == INT8) {
-        XTensor *xQuantedPtr;
-        XTensor *scalePtr;
+        // quant(x) -> group_matmul(xQuanted * w13 * w13Scale) * perTokenScale -> h13;
+        // XliteOpGroupMatmulDeQuant dispatches to the fused (group_matmul +
+        // dequant) MIX kernel when its benefit function says the fused kernel
+        // wins for (expectedRows, n, k), else to the serial 2-launch chain.
+        // Two producers of the INT8 input, mutually exclusive:
+        //  - hoisted: ForwardMoEDispatch already quantized during the
+        //    permutation (expertsSorted is INT8, per-token scale in
+        //    *expertsScalePtr).
+        //  - not hoisted: BF16 expertsSorted -> QuantDyn first.
         if (quantHoisted) {
-            xQuantedPtr = &expertsSorted;
-            scalePtr =
-                expertsScalePtr;  // non-null: quantHoisted implies expertsScalePtr != nullptr
+            XTensor &h13 = rt.GetTensor({expertsSorted.shape[0], intermediateSize * 2},
+                                        hiddenState.dtype, DBG_LOC);
+            XliteOpGroupMatmulDeQuant(
+                rt, expertsSorted, _moeREUpGate[layer], _moeREUpGateDeqScale[layer], expertsCounts,
+                start, end, moeREUpGate[layer][start].dtype, intermediateSize * 2, _c.hiddenSize,
+                h13, *expertsScalePtr, num, moeREUpGate[layer][start].nz, _c.expertsWeightTrans,
+                expectedRows);
+            rt.PutTensor(expertsSorted);
+            rt.PutTensor(*expertsScalePtr);
+            h13Ptr = &h13;
         } else {
             XTensor &xQuanted = rt.GetTensor(expertsSorted.shape, moeReDtype, DBG_LOC);
             XTensor &scale = rt.GetTensor({expertsSorted.shape[0]}, FP32, DBG_LOC);
             XliteOpQuantDyn(rt, expertsSorted, scale, xQuanted, num);
             rt.PutTensor(expertsSorted);
-            xQuantedPtr = &xQuanted;
-            scalePtr = &scale;
+            XTensor &h13 = rt.GetTensor({expertsSorted.shape[0], intermediateSize * 2},
+                                        hiddenState.dtype, DBG_LOC);
+            XliteOpGroupMatmulDeQuant(
+                rt, xQuanted, _moeREUpGate[layer], _moeREUpGateDeqScale[layer], expertsCounts,
+                start, end, moeREUpGate[layer][start].dtype, intermediateSize * 2, _c.hiddenSize,
+                h13, scale, num, moeREUpGate[layer][start].nz, _c.expertsWeightTrans, expectedRows);
+            rt.PutTensor(xQuanted);
+            rt.PutTensor(scale);
+            h13Ptr = &h13;
         }
-
-        // group_matmul(xQuanted * w13 * w13Scale) * perTokenScale -> h13
-        XTensor &h13 = rt.GetTensor({expertsSorted.shape[0], intermediateSize * 2},
-                                    hiddenState.dtype, DBG_LOC);
-        XliteOpGroupMatmulDeQuant(
-            rt, *xQuantedPtr, _moeREUpGate[layer], _moeREUpGateDeqScale[layer], expertsCounts,
-            start, end, moeREUpGate[layer][start].dtype, intermediateSize * 2, _c.hiddenSize, h13,
-            *scalePtr, num, moeREUpGate[layer][start].nz, _c.expertsWeightTrans);
-        rt.PutTensor(*xQuantedPtr);
-        rt.PutTensor(*scalePtr);
-        h13Ptr = &h13;
     } else {
         XTensor &h13 = rt.GetTensor({expertsSorted.shape[0], intermediateSize * 2},
                                     hiddenState.dtype, DBG_LOC);
@@ -2491,19 +2509,19 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
                       _moeREDownDeqScale, _moeREDownScaleBias, out, moeREDown[layer][start].nz);
         outPtr = &out;
     } else if (moeReDtype == INT8) {
-        // quant(x) -> xQuanted, perChannelScale
+        // quant(x) -> group_matmul(xQuanted * w2 * w2Scale) * perTokenScale -> out;
+        // h2 is always BF16 (fresh from SiluAndMul), never hoisted: QuantDyn
+        // first, then the benefit-dispatched group_matmul + dequant.
         XTensor &xQuanted = rt.GetTensor(h2.shape, moeReDtype, DBG_LOC);
         XTensor &scale = rt.GetTensor({h2.shape[0]}, FP32, DBG_LOC);
         XliteOpQuantDyn(rt, h2, scale, xQuanted, num);
         rt.PutTensor(h2);
-
-        // group_matmul(xQuanted * w2 * w2Scale) * perTokenScale -> out
         XTensor &out =
             rt.GetTensor({expertsSorted.shape[0], _c.hiddenSize}, hiddenState.dtype, DBG_LOC);
         XliteOpGroupMatmulDeQuant(rt, xQuanted, _moeREDown[layer], _moeREDownDeqScale[layer],
                                   expertsCounts, start, end, moeREDown[layer][start].dtype,
                                   _c.hiddenSize, intermediateSize, out, scale, num,
-                                  moeREDown[layer][start].nz, _c.expertsWeightTrans);
+                                  moeREDown[layer][start].nz, _c.expertsWeightTrans, expectedRows);
         rt.PutTensor(xQuanted);
         rt.PutTensor(scale);
         outPtr = &out;

@@ -12,6 +12,7 @@
 
 #include "kernel_operator.h"
 #include "kernel_macro.h"
+#include "group_tile_walker.h"  // GetSwizzledMNBlockIdx (RunTileByIdx decode)
 using namespace AscendC;
 
 // out = ((A * B) + bias) * deqScale
@@ -490,45 +491,14 @@ private:
         SetFlag<HardEvent::FIX_M>(EVENT_ID0);
     }
 
+    // Delegates to the shared free GetSwizzledMNBlockIdx so the
+    // GroupTileWalker AIV mirror can apply the identical traversal remap. Pure
+    // code motion: behavior is unchanged from the previous inline body.
     __aicore__ inline void GetMNBlockIdx(int32_t loopIdx, int32_t mLoop, int32_t nLoop,
                                          int32_t swizzlDirection, int32_t swizzlCount,
                                          int64_t &mIdx, int64_t &nIdx)
     {
-        // Adjust the traversal order of matmul block by setting swizzlCount(upper 8 bits) and
-        // swizzleDirection(lower 8 bits). Adjusting the swizzle strategy helps improve cache hit
-        // rate and reduce data read overhead, thereby enhancing the overall computational
-        // efficiency of matmul.
-        uint32_t tileBlockLoop, tileBlockIdx, inTileBlockIdx;
-        uint32_t inBatchIdx = loopIdx % (mLoop * nLoop);
-        if (swizzlDirection == 0) {  // Zn
-            tileBlockLoop = (mLoop + swizzlCount - 1) / swizzlCount;
-            tileBlockIdx = inBatchIdx / (swizzlCount * nLoop);
-            inTileBlockIdx = inBatchIdx % (swizzlCount * nLoop);
-
-            uint32_t nRow = swizzlCount;
-            if (tileBlockIdx == tileBlockLoop - 1) {
-                nRow = mLoop - swizzlCount * tileBlockIdx;
-            }
-            mIdx = tileBlockIdx * swizzlCount + inTileBlockIdx % nRow;
-            nIdx = inTileBlockIdx / nRow;
-            if (tileBlockIdx % 2 != 0) {
-                nIdx = nLoop - nIdx - 1;
-            }
-        } else if (swizzlDirection == 1) {  // Nz
-            tileBlockLoop = (nLoop + swizzlCount - 1) / swizzlCount;
-            tileBlockIdx = inBatchIdx / (swizzlCount * mLoop);
-            inTileBlockIdx = inBatchIdx % (swizzlCount * mLoop);
-
-            uint32_t nCol = swizzlCount;
-            if (tileBlockIdx == tileBlockLoop - 1) {
-                nCol = nLoop - swizzlCount * tileBlockIdx;
-            }
-            mIdx = inTileBlockIdx / nCol;
-            nIdx = tileBlockIdx * swizzlCount + inTileBlockIdx % nCol;
-            if (tileBlockIdx % 2 != 0) {
-                mIdx = mLoop - mIdx - 1;
-            }
-        }
+        GetSwizzledMNBlockIdx(loopIdx, mLoop, nLoop, swizzlDirection, swizzlCount, mIdx, nIdx);
     }
 
 private:

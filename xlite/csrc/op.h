@@ -250,10 +250,26 @@ void XliteOpFusedQuantMatmulDequant(XRuntime &rt, XTensor &x, const XTensor &qua
                                     uint64_t m0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
                                     uint64_t n0 = MATMUL_M0_N0_K0_DEFAULT_VALUE,
                                     uint64_t k0 = MATMUL_M0_N0_K0_DEFAULT_VALUE);
+// Routed-expert W8A8 remainder: in is already quantized INT8 (QuantDyn or the
+// MoE dispatch permutation-quant hoist). Dispatches between the fused
+// (group_matmul + dequant) MIX kernel and the serial 2-launch chain.
+// expectedRows: host-side estimate of sum(counts[start:end)) used by the
+// fused-vs-serial benefit dispatch; 0 (default) = unknown -> serial chain.
 void XliteOpGroupMatmulDeQuant(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &deqScales,
                                XTensor &counts, uint32_t start, uint32_t end, XDtype weightDtype,
                                long outDim, long inDim, XTensor &output, XTensor &outScale,
-                               XTensor &num, bool weightNZ = false, bool transpose = false);
+                               const XTensor &num = XTensor(), bool weightNZ = false,
+                               bool transpose = false, uint64_t expectedRows = 0);
+// Fused int8 grouped matmul (+fixpipe deqScale) -> dequant, one MIX launch.
+// in ([m,k] INT8) is the pre-quantized activation; outScale ([m] FP32) carries
+// the per-token scales produced by whichever quant stage ran before (may be
+// empty when the producer wrote none — the dequant mirror then skips the
+// per-token multiply, matching the standalone dequant's hasScale=false path).
+void XliteOpFusedGroupMatmulDequant(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &deqScales,
+                                    XTensor &counts, uint32_t start, uint32_t end,
+                                    XDtype weightDtype, long outDim, long inDim, XTensor &output,
+                                    XTensor &outScale, bool weightNZ = false,
+                                    bool transpose = false);
 void XliteOpConcat(XRuntime &rt, const std::vector<XTensor> &inputs, XTensor &out);
 void XliteOpConcatCol(XRuntime &rt, const std::vector<XTensor> &inputs, XTensor &out);
 void XliteOpSplitCol(XRuntime &rt, XTensor &in, const std::vector<XTensor> &outputs);

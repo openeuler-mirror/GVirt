@@ -2454,17 +2454,6 @@ void XliteOpDeQuant(XRuntime &rt, XTensor &in, XTensor &out, const XTensor &scal
     }
 }
 
-static bool FusedMatmulDeQuantBeneficial(uint64_t m, uint64_t k, bool dynQuant)
-{
-    if (m >= 8192) {
-        return true;
-    }
-    if (dynQuant) {
-        return m >= 6144 && k > 2048;
-    }
-    return m >= 6144 && k >= 1024;
-}
-
 void XliteOpMatmulDeQuant(XRuntime &rt, XTensor &in, XTensor &weight, XTensor &out,
                           const XTensor &quantBias, const XTensor &weightScale, bool transpose,
                           const XTensor &outScale, const XTensor &num)
@@ -2568,15 +2557,55 @@ void XliteOpFusedQuantMatmulDequant(XRuntime &rt, XTensor &x, const XTensor &qua
         throw std::runtime_error(err_str + "not supported!");
     }
 }
+void XliteOpFusedGroupMatmulDequant(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &deqScales,
+                                    XTensor &counts, uint32_t start, uint32_t end,
+                                    XDtype weightDtype, long outDim, long inDim, XTensor &output,
+                                    XTensor &outScale, bool weightNZ, bool transpose)
+{
+    if (IsDummyRuntime(rt) || in.numel == 0) {
+        return;
+    }
+    if (in.dtype == INT8 && weightDtype == INT8 && output.dtype == BF16 &&
+        (outScale.ptr == nullptr || outScale.dtype == FP32)) {
+        // The fused shell requires explicit tiling identical on both sides:
+        // resolve the defaults GroupMatmul::Init would apply (m0=128, n0=256,
+        // k0=128*8/bits — the K extent of one Mmad, as Matmul::Init; deqScale
+        // keeps n0<=256) so the AIV mirror walk cannot disagree with the AIC
+        // clamps — the AIV side has no Matmul to resolve the sentinel.
+        uint64_t weightBits = XDtypeBit(weightDtype);
+        uint64_t m0 = 128;
+        uint64_t n0 = 256;
+        uint64_t k0 = 128 * 8 / weightBits;  // the K extent of one Mmad, as Matmul::Init
+        aclrtlaunch_fused_group_matmul_dequant_int8_t(rt.aicNum, rt.stream, in.ptr, weights.ptr,
+                                                      deqScales.ptr, counts.ptr, output.ptr,
+                                                      outScale.ptr, counts.shape[0], outDim, inDim,
+                                                      m0, n0, k0, start, end, weightNZ, transpose);
+    } else {
+        std::string err_str = DBG_PREFIX + XT_STR(in) + XT_STR(output) + XT_STR(outScale);
+        err_str += std::string("weight dtype:") + XDtypeStr(weightDtype);
+        throw std::runtime_error(err_str + "not supported!");
+    }
+}
+
 void XliteOpGroupMatmulDeQuant(XRuntime &rt, XTensor &in, XTensor &weights, XTensor &deqScales,
                                XTensor &counts, uint32_t start, uint32_t end, XDtype weightDtype,
                                long outDim, long inDim, XTensor &output, XTensor &outScale,
-                               XTensor &num, bool weightNZ, bool transpose)
+                               const XTensor &num, bool weightNZ, bool transpose,
+                               uint64_t expectedRows)
 {
     if (IsDummyRuntime(rt) || in.numel == 0) {
         return;
     }
     if (in.dtype == INT8 && weightDtype == INT8 && output.dtype == BF16) {
+        // Benefit-based dispatch: expectedRows is the caller's host-side
+        // estimate of sum(counts[start:end)); 0 (unknown) stays serial.
+        if (deqScales.ptr != nullptr &&
+            FusedGroupMatmulDequantBeneficial(expectedRows, outDim, inDim)) {
+            XliteOpFusedGroupMatmulDequant(rt, in, weights, deqScales, counts, start, end,
+                                           weightDtype, outDim, inDim, output, outScale, weightNZ,
+                                           transpose);
+            return;
+        }
         output.View(FP16);
         XliteOpGroupMatmul(rt, in, weights, deqScales, counts, start, end, weightDtype, outDim,
                            inDim, output, weightNZ, transpose);

@@ -336,3 +336,19 @@ uint8_t PickIndexerKvSplit(const std::vector<uint32_t> &cachedLens,
     }
     return sparseTiles < blockNum / 2 ? 1 : 0;
 }
+
+bool FusedMatmulDeQuantBeneficial(uint64_t m, uint64_t k, bool dynQuant)
+{
+    if (m >= 8192) {
+        return true;
+    }
+    if (dynQuant) {
+        return m >= 6144 && k > 2048;
+    }
+    return m >= 6144 && k >= 1024;
+}
+
+bool FusedGroupMatmulDequantBeneficial(uint64_t m, uint64_t n, uint64_t k)
+{
+    return m >= 4096 && k >= 1024 && n >= 2048;
+}

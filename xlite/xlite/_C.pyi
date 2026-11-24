@@ -3519,6 +3519,76 @@ def fusion_operator_matmul_dequant_pipeline(
     """
     ...
 
+def fused_group_matmul_dequant(
+    rt: Runtime,
+    in_: torch.Tensor,
+    weights: List[torch.Tensor],
+    scales: List[torch.Tensor],
+    counts: torch.Tensor,
+    start: int,
+    end: int,
+    out_dim: int,
+    in_dim: int,
+    output: torch.Tensor,
+    out_scale: Optional[torch.Tensor] = None,
+    weight_nz: bool = False,
+    transpose: bool = False,
+) -> None:
+    """Fused MoE grouped matmul with tile-pipeline dequantization.
+
+    Single mixed AIC/AIV kernel running the ForwardMoE W8A8 routed-expert
+    remainder (``group_matmul`` + ``dequant``) in one launch: AIC cores run
+    the per-expert W8A8 grouped matmul on the pre-quantized activation
+    (int8 x int8, int32 accumulate, fixpipe weight-scale dequant to fp16)
+    starting immediately — the quant stage runs OUTSIDE this kernel — and AIV
+    cores convert each finished tile to bf16 in place::
+
+        Y[rows_e] = (in_[rows_e] @ W_e^T) * deq_scale_e * out_scale[rows_e]
+
+    Row segments per expert come from ``counts`` (per-expert row counts,
+    summing to the routed row count); expert weights/scales are indirect
+    per-expert tensors, same contract as ``group_matmul``. The dynamic-token
+    clamp (``num``) of the serial chain is not applied — every counted row is
+    processed.
+
+    Note: xlite kernels run on an internal stream independent of the torch
+    stream. Any device-side input — ``counts`` above all — must be materialized
+    (e.g. ``torch.npu.synchronize()``) before calling, or the kernel may read
+    a stale count and run out of range.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        in_ (torch.Tensor): Routed quantized activations, shape ``[rows,
+            in_dim]``, int8, rows grouped by expert per ``counts`` (produced
+            by ``quant_dynamic`` or by the MoE dispatch permutation quant).
+        weights (List[torch.Tensor]): Per-expert weight matrices, each
+            ``[out_dim, in_dim]`` (transpose=False) or ``[in_dim, out_dim]``
+            (transpose=True), int8.
+        scales (List[torch.Tensor]): Per-expert fixpipe dequant scales, each
+            flat ``[2*out_dim]`` fp32 (uint64 TF32-packed pairs); may be an
+            empty list when no weight dequant is needed.
+        counts (torch.Tensor): Per-expert row counts, shape ``[num_experts]``,
+            int32 (read as uint32).
+        start (int): First expert index to process.
+        end (int): End expert index (exclusive).
+        out_dim (int): Output feature dimension (kN).
+        in_dim (int): Input feature dimension (kK).
+        output (torch.Tensor): Output, shape ``[rows, out_dim]``, bfloat16.
+            Written in place; the fp16 intermediate lives at the same address
+            before being overwritten.
+        out_scale (Optional[torch.Tensor]): Per-token scales, shape ``[rows]``,
+            fp32, produced by the quant stage that ran before this kernel;
+            read back by the in-kernel dequant. Optional — omit (or pass an
+            empty tensor / ``None``) when the producer wrote none; the dequant
+            then skips the per-token multiply.
+        weight_nz (bool): Whether expert weights use NZ layout.
+        transpose (bool): Whether weights are ``[in_dim, out_dim]``.
+
+    Returns:
+        None: `output` is written in place.
+    """
+    ...
+
 def dequant(rt: Runtime, in_: torch.Tensor, scale: torch.Tensor, out: torch.Tensor, has_scale: bool) -> None:
     """Dequantize tensor values into output precision.
 

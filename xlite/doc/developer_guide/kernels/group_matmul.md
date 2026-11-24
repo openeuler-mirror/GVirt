@@ -52,31 +52,27 @@ dtype 分派在 `csrc/op.cpp` 的 `XliteOpGroupMatmul`（dtype 分派链）：`i
 
 ## 实现原理
 
-### 整体结构：Matmul 类的批量驱动
+### 整体结构：GroupMatmul + 共享 GroupTileWalker
 
-`group_matmul_kernel`（`csrc/kernels/group_matmul.h` 的 `group_matmul_kernel`）实例化一个 `Matmul<Dtype, MatDtype, OutDtype>`（复用 `csrc/kernels/matmul.h` 的完整 Cube 流水，包括 Mmad、fixpipe 反量化、swizzle），然后：
+`group_matmul_kernel`（`csrc/kernels/group_matmul.h`）实例化 `GroupMatmul<Dtype, MatDtype, OutDtype>`，其内部持有一个 `Matmul<Dtype, MatDtype, OutDtype>` subOp（复用 `csrc/kernels/matmul.h` 的完整 Cube 流水，包括 Mmad、fixpipe 反量化、swizzle）。expert/tile 遍历由共享骨架 `GroupTileWalker`（`csrc/kernels/group_tile_walker.h` 的 `Begin`/`NextExpert`/`NextTile`）驱动——独立核的 AIC walk、融合核 `fused_group_matmul_dequant` 的 AIC 侧与其 AIV dequant 镜像（`Dequant::RunGroupExpertTile`）消费同一骨架，三方的 tile 认领序列由构造保证一致。执行流程（`GroupMatmul::Run` = SetFlags + RunTiles + WaitFlags）：
 
-1. `matmul_op.Init(m0, n0, k0, /*hasBias=*/false, useDequant, transpose, weightNZ, swizzle)`——group_matmul 不支持 bias；
+1. `GroupMatmul::Init(m0, n0, k0, hasDeqScale, transpose, nz, swizzle)`——先在本地解析 tiling（与 `Matmul::Init` 的解析逻辑人为保持一致：`MATMUL_M0_N0_K0_DEFAULT_VALUE` 哨兵 → m0=128 / n0=256 / k0=128×8÷dtypeBits，单次 Mmad 的 K 量程；hasDeqScale 时 n0 钳到 256；group_matmul 不支持 bias，故不镜像 hasBias 钳位），再把解析后的显式值传给 `subOp.Init(..., /*hasBias=*/false, ...)` 并存入成员作 walker 种子——walker 在 TaskTilesInit 之前就要算 tile 数，必须用有效网格播种；subOp 收到的是显式值，`Matmul::Init` 内部的哨兵解析对 group 路径不再触发，两侧网格由构造保证一致（`BeginExpert` 中 `assert(tiles == w.tiles)` 为该契约兜底）；
 2. `SetFlags()` 一次性建立全部事件旗标（`csrc/kernels/matmul.h` 的 `Matmul::SetFlags`）；
-3. 遍历专家 `i ∈ [startIdx, endIdx)`：
-   - 从 GM 读 `kM = counts[i]`（int4 时翻倍）；`kM == 0` 的专家直接跳过（`csrc/kernels/group_matmul.h` 的 `group_matmul_kernel`，关键字 `if (kM <= 0)`）；
-   - 从 `ws` 指针数组取权重地址，从 `deqScales` 指针数组（若使用）取 scale 地址（`csrc/kernels/group_matmul.h` 的 `group_matmul_kernel`，关键字 `weightAddr`/`deqScaleAddr`）；
-   - 计算本专家激活/输出在拼接矩阵中的字节偏移：`xOffBytes = off * kK * dtypeBits/8`、`zOffBytes = off * kN * sizeof(OutDtype)`（`csrc/kernels/group_matmul.h` 的 `group_matmul_kernel`，关键字 `xOffBytes = off * kK`）；
-   - `TaskTilesInit(x + xOffBytes, w, z + zOffBytes, nullptr, deqScale, kM, kN, kK)` 绑定本专家的 GM 地址与形状，返回 tile 数（`csrc/kernels/matmul.h` 的 `Matmul::TaskTilesInit`）；
-   - 本核执行 `for (idx = (blockIdx + blockNum - coreOffset) % blockNum; idx < tiles; idx += blockNum) RunTileByIdx(idx)`；
-   - `coreOffset = (coreOffset + tiles) % blockNum`，`off += kM`。
-4. 所有专家完成后统一 `WaitFlags()`（`csrc/kernels/group_matmul.h` 的 `group_matmul_kernel`，关键字 `matmul_op.WaitFlags()`）。
+3. `GroupMatmul::RunTiles`：`w.Begin(counts, n, startIdx, endIdx, GetBlockIdx(), m0, n0, kN, int4Packed)` 播种后 `while (w.NextExpert()) { BeginExpert(w, ...); while (w.NextTile()) subOp.RunTileByIdx(w.idx); }`（standalone 内建循环，无任何跨核调用）：
+   - `GroupTileWalker::NextExpert` 从 GM 读 `kM = counts[i]`（int4Packed 时翻倍）；`kM <= 0` 的专家直接跳过；计算 `nLoop = ceil(kN/n0)`、`tiles = ceil(kM/m0) * nLoop`、`cursor = (blockIdx + blockNum - coreOffset) % blockNum`。前一专家的 close-out（再次调用时执行且仅执行一次）：`coreOffset = (coreOffset + tiles) % blockNum`、`off += kM`、`i++`——成功迭代返回时 `w.i` 仍指向当前专家（消费方用它做间接寻址），索引步进由 close-out 承担；
+   - `GroupMatmul::BeginExpert` 按 `w.i` 从 `ws`/`deqScales` 指针数组间接取权重/scale 地址，计算 `xOffBytes = w.off * kK * dtypeBits/8`、`zOffBytes = w.off * kN * sizeof(OutDtype)`，`subOp.TaskTilesInit(x + xOffBytes, weight, z + zOffBytes, nullptr, deqScale, w.kM, kN, kK)` 绑定本专家；融合 MIX 壳不进此内建循环——它自行 `BeginExpert` + tile 循环，每 tile `RunTileByIdx` 后显式 `SetC2VFlag()`（`CrossCoreSetFlag<0x2, PIPE_FIX>(C2V_CROSS_CORE_FLAG)`，挂 FIX 管队列、骑 CopyToGm 之后，set(N) 恒在 RunTileByIdx(N) 之后、RunTileByIdx(N+1) 之前，供融合核 AIV 镜像消费）；
+4. 所有专家完成后统一 `WaitFlags()`。
 
 ### 多核负载均衡
 
-关键在 `coreOffset`（`csrc/kernels/group_matmul.h` 的 `group_matmul_kernel`，关键字 `coreOffset = (coreOffset + tiles)`）：每个专家的 tile 从 `(blockIdx - coreOffset) mod blockNum` 起步交错认领。由于各专家 tile 数（`ceil(kM/m0) * ceil(kN/n0)`）不整除核数时会有剩余 tile，`coreOffset` 把上一专家的余数累计传递，使下一个专家的起始 tile 偏移相应挪动——避免每个专家都由同一批核处理"尾巴"，实现跨专家的近似均匀分工。单专家内部与 matmul 相同：tile 按 `idx % nLoop / idx / nLoop` 映射到 (midx, nidx)，再经 `GetMNBlockIdx` swizzle 重排（`csrc/kernels/matmul.h` 的 `Matmul::RunTileByIdx` 与 `Matmul::GetMNBlockIdx`）。
+关键在 `coreOffset`（`csrc/kernels/group_tile_walker.h` 的 `GroupTileWalker::NextExpert` close-out，关键字 `coreOffset = (coreOffset + tiles)`）：每个专家的 tile 从 `(blockIdx - coreOffset) mod blockNum` 起步交错认领。由于各专家 tile 数（`ceil(kM/m0) * ceil(kN/n0)`）不整除核数时会有剩余 tile，`coreOffset` 把上一专家的余数累计传递，使下一个专家的起始 tile 偏移相应挪动——避免每个专家都由同一批核处理"尾巴"，实现跨专家的近似均匀分工。单专家内部与 matmul 相同：tile 按 `idx % nLoop / idx / nLoop` 映射到 (midx, nidx)，再经 `GetMNBlockIdx` swizzle 重排（`csrc/kernels/matmul.h` 的 `Matmul::RunTileByIdx` 与 `Matmul::GetMNBlockIdx`）。
 
 ### int4（W4A8 MSD）路径
 
 W4A8 的完整流水分三级（见 `tests/kernels/group_matmul_int4.py` 的 `w4a8_msd_ref`，CPU 参考实现注释，对应 `XModel::ForwardMoEMSD`）：
 
 1. `unpack_activation`：INT8 `[m, k]` 激活做 floor 分解为 low4（`x & 0x0F - 8`）/high4（`x >> 4`），打包成 `[2m, k/2]` int4 矩阵（行交错）；
-2. 本算子（int4 变体）：per-expert `(low4|high4) [2c, k] x W_int4` → INT32 L0C → fixpipe `VDEQF16` 乘 per-channel deq_scale → FP16 `[2c, n]`（行交错）。kernel 内 `kM = 2 * counts[i]`（`csrc/kernels/group_matmul.h` 的 `group_matmul_kernel`，关键字 `kM = kM * 2`）、`off` 按翻倍后的 kM 累加，保证 low/high 行与输出行一一交错对齐；
+2. 本算子（int4 变体）：per-expert `(low4|high4) [2c, k] x W_int4` → INT32 L0C → fixpipe `VDEQF16` 乘 per-channel deq_scale → FP16 `[2c, n]`（行交错）。kernel 内 `kM = 2 * counts[i]`（`csrc/kernels/group_tile_walker.h` 的 `GroupTileWalker::NextExpert`，关键字 `kM *= 2`，由 `Begin` 的 `int4Packed` 入参启用）、`off` 按翻倍后的 kM 累加，保证 low/high 行与输出行一一交错对齐；
 3. `msd_merge_dequant`：`(y_high*16 + y_low + scale_bias) * per_token_scale` 合并为 BF16 `[m, n]`，其中 `scale_bias = 8 * sum_k(W[k,col] * deq_scale[col])` 补偿 low4 的 -8 偏移。
 
 int4 的搬运细节（在 matmul.h/kernel_macro.h 中）：`dtypeBits=4` 使 `kBlockSize=64`、`nBlockSize`（transpose）=64；`CopyGmToL1Nd2Nz` 对 int4 折半 srcDValue/dValue（`csrc/kernels/kernel_macro.h` 的 `CopyGmToL1Nd2Nz`，关键字 `srcDValue / 2`）；B 转置路径 `CopyToL0BTCol` 以 `LoadDataWithTranspose` 32x32x1B 分形、dstGap=3 解包（`csrc/kernels/kernel_macro.h` 的 `CopyToL0BTCol`，关键字 `LoadDataWithTranspose`）。
