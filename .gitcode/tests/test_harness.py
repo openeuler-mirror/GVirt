@@ -7,6 +7,7 @@ derived-config rewriting and definition-drift detection. Run with:
 pytest .gitcode/tests
 """
 
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -1102,3 +1103,59 @@ def test_tidy_findings_are_worktree_relative(monkeypatch, tmp_path):
     monkeypatch.setattr(tidy, "TIDY_CONFIG", root_b / "xlite" / ".clang-tidy")
     clean_b, findings_b = tidy.analyze(tidy.analysis_files())
     assert not clean_b and findings_b == findings_a
+
+
+# --- process_pr integration -------------------------------------------------
+
+
+def run_process_pr(monkeypatch, tmp_path, comments, checks, stale_base=False):
+    """Drive process_pr end-to-end with every heavyweight collaborator
+    faked — no git, no network, no harness — for an untrusted author so
+    the master-copy path runs. Returns the captured log lines."""
+    logs = []
+    monkeypatch.setattr(pr_ci_bot, "log", lambda msg: logs.append(msg))
+    monkeypatch.setattr(pr_ci_bot, "fetch_ref", lambda *a, **k: "b" * 40)
+    monkeypatch.setattr(pr_ci_bot, "prepare_worktree", lambda *a, **k: tmp_path / "wt")
+    monkeypatch.setattr(pr_ci_bot, "remove_worktree", lambda *a, **k: None)
+    monkeypatch.setattr(pr_ci_bot, "run_harness", lambda script, wt, args: checks)
+    monkeypatch.setattr(pr_ci_bot, "base_is_stale", lambda *a, **k: stale_base)
+    client = FakeClient()
+    client.get_pr_head = lambda n: {"sha": "b" * 40}
+    client.get_pr_comments = lambda n: comments
+    client.get_pr_files = lambda n: []
+    args = argparse.Namespace(
+        local_test=True,
+        dry_run=True,
+        refs_repo=str(tmp_path / "refs.git"),
+        worktree_root=str(tmp_path),
+        comment_mode="post",
+        keep_worktrees=False,
+    )
+    pr = {
+        "number": 712,
+        "title": "t",
+        "draft": False,
+        "user": {"login": "someone"},
+        "head": {"repo": {"full_name": "fork/repo"}, "ref": "branch"},
+    }
+    master = {
+        "owners": {"lulina1"},
+        "digest": "d" * 64,
+        "script": tmp_path / "master-script.py",
+        "sha": "m" * 40,
+        "digest_exclude": set(),
+        "digest_include": [],
+    }
+    pr_ci_bot.process_pr(client, pr, args, master)
+    return logs
+
+
+def test_process_pr_nudge_survives_check_objects(tmp_path, monkeypatch):
+    """The rebase nudge must read Check objects as attributes: any()
+    evaluates on every run — green or failed — so a subscript crashed
+    every entry pass after the harness completed, eating the results
+    comment (the live !712 local-test crash)."""
+    checks = [pr_ci_bot.Check("xlite static checks", "failed", "boom")]
+    logs = run_process_pr(monkeypatch, tmp_path, [], checks, stale_base=True)
+    assert any("Rebase onto the latest master" in line for line in logs)
+    assert any("dry run, comment would be:" in line for line in logs)

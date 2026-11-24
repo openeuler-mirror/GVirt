@@ -884,7 +884,7 @@ def process_pr(
                 f"This PR updates `.gitcode`, but the checks ran the trusted master copy at {tree_link(master['sha'])}. "
                 "Ask a `.gitcode` owner to comment `/ci` to re-check with this PR's harness."
             )
-        if any(check["status"] == "failed" for check in checks) and base_is_stale(
+        if any(check.status == "failed" for check in checks) and base_is_stale(
             Path(args.refs_repo),
             f"https://gitcode.com/{repo_path}.git",
             pr["head"]["ref"],
