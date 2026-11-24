@@ -2568,10 +2568,13 @@ void XModel::ForwardMoE(XRuntime &rt, uint32_t layer, XTensor &hiddenState)
         }
         ForwardMLP(rt, layer, hiddenState.View(mShared), moeSEUpGate, moeSEDown, false);
         if (seGateLogits != nullptr) {
-            XliteOpSigmoidGateMul(rt, hiddenState, *seGateLogits, hiddenState);
+            // Fused tail: hiddenState = hiddenState * sigmoid(se_gate) + routed, one AIV
+            // pass instead of sigmoid_gate_mul + add back to back.
+            XliteOpSigmoidGateMul(rt, hiddenState, *seGateLogits, hiddenState, &h.View(mShared));
             rt.PutTensor(*seGateLogits);
+        } else {
+            XliteOpAdd(rt, hiddenState, h.View(mShared), hiddenState);
         }
-        XliteOpAdd(rt, hiddenState, h.View(mShared), hiddenState);
         rt.PutTensor(h);
     } else {
         if (rt.enableMoEAllToAll) {  // hiddenState holds exactly this rank's token rows

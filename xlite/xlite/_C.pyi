@@ -2236,8 +2236,14 @@ def silu_and_mul(
     """
     ...
 
-def sigmoid_gate_mul(rt: Runtime, attn: torch.Tensor, gate: torch.Tensor, out: torch.Tensor) -> None:
-    """Compute out = attn * sigmoid(gate).
+def sigmoid_gate_mul(
+    rt: Runtime,
+    attn: torch.Tensor,
+    gate: torch.Tensor,
+    out: torch.Tensor,
+    add: Optional[torch.Tensor] = None,
+) -> None:
+    """Compute out = attn * sigmoid(gate) [+ add].
 
     Args:
         rt (Runtime): Native runtime handle.
@@ -2245,6 +2251,9 @@ def sigmoid_gate_mul(rt: Runtime, attn: torch.Tensor, gate: torch.Tensor, out: t
         gate (torch.Tensor): Gate logits, shape [num_tokens, dim] (elementwise) or
             [num_tokens, 1] (broadcast per token), same dtype.
         out (torch.Tensor): Output tensor, shape [num_tokens, dim]. May alias `attn`.
+        add (Optional[torch.Tensor]): Optional addend, shape [num_tokens, dim], same dtype
+            as `attn`. Fused into the same kernel pass (summed in fp32) instead of a
+            separate elementwise add launch; omit for the plain gated multiply.
 
     Returns:
         None: `out` is written in place.

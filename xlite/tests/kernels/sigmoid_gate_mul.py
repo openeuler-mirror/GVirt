@@ -16,20 +16,28 @@ def torch_sigmoid_gate_mul(attn, gate):
     return attn * torch.sigmoid(gate.float()).to(attn.dtype)
 
 
-def run_test(rt, num_tokens, dim, dtype, inplace, msg, broadcast=False):
+def torch_sigmoid_gate_mul_add(attn, gate, add):
+    return (attn.float() * torch.sigmoid(gate.float()) + add.float()).to(attn.dtype)
+
+
+def run_test(rt, num_tokens, dim, dtype, inplace, msg, broadcast=False, fused_add=False):
     attn = torch.randn(num_tokens, dim, dtype=dtype)
     gate = torch.randn(num_tokens, 1 if broadcast else dim, dtype=dtype)
-    standard = torch_sigmoid_gate_mul(attn, gate)
+    add = torch.randn(num_tokens, dim, dtype=dtype) if fused_add else None
+    if fused_add:
+        standard = torch_sigmoid_gate_mul_add(attn, gate, add)
+    else:
+        standard = torch_sigmoid_gate_mul(attn, gate)
 
     if inplace:
         out = attn.clone()
         torch.npu.synchronize()
-        sigmoid_gate_mul(rt, out, gate, out)
+        sigmoid_gate_mul(rt, out, gate, out, add)
         torch.npu.synchronize()
     else:
         out = torch.empty(num_tokens, dim, dtype=dtype)
         torch.npu.synchronize()
-        sigmoid_gate_mul(rt, attn, gate, out)
+        sigmoid_gate_mul(rt, attn, gate, out, add)
         torch.npu.synchronize()
 
     try:
@@ -58,6 +66,13 @@ if __name__ == "__main__":
         (41, 2048),
         (16, 4096),
         (64, 128),
+        # Non-calcPad-aligned dims exercise the tail chunk: dim=2000 leaves a
+        # 16-element tail (32B, whole-block tail copy); dim=1992 leaves an
+        # 8-element tail (16B, b16 byte-exact tail copy in CopyGmToUbufAligned/
+        # CopyUbufToGmAligned). Covers the fused-add tail path too (add uses
+        # the same transfer shape as attn).
+        (3, 2000),
+        (3, 1992),
     ]
 
     for dtype in [torch.bfloat16, torch.float16]:
@@ -68,3 +83,8 @@ if __name__ == "__main__":
                 run_test(rt, num_tokens, dim, dtype, inplace, msg)
                 bmsg = f"[{dtype}/T={num_tokens}/D={dim}/{mode}/bcast]"
                 run_test(rt, num_tokens, dim, dtype, inplace, bmsg, broadcast=True)
+                # Fused addend (MoE shared-expert tail): broadcast + elementwise gate.
+                fmsg = f"[{dtype}/T={num_tokens}/D={dim}/{mode}/fusedadd]"
+                run_test(rt, num_tokens, dim, dtype, inplace, fmsg, fused_add=True)
+                fbmsg = f"[{dtype}/T={num_tokens}/D={dim}/{mode}/fusedadd/bcast]"
+                run_test(rt, num_tokens, dim, dtype, inplace, fbmsg, broadcast=True, fused_add=True)

@@ -2112,14 +2112,21 @@ void SiluAndMul(XRuntime &rt, at::Tensor &in, at::Tensor &out, float swigluLimit
     rt.Synchronize();
 }
 
-void SigmoidGateMul(XRuntime &rt, at::Tensor &attn, at::Tensor &gate, at::Tensor &out)
+void SigmoidGateMul(XRuntime &rt, at::Tensor &attn, at::Tensor &gate, at::Tensor &out,
+                    const std::optional<at::Tensor> &add)
 {
     XTensor _attn, _gate, _out;
     InitXTensor(_attn, attn, DBG_LOC);
     InitXTensor(_gate, gate, DBG_LOC);
     InitXTensor(_out, out, DBG_LOC);
 
-    XliteOpSigmoidGateMul(rt, _attn, _gate, _out);
+    XTensor _add;
+    XTensor *addPtr = nullptr;
+    if (add.has_value()) {
+        InitXTensor(_add, *add, DBG_LOC);
+        addPtr = &_add;
+    }
+    XliteOpSigmoidGateMul(rt, _attn, _gate, _out, addPtr);
     rt.Synchronize();
 }
 
@@ -4912,7 +4919,8 @@ TORCH_LIBRARY(xlite_sabi, m)
              {torch::arg("rt"), torch::arg("in_"), torch::arg("out"),
               torch::arg("swiglu_limit") = 0.0})
         .def("sigmoid_gate_mul", op<&SigmoidGateMul>,
-             {torch::arg("rt"), torch::arg("attn"), torch::arg("gate"), torch::arg("out")})
+             {torch::arg("rt"), torch::arg("attn"), torch::arg("gate"), torch::arg("out"),
+              torch::arg("add") = torch::arg::none()})
         .def("rope_and_cache", op<&RopeAndCache>,
              {torch::arg("rt"), torch::arg("inout"), torch::arg("k_cache"), torch::arg("v_cache"),
               torch::arg("position"), torch::arg("cosin"), torch::arg("slot_mapping"),
