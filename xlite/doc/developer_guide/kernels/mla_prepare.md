@@ -135,7 +135,7 @@ dtype 记法:`Dtype∈{float16_t, bfloat16_t}`(两条实例化路径 `csrc/kerne
 |---|---|---|---|---|---|
 | `inputs0`/`inputs1` | `(latentDim+ropeDim,)`=(576,) | Dtype | 2(事件2/3) | `ROUND_UP((latentDim+ropeDim)*sizeof(Dtype),256)` | 2560 |
 | `normalized0`/`normalized1` | `(latentDim,)`=(512,) | Dtype | 2 | `ROUND_UP(latentDim*sizeof(Dtype),256)` | 2048 |
-| `packed0`/`packed1` | 656 B 混合行(INT8 latent|BF16 PE|FP32 scale) | int8 视图 | 2(事件4/5) | `ROUND_UP(latentDim+ropeDim*sizeof(Dtype)+groupNum*sizeof(float),256)` | 1536 |
+| `packed0`/`packed1` | 656 B 混合行(INT8 latent\|BF16 PE\|FP32 scale) | int8 视图 | 2(事件4/5) | `ROUND_UP(latentDim+ropeDim*sizeof(Dtype)+groupNum*sizeof(float),256)` | 1536 |
 | `trig0`/`trig1` | `(ropeDim,)` | float | 2(事件2/3) | `ROUND_UP(ropeDim*sizeof(float),256)` | 512 |
 | `x` | `(latentDim,)`(兼放 RoPE fp32 行) | float | 1 | `MAX(latentDim*sizeof(float), ROUND_UP(ropeDim*sizeof(float),256))` | 2048 |
 | `tmp` | `(latentDim,)` | float | 1 | `latentDim*sizeof(float)` | 2048 |
