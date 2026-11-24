@@ -188,5 +188,82 @@ for test_dtype, rope_dim, head_dim in CXA_CASES + MLA_CASES:
             else:
                 logging.error(f"{name} FAILED")
 
+# ----- Sentinel slot test: -1 = "skip KV write" (vllm dummy/keepalive sentinel) -----
+# vllm fills unused slots (execute_dummy_batch keepalive / uniform-decode dummies)
+# with -1; as int32 = 0xFFFFFFFF, the flat-slot pointer arithmetic
+# ((uint64_t)(slot_idx / block_size) * stride) would OOB-write GM (vector-core
+# 507035) without the slot_idx != 0xFFFFFFFF guard in rope_complex_and_cache.h.
+# Pre-fill vCache with NaN so a skipped write is distinguishable from a zero
+# write: the sentinel token's row stays NaN, the real token's row holds its
+# rope output.
+logging.info("=== sentinel slot (-1 = skip KV write) ===")
+_snt_dtype = torch.bfloat16  # V4.1 is a bf16 model
+_snt_head_dim, _snt_rope_dim = 512, 64
+_snt_offset = _snt_head_dim - _snt_rope_dim
+_snt_n_heads, _snt_block_size, _snt_n_tokens = 1, 16, 2
+torch.set_default_dtype(_snt_dtype)
+with torch.device("npu"):
+    _snt_kv = torch.randn(_snt_n_tokens, _snt_n_heads, _snt_head_dim)
+    _snt_kv_ref = _snt_kv.clone()
+    _snt_position = torch.arange(_snt_n_tokens, dtype=torch.int64)
+    # token 0 -> slot 0 (write); token 1 -> -1 sentinel (skip the paged write)
+    _snt_slot_mapping = torch.tensor([0, -1], dtype=torch.int32)
+    # NaN sentinel: a skipped write leaves NaN; a real write overwrites it.
+    _snt_v_cache = torch.full((1, _snt_block_size, _snt_n_heads, _snt_head_dim), float("nan"))
+
+# reference for token 0 only (token 1 is the skipped sentinel)
+_snt_ref = _snt_kv_ref.view(_snt_n_tokens, _snt_n_heads, _snt_head_dim)
+_snt_rope_in = _snt_ref[..., -_snt_rope_dim:].contiguous().view(1, _snt_n_tokens, _snt_n_heads, _snt_rope_dim)
+_snt_rope_out = apply_rotary_emb(_snt_rope_in, freqs_cis[:_snt_n_tokens], interleaved=False)
+_snt_rope_out = _snt_rope_out.view(_snt_n_tokens, _snt_n_heads, _snt_rope_dim)
+_snt_ref_head = torch.cat([_snt_ref[..., :-_snt_rope_dim], _snt_rope_out], dim=-1)
+_snt_ref_head = _snt_ref_head.view(_snt_n_tokens, _snt_n_heads, _snt_head_dim).float()
+
+# reference vCache, same shape/prefill as the real one: scatter ONLY token 0's
+# head into slot 0; the sentinel token 1 (-1) is skipped by the guard, so its row
+# stays at the NaN prefill. Comparing the whole vCache with equal_nan=True treats
+# the untouched NaN rows as matching (a skipped write leaves NaN; a real write
+# overwrites it), and would catch any stray write into the sentinel/unused rows.
+_snt_ref_v_cache = torch.full((1, _snt_block_size, _snt_n_heads, _snt_head_dim), float("nan"))
+_snt_ref_v_cache[0, 0, 0] = _snt_ref_head[0]  # token 0 -> slot 0 (block 0, row 0)
+_snt_ref_v_cache = _snt_ref_v_cache.to(_snt_dtype)
+
+torch.npu.synchronize()
+rope_complex_and_cache(
+    rt,
+    _snt_n_heads,
+    _snt_head_dim,
+    _snt_rope_dim,
+    _snt_offset,
+    _snt_head_dim,
+    _snt_kv,
+    freqs_cis[:_snt_n_tokens],
+    _snt_position,
+    _snt_block_size,
+    _snt_v_cache,
+    _snt_slot_mapping,
+    out_interleaved=False,
+    do_rotate=False,
+)
+torch.npu.synchronize()
+
+_snt_ok = True
+# Whole-vCache compare (equal_nan=True): token 0's slot holds its rope output,
+# the sentinel token 1's row and all unused rows stay NaN (guard skipped the
+# paged write). A single assertion catches both the real-write correctness and
+# any stray write into the sentinel/unused rows.
+try:
+    torch.testing.assert_close(_snt_v_cache.cpu(), _snt_ref_v_cache.cpu(), atol=1e-5, rtol=1e-3, equal_nan=True)
+except AssertionError as e:
+    _snt_ok = False
+    logging.error(f"sentinel slot (-1 skip KV write) mismatch:\n{e}")
+
+if _snt_ok:
+    passed += 1
+    logging.info("sentinel slot (-1 skip KV write) executed!")
+else:
+    logging.error("sentinel slot (-1 skip KV write) FAILED")
+total += 1
+
 logging.info(f"\n==== {passed}/{total} cases passed ====")
 assert passed == total, f"{total - passed} case(s) failed"
