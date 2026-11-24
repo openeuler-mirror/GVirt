@@ -2555,6 +2555,31 @@ def cast_up(rt: Runtime, in_: torch.Tensor, out: torch.Tensor) -> None:
     """
     ...
 
+def cast_down(rt: Runtime, in_: torch.Tensor, out: torch.Tensor) -> None:
+    """Cast tensor values to a lower-precision type (fp32 -> bf16).
+
+    The kernel reads and writes a block-aligned footprint of
+    ``ceil(numel/16)*16`` elements: the GM load rounds the fp32 read up to that
+    many fp32 elements, and the GM write rounds the bf16 write up to that many
+    bf16 elements. So when ``in_.numel()`` is not a multiple of 16 the caller
+    must back both ``in_`` and ``out`` with storage of ``ceil(numel/16)*16``
+    elements and pass views narrowed to ``numel``; the tail lanes past
+    ``numel`` are still read and written.
+
+    Args:
+        rt (Runtime): Native runtime handle.
+        in_ (torch.Tensor): Input tensor, fp32, any shape; its backing storage
+            must cover ``ceil(numel/16)*16`` fp32 elements (the kernel reads the
+            full block-aligned footprint, not just ``numel``).
+        out (torch.Tensor): Output tensor, bf16; a view narrowed to ``numel``
+            over storage of ``ceil(numel/16)*16`` bf16 elements (the kernel
+            writes the full block-aligned footprint, not just ``numel``).
+
+    Returns:
+        None: `out` is written in place.
+    """
+    ...
+
 def permutation(
     rt: Runtime,
     in_: torch.Tensor,

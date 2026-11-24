@@ -1347,6 +1347,122 @@ def run_decode_first_window_test(name, ratio, overlap, test_dtype, ape_enabled=T
         decode_step(2 * ratio - 1, compress=True, slot=1)
 
 
+def run_ring_state_wrap_test(name, ratio, overlap, test_dtype):
+    """Ring state cache (maxStateBlocks==1, one page per request) + decode at
+    pos >= STATE_BLOCK_SIZE: covers the state_block_id wraparound fix.
+
+    With a single page per request, the old slot/stateBlockSize column would
+    index past this request's page into the next request's (OOB). batch=2 makes
+    a cross-request write detectable: pre-fill each page with a distinct
+    sentinel, decode both requests at pos=128 (the block-size boundary), and
+    assert each token lands in its OWN page (row 0) — not the neighbor's.
+    Pure decode (qLen==1), non-compress step (n_total_blocks==0): spill skips
+    qLen==1, so only compressor_decode_token_state writes (at absolute pos).
+    """
+    full_dim = (1 + overlap) * HEAD_DIM
+    batch = 2
+    pos = STATE_BLOCK_SIZE  # 128: wraparound boundary (slot >= stateBlockSize)
+    torch.set_default_dtype(test_dtype)
+    with torch.device("npu"):
+        torch.manual_seed(31)
+        kv = (torch.randn(batch, full_dim, dtype=torch.float32) / 10).contiguous()
+        score = (torch.randn(batch, full_dim, dtype=torch.float32) / 10).contiguous()
+        norm_w = torch.randn(HEAD_DIM, dtype=test_dtype) / 10
+        freqs_cis = precompute_freqs_cis(ROPE_HEAD_DIM, pos + ratio, ROPE_THETA)
+        # ring state: [batch, 1] table (maxStateBlocks==1); block 0 reserved sentinel.
+        n_blocks = 1 + batch
+        state = torch.zeros(n_blocks, STATE_BLOCK_SIZE, 1, 2 * full_dim, dtype=torch.float32)
+        # distinct sentinel per (block, row): row r of block b = b*1000 + r
+        idx = torch.arange(STATE_BLOCK_SIZE, dtype=torch.float32).unsqueeze(-1)
+        for blk in range(1, n_blocks):
+            state[blk, :, 0, :] = (blk * 1000.0) + idx
+        state_block_table = torch.tensor([[1], [2]], dtype=torch.int32)
+        query_start_loc = torch.tensor([0, 1], dtype=torch.int32)
+        query_lens = torch.ones(batch, dtype=torch.int32)
+        cached_lens = torch.tensor([pos, pos], dtype=torch.int32)
+        compress_kv = torch.zeros(BLOCK_SIZE, BLOCK_SIZE, 1, HEAD_DIM, dtype=test_dtype)
+        compress_positions = torch.zeros(0, dtype=torch.int64)
+        compress_slot_mapping = torch.zeros(0, dtype=torch.int32)
+        weighted_sum = torch.zeros(0, HEAD_DIM, dtype=test_dtype)
+        state_slot_mapping = torch.zeros(batch, dtype=torch.int32)  # unused (spill skips qLen==1)
+        torch.npu.synchronize()
+        compressor(
+            rt,
+            kv,
+            score,
+            ape=None,
+            norm=norm_w,
+            freqs=freqs_cis,
+            weighted_sum=weighted_sum,
+            query_start_loc=query_start_loc,
+            query_lens=query_lens,
+            cached_lens=cached_lens,
+            batch=batch,
+            n_total_blocks=0,
+            ratio=ratio,
+            overlap=overlap,
+            head_dim=HEAD_DIM,
+            rope_head_dim=ROPE_HEAD_DIM,
+            norm_eps=NORM_EPS,
+            compress_kv=compress_kv,
+            compress_positions=compress_positions,
+            compress_slot_mapping=compress_slot_mapping,
+            compress_block_size=BLOCK_SIZE,
+            state=state,
+            state_slot_mapping=state_slot_mapping,
+            state_block_table=state_block_table,
+            state_block_size=STATE_BLOCK_SIZE,
+        )
+        torch.npu.synchronize()
+
+    st = state.view(n_blocks * STATE_BLOCK_SIZE, 2 * full_dim)
+    b1r0 = 1 * STATE_BLOCK_SIZE  # block 1, row 0 (req0's own page)
+    b2r0 = 2 * STATE_BLOCK_SIZE  # block 2, row 0 (req1's own page)
+    exp0 = torch.cat([kv[0], score[0]])  # req0's [kv | score]
+    exp1 = torch.cat([kv[1], score[1]])  # req1's [kv | score]
+    ok = True
+    try:
+        torch.testing.assert_close(st[b1r0], exp0, atol=STRICT_ATOL, rtol=STRICT_RTOL)
+        logging.info(f"  PASS ring-wrap ({name}) req0: token in own page (block1 row0)")
+    except AssertionError as e:
+        ok = False
+        logging.error(f"  FAIL ring-wrap ({name}) req0: token did not land in own page (block1 row0)\n{e}")
+    try:
+        torch.testing.assert_close(st[b2r0], exp1, atol=STRICT_ATOL, rtol=STRICT_RTOL)
+        logging.info(f"  PASS ring-wrap ({name}) req1: token in own page (block2 row0)")
+    except AssertionError as e:
+        ok = False
+        logging.error(f"  FAIL ring-wrap ({name}) req1: token did not land in own page (block2 row0)\n{e}")
+    # cross-contamination: req0's token must NOT appear in req1's page.
+    try:
+        torch.testing.assert_close(st[b2r0], exp0, atol=STRICT_ATOL, rtol=STRICT_RTOL)
+        ok = False
+        logging.error(f"  FAIL ring-wrap ({name}) cross-contamination: req0 token clobbered req1's page")
+    except AssertionError:
+        pass  # expected: req1's own token, not req0's
+    # sentinel row 1 unchanged — only row 0 was written. Sentinels are fp32
+    # (state is always fp32), distinct per page so a cross-page miswrite is
+    # detectable here too.
+    try:
+        torch.testing.assert_close(
+            st[b1r0 + 1].cpu(),
+            torch.full((2 * full_dim,), 1001.0, dtype=torch.float32),
+            atol=STRICT_ATOL,
+            rtol=STRICT_RTOL,
+        )
+        torch.testing.assert_close(
+            st[b2r0 + 1].cpu(),
+            torch.full((2 * full_dim,), 2001.0, dtype=torch.float32),
+            atol=STRICT_ATOL,
+            rtol=STRICT_RTOL,
+        )
+    except AssertionError as e:
+        ok = False
+        logging.error(f"  FAIL ring-wrap ({name}) sentinel: non-target row clobbered\n{e}")
+    if ok:
+        logging.info(f"  PASS ring-state wraparound ({name})")
+
+
 if __name__ == "__main__":
     # models × work cross-product (mirrors tests/kernels/attention.py).
     for mname, ratio, overlap, dtype in models:
@@ -1374,5 +1490,13 @@ if __name__ == "__main__":
                         n_compress=flags.get("n_compress", 1),
                         n_decode_reqs=flags.get("n_decode_reqs", 1),
                     )
+
+    # Ring-state wraparound (state_block_id maxStateBlocks==1 fix): ratio-independent,
+    # so two configs suffice — ratio4_overlap (V4.1-like) and ratio128 (large window).
+    for rname, ratio, overlap, dtype in [
+        ("ratio4_overlap", 4, 1, torch.bfloat16),
+        ("ratio128", 128, 0, torch.bfloat16),
+    ]:
+        run_ring_state_wrap_test(f"ring_wrap_{rname}", ratio, overlap, dtype)
 
     logging.info("compressor test done.")

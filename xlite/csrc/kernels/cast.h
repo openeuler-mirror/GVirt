@@ -56,10 +56,15 @@ __aicore__ void cast_kernel(GM_ADDR x, GM_ADDR y, uint32_t length)
         }
 
         // fp32 > bf16
+        // fp32->bf16 vconv over-reads UB past the GM->UB load; the garbage bf16 would reach
+        // GM whenever the load (ceil-to-8 fp32) is smaller than the block-aligned write
+        // (ceil-to-16 bf16) — i.e. actual_len mod 16 in (0,8]. Load the bf16-block-aligned fp32
+        // count so the garbage lands past the write boundary; a no-op (same block count) for
+        // actual_len mod 16 in (8,16] or ==0, keeping already-correct cases byte-identical.
         if ((std::is_same<SrcType, float>::value) && (std::is_same<TarType, bfloat16_t>::value)) {
             wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
             copy_gm_to_ubuf(UBA(float) t1, GMA(float) x + process * tile_size, 0, 1,
-                            DIV_ROUND_UP(actual_len * sizeof(float), BLOCK_SIZE), 0, 0);
+                            2 * DIV_ROUND_UP(actual_len * sizeof(__bf16), BLOCK_SIZE), 0, 0);
             set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 

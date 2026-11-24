@@ -375,12 +375,17 @@ __aicore__ __inline__ void rope_complex_and_cache(
         // is never written back.
         if (need_v_cache) {
             uint32_t slot_idx = slotMappingUB[token_idx - baseTokenIdx];
-            // flat slot = block * block_size + offsetInBlock; vcacheStride is the dim-0 pitch
-            auto *vcache_ptr = ((__gm__ Dtype *)(vcache)) +
-                               (uint64_t)(slot_idx / block_size) *
-                                   MAX(vcacheStride, block_size * nLocalHeads * vdim) +
-                               (uint64_t)(slot_idx % block_size) * nLocalHeads * vdim;
-            CopyUbufToGmAligned(vcache_ptr, outs[curr], vCacheBytes);
+            // vllm fills dummy slots (execute_dummy_batch / uniform-decode) with -1 = "skip KV
+            // write" sentinel. 0xFFFFFFFF would OOB the pointer arithmetic (vector-core 507035),
+            // so skip the paged write; the event/curr pingpong still advances. No-op on real path.
+            if (slot_idx != 0xFFFFFFFF) {
+                // flat slot = block * block_size + offsetInBlock; vcacheStride is the dim-0 pitch
+                auto *vcache_ptr = ((__gm__ Dtype *)(vcache)) +
+                                   (uint64_t)(slot_idx / block_size) *
+                                       MAX(vcacheStride, block_size * nLocalHeads * vdim) +
+                                   (uint64_t)(slot_idx % block_size) * nLocalHeads * vdim;
+                CopyUbufToGmAligned(vcache_ptr, outs[curr], vCacheBytes);
+            }
             if (output_ptr != nullptr) {
                 copy_ubuf_to_gm(output_gm, ropeOut, 0, nLocalHeads, output_blocks, 0, dstStride);
             }
