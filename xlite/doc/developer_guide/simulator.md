@@ -10,8 +10,8 @@ profiling, not for full model or vLLM runs.
 - CANN toolkit with simulator assets, e.g. 9.2.0-beta.1, including
   `<CANN>/tools/simulator/<SoC>/lib/libruntime_camodel.so`.
 - `uv` (the script uses it to create the venv).
-- A host compiler that supports `__fp16` on x86_64: `clang` / `clang++`
-  (gcc does not; xlite uses `__fp16` in `csrc/base.cpp`).
+- A C++17 host compiler: `clang` / `clang++` (the script default) or
+  `gcc` / `g++` (override with `CC` / `CXX`).
 - Python 3.9-3.12. The script defaults to 3.11 because `torch-npu` wheels are
   available for it.
 
@@ -159,8 +159,6 @@ the optional per-instruction call-stack annotation, not the timings.
   match; check `$CANN/tools/simulator/<SoC>/lib`.
 - `Failed to load the backend extension: torch_npu` — install `pyyaml` (the
   script does) or a `torch-npu` build matching torch.
-- `__fp16 was not declared` — use clang, not gcc, and clean the CMake cache
-  (`XLITE_SIM_CLEAN=1 tests/run_sim.sh build`).
 - `ld.lld: error: ... unknown file type` during the kernel preprocess step —
   an incremental AscendC kernel rebuild; wipe the build dir, e.g.
   `rm -rf ~/.cache/xlite-sim/build` (or your `$XLITE_SIM_BUILD`). The script
