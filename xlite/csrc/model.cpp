@@ -3732,3 +3732,36 @@ size_t XModel::GetTensorPoolSize(int dbg)
     }
     return DIV_ROUND_UP(size, 1ull << MB_BIT);
 }
+
+std::vector<int64_t> ComputeCollectiveMsgBytes(uint64_t tokens, uint64_t hiddenSize,
+                                               uint64_t nRoutedExperts, uint64_t nActExperts,
+                                               uint64_t moeEpSize, uint64_t defDpSize,
+                                               uint64_t elemBytes)
+{
+    const uint64_t actBytes = tokens * hiddenSize * elemBytes;
+
+    // MoE all-to-all: each token is dispatched to its topK experts.
+    const uint64_t epBytes = (nActExperts > 0 && moeEpSize > 1) ? actBytes * nActExperts : 0;
+    // DP all-gather packs activations, the per-expert gate weights and the routing mask, then
+    // replicates the whole payload once per DP rank. Keep the three terms separate: the mask is
+    // BIT1 (one bit per expert), so it must not be sized like an activation element.
+    const uint64_t weightsBytes = tokens * nRoutedExperts * elemBytes;
+    const uint64_t routingBytes = tokens * nRoutedExperts / 8;  // BIT1: 1 bit per expert
+    const uint64_t dpBytes =
+        defDpSize > 1 ? (actBytes + weightsBytes + routingBytes) * defDpSize : 0;
+
+    return {static_cast<int64_t>(actBytes), static_cast<int64_t>(dpBytes),
+            static_cast<int64_t>(epBytes)};
+}
+
+std::vector<int64_t> XModel::GetCollectiveMsgBytes() const
+{
+    // Hidden states are what travels between ranks, so the element size follows the embedding
+    // dtype rather than the (possibly quantised) weight dtype.
+    const uint64_t elemBytes = XDtypeBit(embed.dtype) / 8;
+    // Mirror DummyRun(): the token budget is rounded up to whole TP ranks, and that rounded
+    // value is the widest batch the runtime can ever be handed.
+    const uint64_t tokens = ROUND_UP(_c.maxBatchedTokens, _c.defTpSize);
+    return ComputeCollectiveMsgBytes(tokens, _c.hiddenSize, _c.nRoutedExperts, _c.nActExperts,
+                                     _c.moeEpSize, _c.defDpSize, elemBytes);
+}
