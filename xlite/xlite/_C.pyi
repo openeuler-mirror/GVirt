@@ -1992,6 +1992,7 @@ def matmul_bench(
         y_warmup (torch.Tensor): Right matrix/weight for warmup, same contract as ``y``.
         z_warmup (torch.Tensor): Output matrix for warmup, same contract as ``z``.
         iterations: Number of matmul iterations to run
+        warmup_iterations: Number of matmul iterations to run before timing
         weight_nz (bool): Deprecated: ignored (nz is auto-detected); will be removed.
         transpose (bool): Whether to transpose the right matrix in compute.
 
@@ -1999,6 +2000,7 @@ def matmul_bench(
         int: Measured average time for matmul operation in nanoseconds.
 
     Raises:
+        ValueError: If ``iterations < 1`` or ``warmup_iterations < 0``.
         RuntimeError: If the native kernel launch fails.
     """
     ...
