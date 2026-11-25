@@ -9,6 +9,40 @@
 #include "ascend.h"
 #include "debug.h"
 
+// Decode IEEE 754 binary16 bits to float without any platform-specific half type:
+// __fp16 only exists on ARM/AArch64 compilers and breaks the build on x86 GCC.
+// Layout mapping: sign(1) exp(5, bias 15) mantissa(10) -> sign(1) exp(8, bias 127) mantissa(23).
+static inline float Fp16BitsToFp32(uint16_t h)
+{
+    uint32_t sign = static_cast<uint32_t>(h & 0x8000u) << 16;
+    uint32_t exp = (h & 0x7C00u) >> 10;
+    uint32_t mant = h & 0x03FFu;
+    uint32_t bits;
+    if (exp == 0) {
+        if (mant == 0) {
+            bits = sign;  // +-0
+        } else {
+            // Subnormal binary16: value = mant * 2^-24. Shift the leading 1 up to bit 10
+            // to renormalize; every shift removes one exponent step, so the fp32 biased
+            // exponent is (10 - shift) + (127 - 24) = 113 - shift.
+            uint32_t shift = 0;
+            while ((mant & 0x400u) == 0) {
+                mant <<= 1;
+                shift++;
+            }
+            bits = sign | ((113u - shift) << 23) | ((mant & 0x03FFu) << 13);
+        }
+    } else if (exp == 0x1Fu) {
+        // +-Inf / NaN: exponent saturates to 0xFF, fraction carries over.
+        bits = sign | 0x7F800000u | (mant << 13);
+    } else {
+        bits = sign | ((exp + 112u) << 23) | (mant << 13);  // 127 - 15 = 112
+    }
+    float val;
+    std::memcpy(&val, &bits, sizeof(val));
+    return val;
+}
+
 XTensor &XTensor::Init(std::vector<size_t> shape, enum XDtype dtype, void *ptr,
                        enum XTensorType type, std::optional<std::vector<size_t>> stride)
 {
@@ -127,7 +161,8 @@ void XTensor::PrintMemoryVal(void *p, uint64_t off, XDtype dtype, std::ostream &
             break;
         }
         case FP16: {
-            __fp16 val = (static_cast<__fp16 *>(p))[off];
+            uint16_t bits = (static_cast<uint16_t *>(p))[off];
+            float val = Fp16BitsToFp32(bits);
             if (val >= 0) {
                 oss << " ";
             }
@@ -441,8 +476,8 @@ bool XTensor::CheckNanInf(const char *name, float threshold, std::ostream &os,
         float val;
         switch (dtype) {
             case FP16: {
-                __fp16 raw = (static_cast<__fp16 *>(p))[off];
-                val = static_cast<float>(raw);
+                uint16_t bits = (static_cast<uint16_t *>(p))[off];
+                val = Fp16BitsToFp32(bits);
                 break;
             }
             case BF16: {

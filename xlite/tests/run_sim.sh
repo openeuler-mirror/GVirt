@@ -96,7 +96,7 @@ cmd_build() {
     torch_lib=$(TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$py" -c \
         'import torch,pathlib;print(pathlib.Path(torch.__file__).parent/"lib")')
 
-    command -v "$CC" >/dev/null || die "host compiler '$CC' not found (clang is needed on x86 for __fp16)"
+    command -v "$CC" >/dev/null || die "host compiler '$CC' not found (set CC/CXX to override)"
     command -v "$CXX" >/dev/null || die "host compiler '$CXX' not found"
 
     # Build out of tree ($XLITE_SIM_BUILD, default $XLITE_SIM_WORK/build) so
