@@ -1959,6 +1959,13 @@ uint64_t MatmulBench(XRuntime &rt, at::Tensor &x, at::Tensor &y, at::Tensor &z,
                      at::Tensor &x_warmup, at::Tensor &y_warmup, at::Tensor &z_warmup,
                      int iterations, int warmup_iterations, bool weightNZ, bool transpose)
 {
+    if (iterations < 1) {
+        throw std::invalid_argument(std::string(__func__) + ": iterations must be >= 1, got " +
+                                    std::to_string(iterations));
+    }
+    if (warmup_iterations < 0) {
+        throw std::invalid_argument(std::string(__func__) + ": warmup_iterations must be >= 0");
+    }
     (void)weightNZ;  // deprecated no-op
     XTensor _x, _y, _z, _x_warmup, _y_warmup, _z_warmup, _bias, _deqScale;
 
