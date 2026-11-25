@@ -279,9 +279,9 @@ inline __aicore__ void RunAivSoftmaxPingPong(
                 for (int topLoop = 0; topLoop < topKLoopCnt; topLoop++) {
                     uint64_t mask0 = *(__ubuf__ uint64_t *)(topkMask0 + topLoop * 16);
                     uint64_t mask1 = *(__ubuf__ uint64_t *)(topkMask0 + topLoop * 16 + 8);
-                    // topK is TOPK_RUN_ALIGN-aligned (host contract), so every 128-slot
-                    // topLoop is full. kpool row padding inside the last block is -1 in
-                    // GM, which fails both vcmpvs comparisons and yields a zero mask.
+                    // topK here is the aligned topk stride (host contract), so every
+                    // 128-slot topLoop is full. kpool row padding inside the last block
+                    // is -1 in GM, which fails both vcmpvs comparisons and yields a zero mask.
                     maskCache[topLoop * 2] = mask0;
                     maskCache[topLoop * 2 + 1] = mask1;
                     __ubuf__ int32_t *indicesOffset = indices[curr] + topLoop * 128;
@@ -472,13 +472,6 @@ inline __aicore__ void RunAivSoftmaxPingPong(
                     pipe_barrier(PIPE_V);
                 }
                 __ubuf__ uint16_t *currOut = (__ubuf__ uint16_t *)(out[curr] + swaSegWidth);
-                // Positions not covered by the topk indices must read as 0 in the
-                // SV pass: out[] is a reused ping-pong buffer and the scatter below
-                // only writes the topk-hit slots, so leftovers from the previous row
-                // (topK < actualCalcLen) would leak into the sum.
-                vector_dup(out[curr] + swaSegWidth, Dtype(0),
-                           DIV_ROUND_UP(origActualCalcLen - swaSegWidth, pad), 1, 1, 8, 0);
-                pipe_barrier(PIPE_V);
                 set_flag(PIPE_V, PIPE_S, EVENT_ID0);
                 wait_flag(PIPE_V, PIPE_S, EVENT_ID0);
 

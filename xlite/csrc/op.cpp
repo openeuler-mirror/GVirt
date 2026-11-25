@@ -1318,15 +1318,6 @@ void XliteOpCXA(XRuntime &rt, XTensor &q, XTensor &swaKCache, XTensor &compressK
                  compressKCache.stride[0], dense ? 1u : 0u, rt._attnZeroBuffer.ptr);
 }
 
-// 0 without top-k; the explicit topkStride when given, else the logical topK width.
-static uint32_t EffectiveTopkStride(uint32_t topK, uint32_t topkStride)
-{
-    if (topK == 0) {
-        return 0;
-    }
-    return topkStride != 0 ? topkStride : topK;
-}
-
 // Unified MLA decode kernel entry. dense=false walks the paged KV cache via
 // blockTables (with optional top-k token selection); dense=true reads a
 // per-batch contiguous KV cache (gathered by gather_sparse_kv_cache), where
@@ -1336,42 +1327,33 @@ void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, 
                   XTensor &cachedLens, XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                   uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, uint32_t maxSeqLen,
                   float scale, uint32_t topK, const XTensor &topkIndices, bool dense,
-                  bool densePerQuery, uint32_t topkStride)
+                  bool densePerQuery)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
-    uint32_t effectiveTopkStride = EffectiveTopkStride(topK, topkStride);
+    uint32_t topkStride = topK == 0 ? 0 : ROUND_UP(topK, TOPK_RUN_ALIGN);
     if (!dense || (topK != 0 && topkIndices.ptr != nullptr)) {
         if (topK != 0 && maxSeqLen > MAX_SOFTMAX_PINGPONG_LEN) {
             throw std::runtime_error(
                 std::string(__func__) + ": topK > 0 is not supported when maxSeqLen (" +
                 std::to_string(maxSeqLen) + ") > " + std::to_string(MAX_SOFTMAX_PINGPONG_LEN));
         }
-        if (effectiveTopkStride < topK) {
+        // The GLM5 kpool path widens the row past MAX_TOPK_NUM (PKI causal tail
+        // + 128-slot padding); the kernel derives the same stride from topK.
+        if (topkStride > MAX_TOPK_RUN_NUM) {
             throw std::runtime_error(std::string(__func__) +
-                                     ": topkStride must be >= topK (logical top-k width)");
-        }
-        // topkStride is the physical topk-buffer row width; the GLM5 kpool path
-        // widens it past MAX_TOPK_NUM (PKI causal tail + 128-slot padding).
-        if (effectiveTopkStride > MAX_TOPK_RUN_NUM) {
-            throw std::runtime_error(std::string(__func__) +
-                                     ": topkStride should be less than or equal to " +
+                                     ": topK-derived topkStride should be less than or equal to " +
                                      std::to_string(MAX_TOPK_RUN_NUM));
         }
-        if (effectiveTopkStride % TOPK_RUN_ALIGN != 0) {
-            throw std::runtime_error(std::string(__func__) + ": topkStride must be a multiple of " +
-                                     std::to_string(TOPK_RUN_ALIGN));
-        }
-        if (topK != 0 && topkIndices.ptr != nullptr && topkIndices.shape.size() > 1 &&
-            topkIndices.shape[1] != effectiveTopkStride) {
-            throw std::runtime_error(std::string(__func__) + ": topkIndices.shape[1] must equal " +
-                                     std::to_string(effectiveTopkStride));
+        if (topK != 0 && topkIndices.ptr != nullptr &&
+            (topkIndices.shape.size() != 2 || topkIndices.shape[1] != topkStride)) {
+            throw std::runtime_error(std::string(__func__) + ": topkIndices must be [tokens, " +
+                                     std::to_string(topkStride) + "] when topK > 0");
         }
     }
     // topK-gated: topK == 0 runs RunAivSoftmax without the pingpong carve.
-    if (topK != 0 && SoftmaxPingPongUbNeed(std::max(maxSeqLen, effectiveTopkStride),
-                                           effectiveTopkStride) > UB_SIZE) {
+    if (topK != 0 && SoftmaxPingPongUbNeed(std::max(maxSeqLen, topkStride), topkStride) > UB_SIZE) {
         throw std::runtime_error(std::string(__func__) + ": softmax pingpong UB budget exceeded");
     }
     // The cube tiles the query dimension as mSize = queryTaskLen * nHeads rows into an
@@ -1389,8 +1371,8 @@ void XliteOpMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCache, 
             qk.ptr, oAbsorb.ptr, queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr,
             nHeads, ropeHeadDim, kvLoraRank, blockSize, batch,
             dense ? 0u : static_cast<uint32_t>(blockTables.stride[0]), maxSeqLen, scale, topK,
-            effectiveTopkStride, kCache.stride[0], peCache.stride[0], dense ? 1u : 0u,
-            densePerQuery ? 1u : 0u, rt._attnZeroBuffer.ptr);
+            kCache.stride[0], peCache.stride[0], dense ? 1u : 0u, densePerQuery ? 1u : 0u,
+            rt._attnZeroBuffer.ptr);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(qAbsorb) + XT_STR(qr) + XT_STR(kCache) +
                               XT_STR(peCache) + XT_STR(oAbsorb);
@@ -1405,7 +1387,7 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
                        XTensor &blockTables, uint32_t nHeads, uint32_t ropeHeadDim,
                        uint32_t kvLoraRank, uint32_t blockSize, uint32_t batch, float scale,
                        uint32_t tileSizeOfCachedKV, uint32_t topK, const XTensor &topkIndices,
-                       bool dense, uint32_t topkStride)
+                       bool dense)
 {
     if (IsDummyRuntime(rt)) {
         return;
@@ -1415,28 +1397,19 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
                                  std::to_string(tileSizeOfCachedKV) + " > " +
                                  std::to_string(MAX_SOFTMAX_PINGPONG_LEN));
     }
-    uint32_t effectiveTopkStride = EffectiveTopkStride(topK, topkStride);
-    if (effectiveTopkStride < topK) {
+    uint32_t topkStride = topK == 0 ? 0 : ROUND_UP(topK, TOPK_RUN_ALIGN);
+    if (topkStride > MAX_TOPK_RUN_NUM) {
         throw std::runtime_error(std::string(__func__) +
-                                 ": topkStride must be >= topK (logical top-k width)");
-    }
-    if (effectiveTopkStride > MAX_TOPK_RUN_NUM) {
-        throw std::runtime_error(std::string(__func__) +
-                                 ": topkStride should be less than or equal to " +
+                                 ": topK-derived topkStride should be less than or equal to " +
                                  std::to_string(MAX_TOPK_RUN_NUM));
     }
-    if (effectiveTopkStride != 0 && effectiveTopkStride % TOPK_RUN_ALIGN != 0) {
-        throw std::runtime_error(std::string(__func__) + ": topkStride must be a multiple of " +
-                                 std::to_string(TOPK_RUN_ALIGN));
-    }
-    if (topK != 0 && topkIndices.ptr != nullptr && topkIndices.shape.size() > 1 &&
-        topkIndices.shape[1] != effectiveTopkStride) {
-        throw std::runtime_error(std::string(__func__) + ": topkIndices.shape[1] must equal " +
-                                 std::to_string(effectiveTopkStride));
+    if (topK != 0 && topkIndices.ptr != nullptr &&
+        (topkIndices.shape.size() != 2 || topkIndices.shape[1] != topkStride)) {
+        throw std::runtime_error(std::string(__func__) + ": topkIndices must be [tokens, " +
+                                 std::to_string(topkStride) + "] when topK > 0");
     }
     // RunAivSoftmaxPingPong carve mirror fail-closed.
-    if (SoftmaxPingPongUbNeed(std::max(tileSizeOfCachedKV, effectiveTopkStride),
-                              effectiveTopkStride) > UB_SIZE) {
+    if (SoftmaxPingPongUbNeed(std::max(tileSizeOfCachedKV, topkStride), topkStride) > UB_SIZE) {
         throw std::runtime_error(std::string(__func__) + ": softmax pingpong UB budget exceeded");
     }
     // See XliteOpMLAV2: one query token's heads must fit a single XLITE_MAX_M0-row tile.
@@ -1452,8 +1425,8 @@ void XliteOpFlashMLAV2(XRuntime &rt, XTensor &qAbsorb, XTensor &qr, XTensor &kCa
             qk.ptr, sv.ptr, max.ptr, sum.ptr, lastMax.ptr, lastSum.ptr, sync.ptr, oAbsorb.ptr,
             queryStartLoc.ptr, lens.ptr, cachedLens.ptr, blockTables.ptr, nHeads, ropeHeadDim,
             kvLoraRank, blockSize, batch, dense ? 0u : static_cast<uint32_t>(blockTables.stride[0]),
-            scale, tileSizeOfCachedKV, topK, effectiveTopkStride, kCache.stride[0],
-            peCache.stride[0], dense ? 1u : 0u, rt._attnZeroBuffer.ptr);
+            scale, tileSizeOfCachedKV, topK, kCache.stride[0], peCache.stride[0], dense ? 1u : 0u,
+            rt._attnZeroBuffer.ptr);
     } else {
         std::string err_str = DBG_PREFIX + XT_STR(qAbsorb) + XT_STR(qr) + XT_STR(kCache) +
                               XT_STR(peCache) + XT_STR(oAbsorb);

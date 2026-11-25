@@ -3664,7 +3664,6 @@ def mla_v2(
     topk_indices: torch.Tensor,
     *,
     top_k: int = 0,
-    topk_stride: int = 0,
     nz: bool = False,
     enable_flash_attention: bool = False,
     tile_size_of_cached_kv: int = 8192,
@@ -3723,20 +3722,18 @@ def mla_v2(
         block_size (int): KV block size.
         batch (int): Batch size.
         scale (float): Attention scaling factor.
-        topk_indices (torch.Tensor): Top-k indices tensor for sparse attention, shape
-            ``[total_query_tokens, topk_stride]`` int32, one row per query token
-            (``[batch, topk_stride]`` in decode); may be empty when ``top_k == 0``.
-            The row pitch may exceed the logical ``top_k`` (GLM5 packTail uses
-            2176-column rows that store 2051 meaningful slots).
+        topk_indices (torch.Tensor): Top-k indices tensor for sparse attention, int32,
+            one row per query token (``[batch, row_width]`` in decode); may be
+            empty when ``top_k == 0``. In paged mode ``row_width`` must equal
+            ``ceil(top_k / 128) * 128`` (GLM5 packTail uses 2176-column rows
+            that store 2051 meaningful slots).
         top_k (int): Logical number of selected top-k slots; 0 disables sparse
             attention in paged mode. In dense mode this is the dense cache
             length (``index_topk``) and must be > 0. In paged mode with
             ``top_k > 0``, ``max_seq_len`` (block-table width narrowed by the
             lens) must not exceed 10496 (``MAX_SOFTMAX_PINGPONG_LEN``), and the
-            effective row stride must be <= 2176 (``MAX_TOPK_RUN_NUM``) and a
-            multiple of 128.
-        topk_stride (int): Physical topk row pitch. ``0`` falls back to
-            ``top_k``; may be larger than ``top_k`` for padded rows.
+            derived row width ``ceil(top_k / 128) * 128`` must be <= 2176
+            (``MAX_TOPK_RUN_NUM``).
         nz (bool): Deprecated: ignored (nz is auto-detected); will be removed.
         enable_flash_attention (bool): Whether to use the flash MLA v2 kernel
             (ignored when ``dense=True``).
