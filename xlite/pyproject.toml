@@ -47,6 +47,23 @@ dev = [
     "pytest",
 ]
 
+[tool.pytest.ini_options]
+# The stable kernel-test gate. Bare `pytest` collects only migrated files
+# (default python_files = test_*.py) under tests/kernels; the legacy loop
+# scripts are never imported by pytest and keep running via python directly.
+testpaths = ["tests/kernels"]
+# Migrated tests import shared helpers as `tests.models.*` (e.g. the NZ cast
+# fallbacks); put the project root on sys.path for bare `pytest` invocations.
+pythonpath = ["."]
+# Marked tests are excluded from the default run; opt in with an explicit -m
+# override (a later -m replaces this one), e.g. `pytest -m broken`.
+addopts = "-ra --strict-markers -m 'not flaky and not broken and not multi_npu'"
+markers = [
+    "flaky: known false-negative rate; excluded from the default run",
+    "broken: currently failing, tracked in an issue; excluded from the default run",
+    "multi_npu: needs multiple NPUs (torchrun); excluded from the default run",
+]
+
 [project.urls]
 Homepage = "https://atomgit.com/openeuler/GVirt"
 

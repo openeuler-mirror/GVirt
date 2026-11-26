@@ -17,7 +17,7 @@ torch.npu.set_device(0)
 # The fp32 op order still differs (kernel vexp/vdiv vs torch silu), flipping
 # the final rounding on a few elements — always a single output ULP. A 1-ULP
 # bf16 error reaches 2^-7 = 0.78% relative, so bf16 needs an ULP-aware rtol
-# (same as tests/kernels/rmsnorm.py).
+# (same as tests/kernels/test_rmsnorm.py).
 supported_dtype_list = [(torch.float, 2e-5, 2e-3), (torch.float16, 2e-5, 2e-3), (torch.bfloat16, 2e-2, 1e-2)]
 
 for dtype, atol, rtol in supported_dtype_list:

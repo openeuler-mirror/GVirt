@@ -14,7 +14,7 @@ dtype 转换算子。当前实现两个方向：bf16 → float32（cast_up，升
 
 Python 绑定：
 
-- `cast_up(rt, x, y)`（`csrc/_C.cpp` 的 `CastUp` wrapper 与 `m.def("cast_up", ...)` 绑定，`tests/kernels/cast.py` 的 `cast_up(rt, x, y)` 调用）：bf16 → float32，host 侧 `XliteOpCastUp` 只接受 `in.dtype == BF16 && out.dtype == FP32`，其余抛异常；inScale 参数当前实现中仅作占位；
+- `cast_up(rt, x, y)`（`csrc/_C.cpp` 的 `CastUp` wrapper 与 `m.def("cast_up", ...)` 绑定，`tests/kernels/test_cast.py` 的 `cast_up(rt, x, y)` 调用）：bf16 → float32，host 侧 `XliteOpCastUp` 只接受 `in.dtype == BF16 && out.dtype == FP32`，其余抛异常；inScale 参数当前实现中仅作占位；
 - fp32→bf16 方向（`aclrtlaunch_cast_float_bfloat16_t`）目前作为 matmul 等 host 侧组合路径的内部 kernel 使用（例如 `csrc/op.cpp` 的 `XliteOpMatmul`，关键字 `aclrtlaunch_cast_float_bfloat16_t` 在 matmul 输出 FP32 转 BF16 时调用），未单独导出 Python 接口；`XliteOpCastDown` 为 TODO。
 
 ## 支持的数据类型
@@ -40,7 +40,7 @@ GM --MTE2--> UB(t1, 源 dtype) --V: vconv--> UB(t2, 目标 dtype) --MTE3--> GM
 
 - 若 `length <= max_num * block_num`：`tile_size = DIV_ROUND_UP(length, block_num)`，让所有 block 均分（小块均衡负载）；
 - 否则 `tile_size = max_num`，每个 block 分到多个整 tile；
-- tile_size 最后按输出粒度向上对齐到 32B（`tile_size = DIV_ROUND_UP(tile_size, elem_per_blk) * elem_per_blk`，`elem_per_blk = BLOCK_SIZE / sizeof(目标dtype)`，关键字 `elem_per_blk`）：未对齐的 interior 分片会让按块取整的 GM 写把 UB 陈旧尾槽写进下一分片区域（核间竞争，16B 坏段），用例 `tests/kernels/cast.py` S2；
+- tile_size 最后按输出粒度向上对齐到 32B（`tile_size = DIV_ROUND_UP(tile_size, elem_per_blk) * elem_per_blk`，`elem_per_blk = BLOCK_SIZE / sizeof(目标dtype)`，关键字 `elem_per_blk`）：未对齐的 interior 分片会让按块取整的 GM 写把 UB 陈旧尾槽写进下一分片区域（核间竞争，16B 坏段），用例 `tests/kernels/test_cast.py` S2；
 - `process_num = DIV_ROUND_UP(length, tile_size)`。
 
 每个 tile 的实际长度 `actual_len = min(tile_size, length - process * tile_size)`（`csrc/kernels/cast.h` 的 `cast_kernel` 模板函数，关键字 `actual_len =` 计算）。

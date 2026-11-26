@@ -16,7 +16,7 @@
 | calcOffset | 标量 | - | uint32_t | 每行参与计算的起始列偏移（默认 0） |
 | calcNum | 标量 | - | uint32_t | 每行参与计算的元素个数（默认 UINT32_MAX，即取 shape1 - calcOffset；上限 `MAX_MULS_CALC_NUM = 16320`，`csrc/kernels/kernel_param.h` 的 `MAX_MULS_CALC_NUM` 宏) |
 
-kernel 侧实际地址为 `input + process * shape1 + calcOffset`（`csrc/kernels/muls.h` 的 `muls` 模板函数，关键字 `inPtr = input + process * shape1 + calcOffset`），即每行只处理 `[calcOffset, calcOffset+calcNum)` 这段连续数据。Python 调用方式（`tests/kernels/muls.py` 的 `muls(rt, x, scale, y)` 调用）：`muls(rt, x, scale, y)`（calcOffset/calcNum 走默认值，全量计算）。
+kernel 侧实际地址为 `input + process * shape1 + calcOffset`（`csrc/kernels/muls.h` 的 `muls` 模板函数，关键字 `inPtr = input + process * shape1 + calcOffset`），即每行只处理 `[calcOffset, calcOffset+calcNum)` 这段连续数据。Python 调用方式（`tests/kernels/test_muls.py` 的 `muls(rt, x, scale, y)` 调用）：`muls(rt, x, scale, y)`（calcOffset/calcNum 走默认值，全量计算）。
 
 ## 支持的数据类型
 

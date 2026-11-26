@@ -116,7 +116,7 @@ def run_case(b, s, hidden):
     # accumulation orders differ, so outputs drift by fp32 accumulation
     # noise; near-zero outputs (where rtol gives no slack) drift up to
     # ~4.4e-4 abs at K=16384 (deterministic; the same cross-GEMM noise
-    # shows up in tests/kernels/matmul.py's fp32 cases). atol=1e-5 is
+    # shows up in tests/kernels/test_matmul.py's fp32 cases). atol=1e-5 is
     # unsatisfiable across GEMM implementations; 1e-3 keeps >2x margin
     # over the observed noise while still catching any real operand/tiling
     # bug (O(1) or larger errors).

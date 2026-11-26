@@ -83,7 +83,7 @@ cmd_setup() {
         --index-url https://download.pytorch.org/whl/cpu
     uv pip install --python "$VENV/bin/python" \
         "setuptools>=64,<82" "setuptools-scm>=8" "cmake>=3.22" \
-        "numpy<2" pyyaml "torch-npu==$TORCH_NPU_VERSION"
+        "numpy<2" pyyaml pytest "torch-npu==$TORCH_NPU_VERSION"
 }
 
 cmd_build() {

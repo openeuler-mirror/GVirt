@@ -58,8 +58,8 @@ rm -rf build && mkdir -p build
 cmake -B build && cmake --build build -j "${MAX_JOBS:-128}"
 # 安装
 cmake --install build
-# 测试验证：可使用算子测试，也可使用完整模型测试
-python tests/kernels/add.py
+# 测试验证：可使用算子测试（稳定集），也可使用完整模型测试
+pytest tests/kernels
 ```
 
 ccache 为可选的编译加速项：cmake 配置阶段自动探测（`find_program`），未安装则不启用，构建不依赖 ccache。复用的构建目录（如 `build/` 或 `XLITE_BUILD_TEMP` 指定的稳定构建树）若在配置后 ccache 被移除，重新配置时会自动校验缓存路径并重新探测，无需手动清理构建目录。
@@ -80,6 +80,24 @@ XLITE_DEBUG_ON=all cmake -B build && cmake --build build -j "${MAX_JOBS:-128}"
 支持的类别 token（逗号分隔、不区分大小写）及对应编译宏见 [环境变量说明文档](../user_guide/ENVIRONMENT_VARIABLES.md#xlite_debug_on)。机制上，CMake 将该变量解析为编译宏（`XLITE_DEBUG_ON` 基础宏 + 每个 token 的 `XLITE_DEBUG_ON_<TOK>`），具体哪个宏控制哪段调试代码由 `csrc/debug.h` 决定，因此 `forward` 与 `tuner`/`gettensor` 相互独立、可按需组合。
 
 > **wheel 构建说明**：`setup.py` 在非可编辑（wheel）构建时会从 cmake 子进程环境中剥离 `XLITE_DEBUG_ON`，确保发布包不带调试代码。开发可编辑安装（`pip install -e .`）会保留该变量，故可如上携带。
+
+## 内核单元测试（pytest 稳定集）
+
+`tests/kernels/` 中以 `test_*.py` 命名的文件由 pytest 收集，构成"稳定集"；其余为旧式循环脚本（`python tests/kernels/<op>.py` 直接运行），按文件逐个迁移。进入稳定集的标准：单卡可跑、随机输入有种子（失败可复现）、且在 CI 容器上连续多次运行（建议 5 次浸泡）零失败。分布式（torchrun 多卡）用例与存在误报/已知失败的用例不进稳定集，迁移后以 `multi_npu` / `flaky` / `broken` 标记排除在默认运行之外。
+
+```bash
+pytest tests/kernels                 # 运行稳定集（默认排除上述三类标记；卡选择同 run.sh，用 ASCEND_RT_VISIBLE_DEVICES）
+pytest tests/kernels -m broken       # 选择性运行被标记的用例（显式 -m 覆盖默认过滤）
+for i in $(seq 5); do pytest tests/kernels || break; done   # 迁移入集前的浸泡验证
+```
+
+单文件迁移清单（`op.py` -> `test_op.py`）：
+
+1. `git mv tests/kernels/op.py tests/kernels/test_op.py`；
+2. 模块级 `Runtime(...)` / `set_device` 改用 `tests/kernels/conftest.py` 的会话级 `runtime` fixture（`allow_internal_format` 与生产 model runner 一致地设好；显存池可用 `XLITE_TEST_RUNTIME_MB` 调整）；随机输入由 `reproducible_rng` fixture 按用例自动播种；`default_device` fixture 已把默认张量设备设为 `npu:0`，工厂调用省略 `device=`（CPU 参考张量需显式 `device="cpu"`）；
+3. 循环枚举改为 `@pytest.mark.parametrize`（生成可读 id）；比较失败直接抛出，不再 `try/except` 吞掉；
+4. 保留 `if __name__ == "__main__": raise SystemExit(pytest.main([__file__, "-q"]))` 尾部，直接执行（`python tests/kernels/test_op.py`）与 `tests/performance/perf_xlite_ops.py` 的 msprof 包装仍可用；
+5. 浸泡验证通过后，更新 docs/注释中的旧路径引用再提交。
 
 ## 功能验证
 
