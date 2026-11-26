@@ -1110,11 +1110,14 @@ and `/path/to/ais_bench_dir/outputs/model2/aclgraph/TP4DP1EP-gsm8k` respectively
         "-MRV2",
         "--use-mrv2",
         action="store_true",
+        default=None,
         help="Deprecated no-op; on an older vllm, select the V2 runner by exporting VLLM_USE_V2_MODEL_RUNNER=1",
     )
     parser.add_argument(
         "--no-use-mrv2",
         action="store_true",
+        default=None,
+        dest="use_mrv2",
         help="Deprecated no-op; on an older vllm, select the V1 runner by exporting VLLM_USE_V2_MODEL_RUNNER=0",
     )
     parser.add_argument(
@@ -1170,10 +1173,11 @@ and `/path/to/ais_bench_dir/outputs/model2/aclgraph/TP4DP1EP-gsm8k` respectively
     )
     args = parser.parse_args()
 
-    if args.no_use_mrv2:
+    if args.use_mrv2 is not None:  # a boolean means either deprecated flag was passed
         print(
-            "WARNING: --no-use-mrv2 is deprecated and has no effect; on a vllm build that still ships "
-            "the V1 model runner, export VLLM_USE_V2_MODEL_RUNNER=0 yourself to select it"
+            "WARNING: --use-mrv2/--no-use-mrv2 are deprecated and have no effect; the script no longer "
+            "selects a model runner. To pin a runner on a vllm build that still supports the V1 model "
+            "runner, export VLLM_USE_V2_MODEL_RUNNER=1 or =0 yourself"
         )
 
     print(f"Running batch AISBench with arguments: {args}")
