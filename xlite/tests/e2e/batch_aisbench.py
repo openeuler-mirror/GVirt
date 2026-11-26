@@ -506,7 +506,6 @@ def start_vllm_server(
     seed: int = 42,
     gpu_memory_utilization: float = 0.92,
     block_size: int = 128,
-    use_mrv2: bool = False,
     xlite: bool = False,
     xlite_full_mode: bool = False,
     device_ids: list[int] | None = None,
@@ -532,7 +531,8 @@ def start_vllm_server(
 
     envs: dict[str, str] = {
         "VLLM_USE_V1": "1",
-        "VLLM_USE_V2_MODEL_RUNNER": "1" if use_mrv2 else "0",
+        # model runner selection is left to vLLM's defaults: current builds are V2-only,
+        # older builds keep their own default — set VLLM_USE_V2_MODEL_RUNNER to override
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
         "HCCL_OP_EXPANSION_MODE": "AIV",
         "VLLM_ENGINE_READY_TIMEOUT_S": str(timeout),
@@ -718,7 +718,6 @@ def run_ais_bench(
     seed: int = 42,
     gpu_memory_utilization: float = 0.92,
     block_size: int = 128,
-    use_mrv2: bool = False,
     xlite: bool = False,
     xlite_full_mode: bool = False,
     extra_args: str = "",
@@ -857,7 +856,6 @@ def run_ais_bench(
         seed=seed,
         gpu_memory_utilization=gpu_memory_utilization,
         block_size=block_size,
-        use_mrv2=use_mrv2,
         xlite=xlite,
         xlite_full_mode=xlite_full_mode,
         device_ids=device_ids,
@@ -1108,18 +1106,16 @@ and `/path/to/ais_bench_dir/outputs/model2/aclgraph/TP4DP1EP-gsm8k` respectively
         default=["8192"],
         help="Max number of batched tokens for vLLM server (last value used for padding)",
     )
-    parser.set_defaults(use_mrv2=False)
     parser.add_argument(
         "-MRV2",
         "--use-mrv2",
         action="store_true",
-        help="Whether to use the vLLM Model Runner V2 for model execution (default: False)",
+        help="Deprecated no-op; on an older vllm, select the V2 runner by exporting VLLM_USE_V2_MODEL_RUNNER=1",
     )
     parser.add_argument(
         "--no-use-mrv2",
-        action="store_false",
-        dest="use_mrv2",
-        help="Whether to NOT use the vLLM Model Runner V2 for model execution (default: False)",
+        action="store_true",
+        help="Deprecated no-op; on an older vllm, select the V1 runner by exporting VLLM_USE_V2_MODEL_RUNNER=0",
     )
     parser.add_argument(
         "-xargs",
@@ -1173,6 +1169,12 @@ and `/path/to/ais_bench_dir/outputs/model2/aclgraph/TP4DP1EP-gsm8k` respectively
         "--vllm-timeout", type=int, default=1800, help="Timeout in seconds for vLLM server startup (default: 1800s)"
     )
     args = parser.parse_args()
+
+    if args.no_use_mrv2:
+        print(
+            "WARNING: --no-use-mrv2 is deprecated and has no effect; on a vllm build that still ships "
+            "the V1 model runner, export VLLM_USE_V2_MODEL_RUNNER=0 yourself to select it"
+        )
 
     print(f"Running batch AISBench with arguments: {args}")
 
@@ -1325,7 +1327,6 @@ and `/path/to/ais_bench_dir/outputs/model2/aclgraph/TP4DP1EP-gsm8k` respectively
                 max_num_batched_tokens=args_max_num_batched_tokens[i],
                 seed=args.seed,
                 gpu_memory_utilization=args_gpu_memory_utilization[i],
-                use_mrv2=args.use_mrv2,
                 xlite=xlite,
                 xlite_full_mode=xlite_full,
                 extra_args=args_extra_aisbench_args[i],

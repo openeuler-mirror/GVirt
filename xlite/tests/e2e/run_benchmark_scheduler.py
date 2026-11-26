@@ -286,7 +286,6 @@ def main():
         f"--max-model-len {int(os.environ.get('XLITE_AISBENCH_MML', 8192))}",
         f"--max-num-batched-tokens {int(os.environ.get('XLITE_AISBENCH_MNT', 8192))}",
         f"--gpu-memory-utilization {float(os.environ.get('XLITE_AISBENCH_GMU', 0.92))}",
-        "--no-use-mrv2" if os.environ.get("XLITE_AISBENCH_USE_MRV2", "0") == "0" else "--use-mrv2",
         "--xlite 2 1 0",
         "--broadcast-xlite",
     )
