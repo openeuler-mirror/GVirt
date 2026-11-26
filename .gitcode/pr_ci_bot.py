@@ -57,14 +57,17 @@ csrc, config or tidy change misses by content), the compiler cache
 (CCACHE_DIR; replays unchanged host-C++ objects) and mypy's cache
 (MYPY_CACHE_DIR) — one bounded directory each, no per-PR storage.
 
-Comment delivery: a fresh comment per check by default — the platform's
-comments are chronological with no pinning, so an in-place edit keeps the
-results at an old position that gets folded in a long thread and notifies
-nobody. --comment-mode replace (env XLITE_CI_COMMENT_MODE) instead edits
-this account's own newest comment in place — for the placeholder flow,
-where a watcher posts a placeholder immediately on PR creation so the CI
-comment sits right under the PR description, ahead of every other bot's
-and reviewer's comments, and each check updates it in place.
+Comment delivery: one comment per head sha by default (advance) — the
+first check for a head posts a comment, and every later re-check of the
+same head (a harness or bot update, a /rerun) overwrites that comment in
+place, so a thread shows one advancing verdict per commit instead of a
+new comment per re-check; a new head posts a new comment. In-place edits
+notify nobody, so the /rerun ack comment links the verdict it updated.
+--comment-mode post (env XLITE_CI_COMMENT_MODE) posts a fresh comment
+per check instead; replace always edits this account's own newest
+comment — for the placeholder flow, where a watcher posts a placeholder
+immediately on PR creation so the CI comment sits right under the PR
+description, ahead of every other bot's and reviewer's comments.
 
 Usage:
   python .gitcode/pr_ci_bot.py [--token <token>] [--pr <number>] [--dry-run]
@@ -93,6 +96,8 @@ import subprocess
 import sys
 import time
 import tomllib
+import traceback
+from datetime import datetime
 from pathlib import Path
 
 import requests
@@ -279,17 +284,18 @@ class GitCodeClient:
             return commits[0]
         return None
 
-    def post_pr_comment(self, pr_number: int, body: str) -> bool:
+    def post_pr_comment(self, pr_number: int, body: str) -> dict | None:
+        # The created comment's id feeds the command acks, so the anchor
+        # knows what this run delivered.
         try:
-            self.request(
+            return self.request(
                 "POST",
                 f"/repos/{REPO_OWNER}/{REPO_NAME}/pulls/{pr_number}/comments",
                 json_body={"body": body},
-            )
-            return True
-        except requests.RequestException as e:
+            ).json()
+        except (requests.RequestException, ValueError) as e:
             log(f"Error posting comment to PR #{pr_number}: {e}")
-            return False
+            return None
 
     def patch_pr_comment(self, comment_id: int, body: str) -> bool:
         # The replace mode's target: the platform lets only a comment's
@@ -386,6 +392,159 @@ def latest_rerun_request(comments: list, allowed: set[str]):
     return latest
 
 
+def request_consumed(comments: list, request: int) -> bool:
+    """Whether a posted CI comment already covers `request`: the greatest
+    request id recorded in any account's marker — cross-instance
+    convergence, same as freshness. Markers from earlier generations
+    never parse, so they record nothing. A request at or below the
+    recorded id was served by a check that already ran; the request note
+    and the acks then leave it alone instead of re-announcing it on every
+    later run."""
+    consumed = 0
+    for c in comments:
+        m = BOT_TAG_RE.search(c.get("body") or "")
+        if m:
+            consumed = max(consumed, int(m.group("request")))
+    return request <= consumed
+
+
+ACK_TAG_RE = re.compile(r"<!-- gvirt-ci-ack:(?P<id>\d+) -->")
+
+
+def comment_time(comment: dict, field: str):
+    """A comment's created/updated timestamp as a datetime, or None —
+    advance-mode delivery overwrites results comments in place, so their
+    id never advances: whether a delivery FOLLOWED a command is judged by
+    time, not id (a patch moves updated_at while the id stands still)."""
+    raw = comment.get(field)
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def fresh_ci_request(comments: list, owners: set[str]) -> int | None:
+    """The newest owner `/ci` or `/ci all` comment that no delivery has
+    answered yet — posted after every CI results comment was last
+    delivered (created or in-place updated). The one-shot escape that
+    re-approves this PR's own harness even when its harness base is not
+    stacked on master's; a consumed grant stays consumed until a fresh
+    command. Id ordering cannot decide this: an advance-mode re-check of
+    an unchanged head patches the verdict in place without moving its
+    id — only the comment's updated_at records that a delivery followed.
+    Comments without parsable times never count as fresh."""
+    last_delivery = None
+    for c in find_bot_comments(comments):
+        when = comment_time(c, "updated_at") or comment_time(c, "created_at")
+        if when and (last_delivery is None or when > last_delivery):
+            last_delivery = when
+    latest = None
+    for c in comments:
+        body = (c.get("body") or "").strip()
+        posted = comment_time(c, "created_at")
+        if (
+            (c.get("user") or {}).get("login") in owners
+            and (ci_requested(body) or re.match(r"/ci\s+all\b", body))
+            and posted is not None
+            and (last_delivery is None or posted > last_delivery)
+        ):
+            latest = c["id"]
+    return latest
+
+
+def command_label(body: str) -> str | None:
+    """The CI command a comment starts with — most specific first, so
+    `/ci all` is not also counted as plain `/ci` — or None for a
+    non-command. Mirrors the detectors the bot honors
+    (latest_rerun_request, ci_requested, all_suite_requested)."""
+    text = (body or "").strip()
+    if re.match(r"/ci\s+all\b", text):
+        return "/ci all"
+    if CI_REQUEST_RE.match(text):
+        return "/ci"
+    if text.startswith("/rerun"):
+        return "/rerun"
+    return None
+
+
+def ack_commands(
+    client: GitCodeClient,
+    pr_number: int,
+    comments: list,
+    owners: set[str],
+    author: str,
+    posted_id: int = 0,
+    edited: bool = False,
+    dry_run: bool = False,
+    delivered: bool = False,
+    posted_discussion: str | None = None,
+) -> None:
+    """Ack the command comments the checks already served, so a thread
+    reader can tell a consumed `/rerun` (or `/ci`, `/ci all`) from one
+    still waiting — under advance delivery the ack is also the only
+    notification, since an in-place overwrite notifies nobody. Served has
+    two readings. Right after this run delivers (delivered=True): every
+    un-acked command in the fetched comments predates the check that
+    just ran, so all of it is served regardless of ids — an in-place
+    overwrite never moves the verdict comment's id, so ordering alone
+    cannot tell. On a back-fill scan (delivered=False): a command is
+    served when a results comment with a greater id exists, or when it
+    is a /rerun at or below the greatest request any marker recorded
+    (an overwritten verdict keeps its id but records the request it
+    consumed). Each ack is one short comment linking the verdict it
+    served — saying the results were updated in place when this run's
+    delivery overwrote the same-sha comment — and carrying an HTML
+    marker naming the served command's id. The link uses the platform's
+    comment URL form (atomgit pull page, ?did=<discussion>#tid-<id>;
+    the just-delivered comment's discussion comes from the posting
+    response, a back-fill anchor's from the fetched comment object).
+    Any account's ack counts, so
+    two instances converge instead of duplicating — and a forged ack
+    marker only suppresses an ack comment, never a check. Best-effort:
+    a posting failure logs and moves on. Runs on every scan — fresh or
+    skipped — so a missing ack back-fills on the next pass."""
+    results_ids = [c["id"] for c in find_bot_comments(comments)]
+    anchor = posted_id or (max(results_ids) if results_ids else 0)
+    if not anchor:
+        return
+    max_request = 0
+    for c in comments:
+        m = BOT_TAG_RE.search(c.get("body") or "")
+        if m:
+            max_request = max(max_request, int(m.group("request")))
+    acked = set()
+    for c in comments:
+        m = ACK_TAG_RE.search(c.get("body") or "")
+        if m:
+            acked.add(int(m.group("id")))
+    for c in sorted(comments, key=lambda c: c["id"]):
+        cid = c["id"]
+        label = command_label(c.get("body") or "")
+        login = (c.get("user") or {}).get("login")
+        authorized = login in owners or (label == "/rerun" and login == author)
+        served = delivered or cid < anchor or cid <= max_request
+        if cid in acked or not served or not label or not authorized:
+            continue
+        anchor_comment = next((c for c in comments if c["id"] == anchor), {})
+        discussion = posted_discussion or anchor_comment.get("discussion_id")
+        note_url = f"https://atomgit.com/{REPO_OWNER}/{REPO_NAME}/pull/{pr_number}"
+        if discussion:
+            note_url += f"?did={discussion}"
+        note_url += f"#tid-{anchor}"
+        where = "updated in place in" if edited else "in"
+        body = (
+            f"✅ `{label}` (comment {cid}) consumed — CI results {where} "
+            f"[comment {anchor}]({note_url})."
+            f"\n<!-- gvirt-ci-ack:{cid} -->"
+        )
+        if dry_run:
+            log(f"PR #{pr_number}: dry run, would ack `{label}` comment {cid}")
+        elif client.post_pr_comment(pr_number, body):
+            log(f"PR #{pr_number}: acked `{label}` comment {cid}")
+
+
 def stale_reason(
     comments: list,
     sha: str,
@@ -454,21 +613,48 @@ def find_bot_comments(comments: list) -> list:
     return [c for c in comments if "<!-- gvirt-ci-bot:" in (c.get("body") or "")]
 
 
+def find_sha_comment(comments: list, sha: str, login: str):
+    """This account's newest comment whose marker records `sha` — the
+    advance mode's overwrite target. Another account's same-sha comment is
+    never a target: the platform allows only a comment's author to edit
+    it, so a re-check by a second account falls back to posting."""
+    own = []
+    for c in comments:
+        m = BOT_TAG_RE.search(c.get("body") or "")
+        if m and m.group("sha") == sha and (c.get("user") or {}).get("login") == login:
+            own.append(c)
+    return max(own, key=lambda c: c["id"]) if own else None
+
+
 def post_comment(
-    client: GitCodeClient, pr_number: int, bot_comments: list, body: str, mode: str
-) -> None:
-    """Deliver the CI results. The default (post) posts a fresh comment per
-    check: the platform's comments are strictly chronological with no
-    pinning, so an in-place edit keeps the results at an old position that
-    gets folded once the thread grows, and an edit notifies nobody — a new
-    comment lands at the thread's visible end. The replace mode exists for
-    the placeholder flow: a watcher posts a placeholder immediately on PR
-    creation — before any other bot or reviewer comments — so it sits right
-    under the PR description, and each check then edits the results into it
-    (this account's own newest comment, by id; falls back to posting when
-    the account owns none or the edit fails). Duplicate delivery for an
-    unchanged head is prevented by find_fresh_comment before any check
-    runs, in either mode."""
+    client: GitCodeClient,
+    pr_number: int,
+    bot_comments: list,
+    body: str,
+    mode: str,
+    sha: str,
+) -> tuple[int, bool, str | None] | None:
+    """Deliver the CI results, returning (comment id, updated in place,
+    discussion id) —
+    the id anchors the command acks; None when delivery failed. The
+    default (advance) keeps one comment per head sha: the first check for
+    a head posts, and every later re-check of the SAME head — a harness or
+    bot update, a /rerun — overwrites that comment in place, so the thread
+    shows one advancing verdict per commit instead of a new comment per
+    re-check. A new head posts a new comment. The post mode posts a fresh
+    comment per check (the old default: in-place edits notify nobody and
+    get folded in long threads — the ack comment is what notifies under
+    advance). The replace mode is the placeholder flow: a watcher posts a
+    placeholder immediately on PR creation — before any other bot or
+    reviewer comments — so it sits right under the PR description, and
+    every check edits that account's own newest comment (falls back to
+    posting when the account owns none or the edit fails). An advance-mode
+    edit that fails also falls back to posting: a second same-sha comment
+    beats a lost verdict, and the next same-sha delivery targets the
+    newest one, so the invariant self-heals. Duplicate delivery for an
+    unchanged, still-fresh head is prevented by find_fresh_comment before
+    any check runs, in every mode."""
+    target = None
     if mode == "replace":
         own = [
             c
@@ -476,12 +662,25 @@ def post_comment(
             if (c.get("user") or {}).get("login") == client.login
         ]
         if own:
-            newest = max(own, key=lambda c: c["id"])
-            if client.patch_pr_comment(newest["id"], body):
-                log(f"PR #{pr_number}: updated CI comment {newest['id']}")
-                return
-    if client.post_pr_comment(pr_number, body):
+            target = max(own, key=lambda c: c["id"])
+    elif mode == "advance":
+        target = find_sha_comment(bot_comments, sha, client.login)
+    if target and client.patch_pr_comment(target["id"], body):
+        log(f"PR #{pr_number}: updated CI comment {target['id']} in place")
+        return target["id"], True, target.get("discussion_id")
+    created = client.post_pr_comment(pr_number, body)
+    if not created:
+        return None
+    cid = created.get("id") if isinstance(created, dict) else None
+    if cid:
+        log(f"PR #{pr_number}: posted CI comment {cid}")
+    else:
         log(f"PR #{pr_number}: posted CI comment")
+    return (
+        cid,
+        False,
+        created.get("discussion_id") if isinstance(created, dict) else None,
+    )
 
 
 def load_digest_config(master_wt: Path) -> tuple[set[str], list[str]]:
@@ -575,6 +774,24 @@ def scrub_env() -> int:
     return len(secrets)
 
 
+def newest_harness_commit(
+    wt: Path, master_sha: str, include_outside: list[str]
+) -> str | None:
+    """The newest commit at or below master_sha that changed the harness
+    files — `.gitcode` plus the digest's outside includes — the harness
+    anchor: everything after it on master is harness-clean, so a PR head
+    containing it carries the current harness and one that does not is
+    stacked on an outdated harness base. Excluded digest files (e.g.
+    CODEOWNERS) count here but not in the digest: a rarer, milder
+    over-trigger — the PR falls back to master's identical-content
+    harness copy plus the rebase note. None when no harness commit exists
+    (nothing to be stacked on)."""
+    out = git(
+        wt, ["log", "-1", "--format=%H", master_sha, "--", ".gitcode", *include_outside]
+    )
+    return out or None
+
+
 def git(repo_dir: Path, args: list[str], timeout: int = 300) -> str:
     result = subprocess.run(
         ["git", *args],
@@ -615,15 +832,15 @@ def fetch_ref(
     return git(repo_dir, ["rev-parse", local_ref])
 
 
-def base_is_stale(
-    repo_dir: Path, url: str, ref: str, local_ref: str, master_sha: str
-) -> bool:
-    """Whether the PR branched from a master older than the current tip.
-    The depth-1 head fetch grafts the tip parentless, so ancestry needs a
-    bounded re-fetch at a larger depth — failed PRs only, the extra objects
-    ride the rebase nudge, which never blocks; if the deepened history
-    still misses the tip, the base is old beyond the bound, stale by any
-    measure."""
+def ref_contains(
+    repo_dir: Path, url: str, ref: str, local_ref: str, commit: str
+) -> bool | None:
+    """Whether the remote ref's history contains `commit`, from a bounded
+    deeper re-fetch of the bot-owned ref — the depth-1 head fetch grafts
+    the tip parentless, so ancestry needs history. True/False is the
+    answer within the fetched window; None when it could not be
+    established (fetch or git failure) — callers treat None
+    conservatively, like base_is_stale's 'old beyond the bound'."""
     try:
         git(
             repo_dir,
@@ -638,12 +855,31 @@ def base_is_stale(
             ],
             timeout=120,
         )
-        git(
-            repo_dir, ["merge-base", "--is-ancestor", master_sha, local_ref], timeout=60
+        result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", commit, local_ref],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
         )
-        return False
+        if result.returncode == 0:
+            return True
+        if result.returncode == 1:
+            return False
+        raise RuntimeError(result.stderr.strip())
     except (RuntimeError, subprocess.TimeoutExpired):
-        return True
+        return None
+
+
+def base_is_stale(
+    repo_dir: Path, url: str, ref: str, local_ref: str, master_sha: str
+) -> bool:
+    """Whether the PR branched from a master older than the current tip.
+    Failed PRs only, the extra objects ride the rebase nudge, which never
+    blocks; an unestablishable answer (or a history too shallow after the
+    fetch) counts as stale by any measure."""
+    return ref_contains(repo_dir, url, ref, local_ref, master_sha) is not True
 
 
 def prepare_worktree(repo_dir: Path, sha: str, worktree_root: Path, name: str) -> Path:
@@ -815,12 +1051,16 @@ def process_pr(
     )
     rerun = latest_rerun_request(comments, master["owners"] | {author})
     request = rerun[0] if rerun else 0
-    notes = [f"Re-check requested by @{rerun[1]}."] if rerun else []
+    notes = []
+    if rerun and not request_consumed(comments, request):
+        notes.append(f"Re-check requested by @{rerun[1]} (comment {request}).")
     trusted = author in master["owners"] or ci_approved
+    fresh_ci = fresh_ci_request(comments, master["owners"])
     suite = "all" if all_suite_requested(comments, master["owners"]) else "ci"
     log(
         f"PR #{pr_number}: author {author!r}, harness trust: {'PR copy' if trusted else 'master copy'}"
-        + (f", re-check requested in comment {request}" if rerun else "")
+        + (f", re-check requested in comment {request}" if notes else "")
+        + (f", fresh /ci grant in comment {fresh_ci}" if fresh_ci else "")
         + (", whole suite requested" if suite == "all" else "")
     )
 
@@ -829,6 +1069,16 @@ def process_pr(
     ):
         log(
             f"PR #{pr_number}: CI comment already covers this commit and harness, skipping"
+        )
+        ack_commands(
+            client,
+            pr_number,
+            comments,
+            master["owners"],
+            author,
+            0,
+            False,
+            args.dry_run,
         )
         return
 
@@ -857,19 +1107,66 @@ def process_pr(
     log(f"PR #{pr_number}: checking out {sha[:8]} in {wt}")
     try:
         pr_script = wt / HARNESS_RELATIVE_PATH
-        if trusted and pr_script.exists():
-            script, source, digest = (
-                pr_script,
-                sha,
-                gitcode_digest(wt, master["digest_exclude"], master["digest_include"]),
+        # The PR's own harness only counts when stacked on master's: an
+        # identical digest (same content), or the head contains master's
+        # newest harness commit (the PR's own harness changes, if any, sit
+        # on top of master's current harness). A stale-based harness PR
+        # would otherwise test its changes on an outdated base. An
+        # unconsumed /ci or /ci all re-approves the PR's copy anyway.
+        pr_digest = None
+        stacked = None
+        if pr_script.exists():
+            pr_digest = gitcode_digest(
+                wt, master["digest_exclude"], master["digest_include"]
             )
+            stacked = (
+                True
+                if not master["harness_anchor"]
+                else pr_digest == master["digest"]
+                or bool(
+                    ref_contains(
+                        Path(args.refs_repo),
+                        f"https://gitcode.com/{repo_path}.git",
+                        pr["head"]["ref"],
+                        f"refs/prbot/pr-{pr_number}",
+                        master["harness_anchor"],
+                    )
+                )
+            )
+        if pr_script.exists() and trusted and (stacked or fresh_ci):
+            script, source, digest = pr_script, sha, pr_digest
             harness = f"this PR's `.gitcode` @ {tree_link(sha)} (codeowner-approved)"
         else:
             script, source, digest = master["script"], master["sha"], master["digest"]
             harness = f"master `.gitcode` @ {tree_link(master['sha'])}"
+        if stacked is False and not (trusted and fresh_ci):
+            notes.append(
+                f"This PR's harness base predates the newest harness change on master "
+                f"({commit_link(master['harness_anchor'])}); the checks ran master's current harness. "
+                "Rebase onto the latest master to pick it up, or have a `.gitcode` owner "
+                "comment `/ci` to re-check with this PR's harness."
+            )
+        log(
+            f"PR #{pr_number}: harness: {'PR copy' if script == pr_script else 'master copy'}"
+            + (
+                f" (base behind anchor {master['harness_anchor'][:8]})"
+                if stacked is False
+                else ""
+            )
+        )
         if find_fresh_comment(comments, sha, digest, request, suite):
             log(
                 f"PR #{pr_number}: CI comment already covers this commit and harness, skipping"
+            )
+            ack_commands(
+                client,
+                pr_number,
+                comments,
+                master["owners"],
+                author,
+                0,
+                False,
+                args.dry_run,
             )
             return
         reason = stale_reason(comments, sha, BOT_VERSION, digest, request, suite)
@@ -902,13 +1199,29 @@ def process_pr(
         )
         if args.dry_run:
             log(f"PR #{pr_number}: dry run, comment would be:\n{body}")
+            ack_commands(
+                client, pr_number, comments, master["owners"], author, 0, False, True
+            )
         else:
-            post_comment(
+            posted = post_comment(
                 client,
                 pr_number,
                 find_bot_comments(comments),
                 body,
                 args.comment_mode,
+                sha,
+            )
+            ack_commands(
+                client,
+                pr_number,
+                comments,
+                master["owners"],
+                author,
+                posted[0] if posted else 0,
+                bool(posted and posted[1]),
+                False,
+                posted is not None,
+                posted[2] if posted else None,
             )
     finally:
         if args.keep_worktrees:
@@ -935,12 +1248,15 @@ def main() -> int:
     )
     parser.add_argument(
         "--comment-mode",
-        choices=("post", "replace"),
-        default=os.environ.get("XLITE_CI_COMMENT_MODE", "post"),
-        help="post: a fresh comment per check (default). replace: edit this "
-        "account's own newest comment in place — for the placeholder flow, "
-        "where a watcher posts a placeholder on PR creation so the results "
-        "sit right under the PR description (or XLITE_CI_COMMENT_MODE)",
+        choices=("advance", "post", "replace"),
+        default=os.environ.get("XLITE_CI_COMMENT_MODE", "advance"),
+        help="advance: one comment per head sha — the first check for a head "
+        "posts, later re-checks of the same head (harness update, /rerun) "
+        "overwrite it in place (default). post: a fresh comment per check. "
+        "replace: always edit this account's own newest comment in place — "
+        "for the placeholder flow, where a watcher posts a placeholder on "
+        "PR creation so the results sit right under the PR description "
+        "(or XLITE_CI_COMMENT_MODE)",
     )
     parser.add_argument(
         "--xlite-dir",
@@ -1070,6 +1386,7 @@ def main() -> int:
         "sha": master_sha,
         "wt": master_wt,
         "digest": gitcode_digest(master_wt, digest_exclude, digest_include),
+        "harness_anchor": newest_harness_commit(master_wt, master_sha, digest_include),
         "digest_exclude": digest_exclude,
         "digest_include": digest_include,
         "owners": gitcode_owners(master_wt),
@@ -1099,7 +1416,7 @@ def main() -> int:
             try:
                 process_pr(client, pr, args, master)
             except Exception as e:  # noqa: BLE001 — one bad PR must not stop the rest
-                log(f"PR #{number}: unexpected error: {e}")
+                log(f"PR #{number}: unexpected error: {e}\n{traceback.format_exc()}")
             log(f"PR #{number}: done in {time.monotonic() - started:.1f}s")
         return 0
 
@@ -1110,7 +1427,9 @@ def main() -> int:
         try:
             process_pr(client, pr, args, master)
         except Exception as e:  # noqa: BLE001 — keep the loop alive for the remaining PRs
-            log(f"PR #{pr.get('number')}: unexpected error: {e}")
+            log(
+                f"PR #{pr.get('number')}: unexpected error: {e}\n{traceback.format_exc()}"
+            )
         log(f"PR #{pr.get('number')}: done in {time.monotonic() - started:.1f}s")
     return 0
 
