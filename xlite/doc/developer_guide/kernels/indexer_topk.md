@@ -15,7 +15,7 @@ topkIndices[s,:] = TopK(index_score[s, :p0+1], topK)     # AIV,因果限定候�
 - **因果掩码**:每个 query token 只在先验及自身位置 `[0, p0]` 中选 topK(不含未来),通过按位置截断 `validKvLen` + 尾部 `FLOAT_MIN` 补齐实现(见下文)。`p0` 由 `MapPosToKv(pos)` 给出(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::MapPosToKv`):`compressRatio==1`(token 级 KV)时 `p0 = pos`(含自身);`compressRatio>1`(压缩块级 KV)时 `p0 = (pos+1)/ratio - 1`,即最后一个**已完成**压缩块的末 KV 索引,**排除 token 自身所在未完成块**(首块、`clen==0` 时为 `-1`,表示无有效 KV)。
 - **稀疏/稠密分流**:`p0 < topK` 的 token 走稠密注意力(全部先验位置都参加注意力,无需选路),kernel 不为其排序,直接输出**默认模板** `0...topK-1`(升序,覆盖 `[0, topK)`);下游消费时必须过滤掉 `> p0` 的索引——模板头部的前 `min(p0+1, topK)` 项恒为 `[0, p0]` 内的有效位置(`gather_sparse_kv_cache` 依赖此约定)。
 
-与 `indexer_scores` + `topk` 两算子组合相比,本算子把两步融合进同一 launch,并通过 `lastTopk`(KV tile 间的逐位置中转)避免中间大矩阵落盘。
+与 `indexer_scores` + `topk` 两算子组合相比,本算子把两步融合进同一 launch,并通过 `lastTopk`(KV tile 间的逐位置中转)避免中间大矩阵落盘。可选的 V4.1 candidate 两级 top-k(组粒度预筛)以 `candidate_mode=1/2` 叠加在本算子上(见下文专节)。
 
 **packTail 契约**(`packTail=1`,GLM-5.3 HYBRID_KDA kpool 压缩路径,复刻 native `glm5_next_lightning_indexer` 行布局):此时 `topK` 参数以**池数**传入(`DIV_ROUND_UP(indexTopK, indexKpool)`),kernel 把每个选中压缩块索引展开为 `kpool` 个连续 token 槽索引,并追加当前池未满部分的 PKI 因果尾部(`kpool-1` 列),行宽 = `topK*kpool + kpool-1`;每行按 `outStride`(行宽向上对齐到 `TOPK_RUN_ALIGN=128` 个 uint32 槽,即 512B)定距写入 `topkIndices`,`topkIndices.shape[1]` 必须等于 `outStride`(host 校验,`csrc/op.cpp` 的 `XliteOpIndexerTopK`)。逻辑行宽之后的 padding 列由 kernel 写 `0xFFFFFFFF`(读作 -1),被下游 attention softmax 的 range mask 过滤;GLM-5.3 典型为 `outWidth=2051`、`outStride=2176`。稠密默认行不再是纯模板 `0...topK-1`:每行尾部 `kpool-1` 列需 patch 当前池 tail token 位置(单模板 UB 整行复制 + `RestorePrevTail`/`BuildTail` 恢复被覆写的模板 lane,见 `csrc/kernels/indexer_topk.h` 的 `StoreDefaultTopkRows`/`BuildTail`)。`reluQk=0` 跳过 per-head ReLU——GLM-5.3 indexer scores 是线性 qbar 聚合,无 DSA 的 ReLU 截断。用例 `tests/kernels/indexer_topk_pack_tail.py`。
 
@@ -40,9 +40,17 @@ indexer_topk(
     batch,
     topK,
     kv_split=0,  # 0 = serial query-tile mode, 1 = (tile, chunk) relay mode
+    k_scale_cache=None,  # C8 必填
+    compress_ratio=1,
+    q_tile=0,
     pack_tail=0,
     relu_qk=1,  # HYBRID_KDA packTail 契约, 见概述
     out_stride=0,
+    candidates=None,  # candidate 两级 top-k(V4.1):mode 1 输出 / mode 2 输入
+    candidate_relay=None,  # mode 1 接力 workspace
+    candidate_mode=0,  # 0=off, 1=source, 2=consumer
+    candidate_topk_blocks=0,  # W = 候选组预算(V4.1: 2048)
+    candidate_block_size=0,  # bs = 每组 KV 行数(V4.1: 8)
 )
 ```
 
@@ -77,14 +85,19 @@ C8(`int8_t`)入口 `INDEXER_TOPK_C8_FUNC_DEFINE`(`csrc/kernels/indexer_topk.h` �
 | kvSplit | — | 标量 | uint8 | 分核模式,host 下发前由 `PickIndexerKvSplit` 决策(模型路径:PrepareAttn 存 `rt._indexerKvSplit`;standalone 入口:外部显式传入 `kv_split`):`0` = 串行 tile 模式(稀疏 query tile 数 ≥ block_num/2),`1` = chunk 平铺 + 跨核接力模式(稀疏 query tile 数 < block_num/2) |
 | seqPositions | 输入 | `[max(max(blockSize*maxNumBlock, INIT_MIN_SEQ_POS), topK)]` | int32(uint32 语义) | `arange(...)` 恒等索引表,由 host 侧(`csrc/_C.cpp` `IndexerTopK` / `csrc/model.cpp` `XModel::Init`)预先生成;长度必须覆盖 kernel 侧推导的 `maxSeqLen = MAX(blockSize*maxNumBlock, INIT_MIN_SEQ_POS=102400)`(host 侧 `XliteOpIndexerTopK` 不校验长度,由 `XModel::Init` 预生成保证覆盖)。`XModel::Init` 按 `MAX(INIT_MIN_SEQ_POS, ROUND_UP(max_seq_len, blockSize))` 一次性预生成。AIV 每个 subblock 搬入属于自己的一段,之后按 `kvOffset` 增量推进;同时它也是稠密行模板的来源——首个 `outStride` 项(非 packTail 时等于 `topK`)即 `0...outStride-1`,packTail 的尾部列再由 kernel 补 -1(模板 writer 核整体搬入 UB `defaultTopkIndices`,见下文) |
 | topkIndices | 输出 | 非 packTail `[total_query_len, topK]`;packTail `[total_query_len, outStride]` | int32(uint32 语义) | 每 query token 的 topK 索引,**按索引升序**(最小 id 在前)排列,所有行有效。`p0 >= topK` 的稀疏行是真实 topK(候选满 `topK` 个,全部落在 `[0, p0]`);`p0 < topK` 的稠密行是默认模板 `0...topK-1`,其中 `> p0` 的表项无效,下游必须过滤——模板头部的前 `min(p0+1, topK)` 项恒为有效位置(`gather_sparse_kv_cache` 依赖此约定做头部有效收集)。`packTail=1` 时 `topK` 为池数,行内前 `topK*kpool` 项为展开后的 token 槽、末尾 `kpool-1` 列为当前池 tail,之后到 `outStride` 的 128 槽 padding 为 -1,见概述 packTail 契约 |
-| kScaleCache | 输入(C8) | `[kvcache_block_num,blockSize,1,1]` | fp16 | 与 K cache 同分页布局;Python 参数为 `k_scale_cache`。DSV4 的 vllm 原生池把 K 与 scale 按页打包进同一分配(scale 视图带 storage_offset、stride[0] = 每 block 字节数/2),允许 pitch |
+| kScaleCache | 输入(C8) | `[kvcache_block_num,blockSize,1,1]` | fp16 | 与 K cache 同分页布局;Python 参数为 `k_scale_cache`。DSV4 的原生池把 K 与 scale 按页打包进同一分配(scale 视图带 storage_offset、stride[0] = 每 block 字节数/2),允许 pitch |
 | kCacheStride | — | 标量 | uint32 | kCache 的 dim-0 跨度(元素数);连续时等于 blockSize×headDim(C8 为 blockSize×128),非连续时由宿主传入真实跨距 |
-| kScaleCacheStride | — | 标量(C8) | uint32 | kScaleCache 的 dim-0 跨度(fp16 元素数);dense 池传 0,内核以 `MAX(kScaleCacheStride, blockSize)` 守护后退化为 block 内连续寻址。核内 scale 读取为 `kScaleCache + block*kScaleCacheStride`(块内连续),vllm 打包页的 storage_offset 常量偏移由基指针吸收 |
+| kScaleCacheStride | — | 标量(C8) | uint32 | kScaleCache 的 dim-0 跨度(fp16 元素数);dense 池传 0,内核以 `MAX(kScaleCacheStride, blockSize)` 守护后退化为 block 内连续寻址。核内 scale 读取为 `kScaleCache + block*kScaleCacheStride`(块内连续),打包页的 storage_offset 常量偏移由基指针吸收 |
 | nHeads / headDim / blockSize / batch / topK / skipDenseTopk | — | 标量 | uint32 / uint8 | 测试配置:nHeads=64, headDim=128, blockSize=128, topK ∈ {512, 2048};host 校验 `nHeads` 为 16 的倍数且 ≤64、`headDim` 为 16 的倍数且 ≤128(C8 额外 `%32`,见下节)、`blockSize` 为 16 的倍数且 ≤128 并整除 `MAX_INDEXER_KV_TILE_LEN=4096`(`csrc/op.cpp` 的 `XliteOpIndexerTopK`,关键字 `nHeads == 0`、`nHeads % 16 != 0`、`nHeads > 64` 共通校验段);约束 `topK <= MAX_TOPK_NUM=2048`、`kvLen <= MAX_INDEXER_KV_TILE_LEN=4096`(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAivTopk`,关键字 `assert(kvLen <= MAX_INDEXER_KV_TILE_LEN && topK <= MAX_TOPK_NUM)`)。`skipDenseTopk=1` 时不写稠密模板(旧行为,稠密行内容不定),默认 0 |
 | compressRatio | — | 标量 | uint32 | KV 压缩比:`1`=token 级 KV(因果含自身);`>1`=压缩块级 KV,`MapPosToKv` 把 token 位置映射到已完成压缩块边界(因果排除自身未完成块)。host 由模型层传入(`csrc/op.cpp` 的 `XliteOpIndexerTopK`,浮点路径 `launchKernel(rt.aicNum, ...)` 与 C8 路径 `aclrtlaunch_indexer_topk_int8_t` 末尾均传 `compressRatio` 实参)。`packTail=1` 时兼作 kpool(需 ≥2) |
 | packTail | — | 标量 | uint8(0/1) | 1 = 展开选中压缩块为 `kpool` 个 token 槽索引并追加 PKI 因果尾,输出行宽 `topK*kpool+kpool-1`(见概述 packTail 契约);默认 0 = 行宽 `topK` 的旧语义 |
 | outStride | — | 标量 | uint32 | `topkIndices` 的行距(uint32 词数);`packTail=1` 时必须为行宽向上对齐到 `TOPK_RUN_ALIGN=128` 槽(512B)的 pitch,`topkIndices.shape[1] == outStride` 由 host 校验;`packTail=0` 时省缺 0,op 内解析为 `topK`(旧行为) |
 | reluQk | — | 标量 | uint8(0/1) | AIC 得分融合是否施加 per-head ReLU;默认 1(兼容 DSA 语义);GLM-5.3 indexer scores 为线性 qbar 聚合,`reluQk=0` 跳过(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::RunAicIndexerScores`,关键字 `reluEn=`) |
+| candidates | 输出(mode 1)/ 输入(mode 2) | `[total_query_len, candidateTopkBlocks]` | int32 | candidate 两级 top-k 的候选组 id 行:mode 1 输出(升序 + `-1` 补尾;`p0 < topK` 的稠密行为 `[0, gTotal)` 升序 + `-1` 补尾,`gTotal = (p0+bs)/bs`,压缩路径 `p0=-1` 无有效 KV 时全 `-1`),mode 2 读入做非候选降级;`candidate_mode=0` 时忽略 |
+| candidateRelay | workspace | `[batchedTokens, 2*candidateTopkBlocks]` | int32(uint32 对) | mode 1 专用:KV chunk 间候选(组最大值+组 id 对)的接力缓冲,同核 GM ping(见下文专节);mode 1 下 `kvSplit` 恒被 op 级强制为 0 |
+| candidateMode | — | 标量 | int32 | `0`=关闭(默认);`1`=source(输出候选行);`2`=consumer(按候选行降级非候选得分) |
+| candidateTopkBlocks | — | 标量 | int32 | W:每行候选组预算(V4.1: 2048);mode 1 要求 `W <= MAX_TOPK_NUM=2048` **且为 8 的倍数**(emit 在 `mrgSortBuf1`/`totalSort` 内置的 VEC 暂存基址 `+W`/`+2W`/`+3W` 浮点偏移须保持 32B 对齐,等价于 `4W` 字节被 32 整除),host 校验 |
+| candidateBlockSize | — | 标量 | int32 | bs:每组 KV 行数(V4.1: 8);两模式公共门要求 `bs == 8`——mode 2 的掩码广播 `vbrcb` 把位置 p 映到组 p/8(硬编码 8 行/组),mode 1 的组布局/D1 借用按 `G=512` 组/`bs=8` 排布,且组不跨 KV chunk 边界 |
 
 ## 支持的数据类型
 
@@ -186,6 +199,23 @@ C8 的 fp32 scores 直接搬入 `mrgSortBuf0`,`in[0]/in[1]` 交替暂存 fp16 K 
 **`kvSplit=1`(跨核接力,software ring)**:KV tile 顺序分布在多个 block 上,用 **GM flag 数组 + generation 计数**实现单向环形链(`csrc/kernels/indexer_topk.h` 的 `IndexerTopK::SetNextCore` / `IndexerTopK::WaitPrevCore` / `IndexerTopK::ResetPrevCore`):`sync` 数组每核 `AIV_TO_AIC=2` 个 u32(`sync[blockIdx*AIV_TO_AIC + subBlockIdx]`),核 `i` 的 set 槽即核 `(i+1)%block_num` 的 wait 槽;`SetNextCore()` 把递增的 generation 写入下一核的 flag(内置 `PipeBarrier<PIPE_ALL>` 保证此前 `lastTopk` 的 MTE3 写全部完成);**调用点必须先 `set_flag/wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID0)` 等 MTE3 队列排空**——`SetNextCore` 的标量 `*val` 写在 UB 偏移 0,与 `totalSort` 起始地址别名,不等排空会污染尚未完成的 `lastTopk` 拷贝源;`WaitPrevCore()` 自旋 `copy_gm_to_ubuf` 轮询上一核 flag 直到 `*val >= waitPrevGeneration`——轮询成功即链上全部前驱写完成,天然涵盖"同核前序 chunk"的可见性,因此不需要 EVENT_ID5 fence;`ResetPrevCore()` 在 kernel 尾部把上一核的 flag 清零供下次 launch 复用。由此 chunk 间的 AIC/AIV 流水摊到多个 block:block `i` 的 AIC 算 chunk `j+1` 时,block `i+1` 的 AIV 融合 chunk `j`,只在融合点同步。
 
 `kvSplit=0` 下各 block 完全并行、互不等待:AIC 算 chunk `i+1` 的 scores 时,本 block 的 AIV 经 scores 乒乓并行融合 chunk `i` 的 topk。
+
+### V4.1 candidate 两级 top-k(mode 1 源 / mode 2 消费,可选)
+
+V4.1 在位置级 top-k 之前叠加一层**组粒度预筛**:KV 行按 `candidateBlockSize=bs=8` 分组,源层(`candidate_source_layer`,V4.1 config 的 L20)的 indexer_topk 调用以 `candidate_mode=1` 输出每行 top-`W=candidateTopkBlocks` 个候选组 id;后续消费层以 `candidate_mode=2` 在排序前把非候选组的得分降级为 `NEG_HUGE=-1e30`——降级值仍高于 `FLOAT_MIN` 垫,故当候选不足时会以填充身份漏进 top-k(参考实现的 `where(...)` 行为,候选优先、其后接漏入的非候选填充)。与参考实现(`deepseek_v4_1.py` / `dsa_v41.py`)语义一致。candidate 关闭时(`candidate_mode=0`)与既有行为完全一致。
+
+**mode 1(source,`IndexerTopK::RunCandidateSource` / `IndexerTopK::CandidateEmit` / `IndexerTopK::EmitDenseCandidates`)**:
+
+- 稀疏行(`RunCandidateSource`):把该 chunk 已暂存的 fp32 得分按 8 行一组 `vcgmax` 池化 → 因果边界组(`pinLocal = p0/bs - kvOffset/bs`)钉 `FLT_MAX` 保证入选 → 池外组 id 置 `-1`(`id' = id - (id+1)*isPad` 全向量算术,纯 UB 标量写不与 V 管读定序)→ 组内 top-W(`vbitsort` + `MrgSort`,`pairRepeat` 按 32 对块补齐池尾)→ 跨 chunk 接力:非首 chunk 与 `candidateRelay` 行(`lastSort[1-curr]` 暂存,镜像位置路径的 EVENT_ID2 协议)`vmrgsort4` 合并;每 chunk 都把合并对写回 GM relay 行(**GM 是唯一跨"位置路径复用"存活 的累加器**)。末 chunk 把 `[totalLen, W)` 补 `-1`,`CandidateEmit` 回读 relay 行、以 `-f32(id)` 为键重排序(pad 的 `+1.0` 排最前、real id 升序)输出 candidates 行。mode 1 下 op 级强制 `kvSplit=0`(同核串行接力,免跨核第二载荷的环形链);
+- 稠密行(`EmitDenseCandidates`,任务枚举侧):被稠密跳过的行不进 `RunAivTopk`,由 writer 侧直接构造 `[0, gTotal)` 升序 + `-1` 补尾的候选行(三步全宽对齐算术:`row[j] = max(j-(W-gTotal), -1)`,避免 `W-gTotal` 非 32 倍数时的 VEC 32B 非对齐);混合 tile 的稠密前缀同样由该循环一次性覆盖(`RunAivTopk` 对稠密行整体跳过,无逐 chunk 重发);
+- **UB 借用布局(无专用槽位,复用位置路径死区)**:mode 1 工作向量/本地排序对/合并输出全部落在 `mrgSortBuf1` 的"得分暂存之后、位置 vbitsort 之前"死区;接力暂存借用 `lastSort[1-curr]`(位置合并当行加载的是 `lastSort[curr]`);emit 回读/键/输出行借用 `totalSort` 槽(位置 final 自身读后已死,布局 pairs `[0,2W)` / keys `[2W,3W)` / row `[3W,4W)`,4W ≤ 4*MAX_TOPK_NUM)。op 级容量门:候选缓冲 int32 `[T, W]`(秩 2、行数 ≥ T、宽度 ≥ W)与 `bs == 8` 为两模式公共门(mode 2 的掩码广播 `vbrcb` 硬编码 8 行/组);mode 1 另有 relay int32 `[T, 2W]`(秩 2、行数 ≥ T)、`W <= MAX_TOPK_NUM` 且为 8 的倍数;整 cache 全稠密(`topK >= 容量`)时 mode 1 拒绝(host 模板路径不含 per-row gTotal 信息);
+- **两条管线契约(NPU 调试实锤,违反即数据损坏)**:
+  1. **relay 的 GM 写必须立即 drain**(`set_flag(PIPE_MTE3, PIPE_V, EVENT_ID7)` + `wait_flag` 后才算完成):同一行的位置路径在 source 返回后立刻以 `vbitsort(mrgSortBuf1, ...)` 复用该缓冲,挂起的 MTE3 读会与它竞态,DMA 快照读到新旧混合数据——表现为 relay 行混入位置排序中间态对、且逐次运行不同。emit 的尾读(totalSort 高段)只与下一个 emit 争议、其入口 drain 足够,故仍可用 hold 模式;
+  2. **sort 对(含 id 半区)只能原始字节搬运**(MrgSort 同款 `copy_ubuf_to_ubuf`):pad id 的位模式 `0xFFFFFFFF` 是 NaN,任何浮点算术(如 `vadds(+0.0f)` 拷贝)都会把它规范化为 canonical NaN `0x7FFFFFFF`,污染全部 pad id;real id 是小整数(denormal 位模式),`+0.0f` 下保位。`vbitsort`/`vmrgsort4`/`vreducev2` 均按原始 payload 透传 id,`vconv_s322f32` 是整数语义转换(同宽必须 (8,8) stride),都不受影响。
+
+**mode 2(consumer,`IndexerTopK::RunCandidateMask`)**:候选行直接从 GM 标量读(`CandLowerBound` 二分下界),对每个在区间内的候选做 min-距离累加(`vbrcb` 广播到位置)得 isOut 掩码,`score += (NEG_HUGE - score) * isOut` 原地降级 `mrgSortBuf0`;`gTotal <= W` 时(源层保下全部因果组)整体为 no-op 快速路径。降级发生在得分暂存之后、位置排序之前,chunk 内局部,两种 `kvSplit` 与 host tiling 下语义一致。
+
+**mode 2 打分侧(cube)**:消费层走**未改的 score-all 路径**(cube 对 candidate 无感知,`RunAicIndexerScores` 全量 Q·K 打分):每个 `[0, kvLen)` 行都拿到真实得分,AIV 的 `RunCandidateMask` 再在排序前把非候选降级为 `NEG_HUGE`。无需 host `scores.Memset(0)`——score-all 覆盖 VEC 要读的每一行(`[0, validKvLen) ⊆ [0, kvLen)`),位置排序尾垫在 UB 内就地生成(`FLOAT_MIN`)。mode 0/1 路径不变。
 
 ### AIC/AIV 乒乓同步
 

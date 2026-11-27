@@ -4118,6 +4118,11 @@ def indexer_topk(
     pack_tail: int = 0,
     relu_qk: int = 1,
     out_stride: int = 0,
+    candidates: Optional[torch.Tensor] = None,
+    candidate_relay: Optional[torch.Tensor] = None,
+    candidate_mode: int = 0,
+    candidate_topk_blocks: int = 0,
+    candidate_block_size: int = 0,
 ) -> None:
     """Fused indexer scores + top-k selection over cached keys.
 
@@ -4203,6 +4208,34 @@ def indexer_topk(
             ``pack_tail=1``; it must equal the logical width rounded up to
             128 lanes, and ``topk_indices.shape[1]`` must match. ``0`` is
             derived by the binding.
+        candidates (Optional[torch.Tensor]): V4.1 candidate pre-filter rows
+            ``[total_query_len, candidate_topk_blocks]``, int32, required for
+            ``candidate_mode > 0``. Mode 1 writes it: the per-row top candidate
+            group ids, ascending, ``-1``-padded to width (dense rows emit
+            ``[-1, ..., -1, 0..gTotal)``). Mode 2 reads the rows emitted by the
+            source layer's forward and degrades every non-candidate position's
+            score to ``-1e30`` ahead of the top-k; rows whose causal span
+            covers at most ``candidate_topk_blocks`` groups keep all groups
+            and pass through untouched.
+        candidate_relay (Optional[torch.Tensor]): Source-mode scratch
+            ``[total_query_len, 2*candidate_topk_blocks]``, int32, required
+            for mode 1 (relays the running candidate top across a tile's KV
+            chunks; ignored otherwise).
+        candidate_mode (int): ``0`` = off (candidate args ignored), ``1`` =
+            this call is the candidate source layer (emit rows; forces
+            ``kv_split=0``), ``2`` = consumer layer (apply the mask). Mode 1
+            requires the cache capacity to exceed ``top_k`` (the dense-row
+            template path skips the kernel and would emit nothing).
+        candidate_topk_blocks (int): Candidate groups kept per query row (the
+            row width W). In source mode (1), must stay at or below the top-k
+            max (2048) and be a multiple of 8 (the emit sorts through the
+            position path's fixed-size totalSort slots, whose VEC scratch
+            bases must stay 32B-aligned).
+        candidate_block_size (int): KV rows per candidate group. Must be 8
+            in both modes (the kernel hardcodes 8 rows per group: the
+            consumer's mask broadcast maps position p to group p/8, and the
+            source's group layouts assume it — and 8 divides the 4096-wide
+            KV tile, so groups never straddle a chunk boundary).
 
     Returns:
         None: ``topk_indices`` is written in place. The binding synchronizes.

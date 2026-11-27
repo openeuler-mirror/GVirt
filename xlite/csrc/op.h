@@ -289,6 +289,22 @@ void XliteOpIndexerScores(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &we
 // qTile: query-tile length (PickIndexerQTile in PrepareAttn for model paths);
 // 0 = the compile-time macro default, > MAX_INDEXER_Q_TILE_LEN rejected (the
 // kernel's L1 q/w staging is macro-sized at build time).
+// Candidate pre-filter (two-level top-k level 1, V4.1): candidates is a
+// persistent buffer holding per-query-token candidateTopkBlocks int32 block IDs
+// (mode 1 writes it, mode 2 reads it). candidateRelay is the mode-1 workspace
+// carrying the running block-level topk across KV chunks — the candidates
+// analogue of lastTopk ([batchedTokens, 2*candidateTopkBlocks] int32), unused by
+// mode 2. candidateMode: 0 = off (V4 default, byte-identical), 1 = source (emit
+// top blocks by block-max score; forces serial kvSplit to keep the relay
+// same-core, emits ascending-sorted IDs), 2 = consumer (degrade non-candidate
+// scores to a large negative so the position top-k keeps candidates first).
+// Mode 2 consumes the ascending-sorted IDs via binary search without re-sorting.
+// candidateTopkBlocks/candidateBlockSize mirror vllm's candidate_topk_blocks /
+// candidate_block_size. Both modes require candidateBlockSize 8 (the kernel hardcodes
+// 8 rows per group: the consumer's mask broadcast maps position p to group p/8, and
+// the source's layouts assume it). Mode 1 additionally requires
+// candidateTopkBlocks <= MAX_TOPK_NUM and a multiple of 8 (the emit's VEC scratch
+// bases in mrgSortBuf1/totalSort must stay 32B-aligned); host validates all of these.
 void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weight, XTensor &scores,
                         XTensor &lastTopk, XTensor &seqPositions, XTensor &topkIndices,
                         XTensor &queryStartLoc, XTensor &lens, XTensor &cachedLens,
@@ -296,7 +312,10 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                         uint32_t blockSize, uint32_t batch, uint32_t topK,
                         uint8_t skipDenseTopk = 0, const XTensor &kScaleCache = XTensor(),
                         uint32_t compressRatio = 1, uint8_t kvSplit = 0, uint8_t qTile = 0,
-                        uint8_t packTail = 0, uint8_t reluQk = 1, uint32_t outStride = 0);
+                        uint8_t packTail = 0, uint8_t reluQk = 1, uint32_t outStride = 0,
+                        const XTensor &candidates = XTensor(),
+                        const XTensor &candidateRelay = XTensor(), uint32_t candidateMode = 0,
+                        uint32_t candidateTopkBlocks = 0, uint32_t candidateBlockSize = 0);
 void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output,
                  uint32_t calcOffset = 0, uint32_t calcNum = UINT32_MAX);
 void XliteOpExpertsCountsSum(XRuntime &rt, XTensor &expertsCountsInput, XTensor &tokensPerEpgroup,
