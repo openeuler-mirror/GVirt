@@ -10,6 +10,7 @@
 AIC b:         per-expert matmul walk (输入已量化, 进入即开始; 与独立 group_matmul 相同) → out (FP16 视图)
                --C2V flag 8 per tile (挂 PIPE_FIX, 骑 CopyToGm 之后)-->
 AIV 2b/2b+1:   dequant 镜像 walk (FP16 → BF16 原位, 乘 outScale)
+               <--V2C flag 9 ack per 4 tiles (挂 PIPE_MTE2, 骑本批 GM 载入之后; AIC 每 4 tile 等一次, 限制 C2V set 流超前)--
 ```
 
 ## 输入输出参数
@@ -38,10 +39,11 @@ Python 入口 `fused_group_matmul_dequant(rt, in_, weights, scales, counts, star
 
 ## 实现原理
 
-实现位于 [csrc/kernels/fused_group_matmul_dequant.h](../../csrc/kernels/fused_group_matmul_dequant.h)，类模板 `FusedGroupMatmulDequant<int8_t, int32_t, half, bfloat16_t>`，AIC 侧复用 `GroupMatmul`，AIV 侧复用 `Dequant` 子算子原语。expert/tile 遍历的唯一事实来源是共享骨架 `GroupTileWalker`（`csrc/kernels/group_tile_walker.h`），骨架为纯遍历、不含任何跨核调用；C2V 双向同步是融合壳内显式调用（`SetC2VFlag`/`WaitC2VFlag`，定义在骨架头 flag id 旁），两侧 tile 循环都由融合壳自带、完全对称：AIC 侧经 `GroupMatmul::BeginExpert` 绑定专家后每 tile `RunTileByIdx` → `SetC2VFlag()`；AIV 侧以父核索引播种同一骨架，每 tile 先 `WaitC2VFlag()` 再调 `Dequant::RunGroupExpertTile`（半行块反量化，内部含空尾跳过）——两侧的 tile 认领序列（含 `coreOffset` 相位与零计数专家跳过）由同一份骨架构造保证一致，C2V flag 的 set/wait 计数因此逐对平衡。
+实现位于 [csrc/kernels/fused_group_matmul_dequant.h](../../csrc/kernels/fused_group_matmul_dequant.h)，类模板 `FusedGroupMatmulDequant<int8_t, int32_t, half, bfloat16_t>`，AIC 侧复用 `GroupMatmul`，AIV 侧复用 `Dequant` 子算子原语。expert/tile 遍历的唯一事实来源是共享骨架 `GroupTileWalker`（`csrc/kernels/group_tile_walker.h`），骨架为纯遍历、不含任何跨核调用；C2V/V2C 双向同步是融合壳内显式调用（`SetC2VFlag`/`WaitC2VFlag`/`SetV2CFlag`/`WaitV2CFlag`，定义在骨架头 flag id 旁），两侧 tile 循环都由融合壳自带、完全对称：AIC 侧经 `GroupMatmul::BeginExpert` 绑定专家后每 tile `RunTileByIdx` → `SetC2VFlag()`，并按背压周期 `WaitV2CFlag()`；AIV 侧以父核索引播种同一骨架，每 tile 先 `WaitC2VFlag()` 再调 `Dequant::RunGroupExpertTile`（半行块反量化，内部含空尾跳过），并按同一周期 `SetV2CFlag()` ack——两侧的 tile 认领序列（含 `coreOffset` 相位与零计数专家跳过）由同一份骨架构造保证一致，C2V flag 的 set/wait 计数因此逐对平衡。
 
-- **无 V2C 交接**：输入 `xQuant` 由前序 kernel（QuantDyn 或 dispatch 前移的 permutation）在同流上产出，流序保证可见性，AIC 进入即开始 group walk。旧三段融合核的 V2C 粗粒度 barrier（AIV `SyncAll<true>` 聚合 + flag 9，`PIPE_MTE3` 骑量化 store）随核内量化段一并删除，AIC 侧不再有任何 wait。
+- **无 V2C 输入交接**：输入 `xQuant` 由前序 kernel（QuantDyn 或 dispatch 前移的 permutation）在同流上产出，流序保证可见性，AIC 进入即开始 group walk。旧三段融合核的 V2C 粗粒度 barrier（AIV `SyncAll<true>` 聚合 + flag 9，`PIPE_MTE3` 骑量化 store）随核内量化段一并删除。
 - **C2V per tile**（flag 8 挂 PIPE_FIX）：与两段融合 group 算子一致的已验证契约。AIC 侧**无退出回执**：MIX kernel 以全部核结束为准，AIC 可在配对 AIV 仍在 dequant 尾部 tile 时先行返回，与 dense 融合算子退出契约一致。
+- **V2C backpressure ack**（flag 9 挂 PIPE_MTE2，每 `V2C_SYNC_INTERVAL=4` tile 一次，延迟 `FUSION_PIPELINE_DEPTH=1` 个同步周期，与 dense 侧 !654 修复同款标定）：AIC 的 C2V set 流若无背压可任意超前两个配对 AIV 的 wait 消费流，大 walk 下 ffts flag 置位-消费配对被打乱，尾部 wait 永不触发，kernel 以 AI Core "timeout or trap" 挂死（26.11 gmd 线上报、26.10 dense 侧 !609 同款故障形态）。AIV 每 4 个已消费 tile（含空尾跳过，其 wait 计数已发生）set 一次 ack，骑 MTE2 队列保证发出时本批 GM 载入已退休；AIC 每 4 tile 前标量 wait 一次，walk 结束后排空剩余 `DEPTH` 个 ack，两侧计数恒等式为 `ceil(T/4) = floor((T-1)/4) + 1`（T 为该 AIC-pair 认领的 tile 总数，计数跨 expert 连续累计）。
 - **dequant 镜像 walk**：融合壳以 `walkBlockIdx = GetBlockIdx()/GetTaskRatio()`（父 AIC 索引）统一播种同一个 `GroupTileWalker` 骨架后，AIV 分支自带 tile 循环：每 tile 先显式 `WaitC2VFlag()`（排空 `CrossCoreWaitFlag(C2V_CROSS_CORE_FLAG)`）再调 `Dequant::RunGroupExpertTile`（`csrc/kernels/dequant.h`）按半行块（`halfM0 = m0/GetTaskRatio()`，`sub = GetBlockIdx()%2`）原位转换本 AIV 负责的行半块；方法内部的空行半块跳过发生在 wait 之后，保证等待计数与 AIC 的 set 计数恒等。每块 FP16 tile 落地即被配对 AIV 转换。行空间完全由 walker 给出（`Dequant::TaskTilesInit` 的 m 参数不被 group 镜像读取，仅绑定 GM 缓冲与行 stride n=kN）。
 - **ffts mode id 路由**：MIX 组内路由官方 mode 为 `0x2`，C2V 方向统一用 `0x2`（CANN 自身实现只出现 `0x0` 与 `0x2`；早期版本 AIV 侧曾用非官方值 `0x3`，在 cann-9.0.1 上恰好同效，现已统一为 `0x2`）。flagId 8 与核内事件号空间独立。
 
@@ -62,6 +64,6 @@ perf 矩阵：GLM MoE TP16 w13/w2 × hidden 7168/6144 × m 1~4096（g=16，trans
 
 ## 边界处理
 
-- 零计数 expert 由 walk 自然跳过（group_matmul 既有行为）；空路由区间（区间内全部 expert 零计数）时两侧 walk 均零 tile，C2V 的 set/wait 计数由同一骨架构造保证恒等，不会挂起。
+- 零计数 expert 由 walk 自然跳过（group_matmul 既有行为）；空路由区间（区间内全部 expert 零计数）时两侧 walk 均零 tile，C2V 与 V2C 的 set/wait 计数由同一骨架构造保证恒等（walk 尾的 ack 排空对零 tile 直接跳过），不会挂起。
 - dequant/matmul 子算子各自有 `mActual/nActual` 边界处理；走格由编译期宏 `FUSION_GROUP_MATMUL_DQ_LINEAR_SWIZZLE`（`kernels/fused_group_matmul_dequant.h`，现全局 0x601 = Nz count 6 分块蛇形）统一给定，两臂 walker 与 Matmul 解码同码（双射、bitwise 不变）；host 侧 fuse/skip 收益规则为 `m >= 4096 && k >= 1024 && n >= 2048`（标定依据见「功能概述」）。
 - `out_scale` 传空时 dequant 镜像走 hasScale=false 路径（跳过 per-token 乘法），与独立 dequant 语义一致。
