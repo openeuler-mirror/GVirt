@@ -254,7 +254,7 @@ void XTensor::PrintPtr(const char *name, std::vector<size_t> &subShape, enum XDt
     }
 
     err = aclrtMemcpy(p, size, ptr, size, ACL_MEMCPY_DEVICE_TO_HOST);
-    if (err != ACL_ERROR_NONE) {
+    if (err != XLITE_ACL_OK) {
         free(p);
         oss << "failed to copy data from device to host" << endingNoteStr << std::endl;
         os << oss.str() << std::flush;
@@ -315,7 +315,7 @@ void XTensor::Print(const char *name, uint32_t nRow, uint32_t nCol, std::ostream
     }
 
     err = aclrtMemcpy(p, spanBytes, ptr, spanBytes, ACL_MEMCPY_DEVICE_TO_HOST);
-    if (err != ACL_ERROR_NONE) {
+    if (err != XLITE_ACL_OK) {
         free(p);
         oss << "failed to copy data from device to host" << endingNoteStr << std::endl;
         os << oss.str() << std::flush;
@@ -457,7 +457,7 @@ bool XTensor::CheckNanInf(const char *name, float threshold, std::ostream &os,
     }
 
     aclError err = aclrtMemcpy(p, spanBytes, ptr, spanBytes, ACL_MEMCPY_DEVICE_TO_HOST);
-    if (err != ACL_ERROR_NONE) {
+    if (err != XLITE_ACL_OK) {
         free(p);
         oss << "failed to copy data from device to host" << endingNoteStr << std::endl;
         os << oss.str() << std::flush;
