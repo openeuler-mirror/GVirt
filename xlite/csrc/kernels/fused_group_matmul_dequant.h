@@ -18,11 +18,32 @@ using namespace AscendC;
 // bijection).
 #define FUSION_GROUP_MATMUL_DQ_LINEAR_SWIZZLE 0x601ULL
 
+// V2C backpressure batching, the !654 dense-side calibration: the AIVs ack
+// every V2C_SYNC_INTERVAL tiles (flag 9 rides PIPE_MTE2 behind the batch's GM
+// loads) and the AIC waits on the ack every V2C_SYNC_INTERVAL tiles, one sync
+// period behind (FUSION_PIPELINE_DEPTH), so its C2V set stream stays within
+// ~INTERVAL*(DEPTH+1) tiles of the paired AIVs' waits. The end-of-walk drain
+// below consumes the DEPTH acks still outstanding at loop exit.
+//
+// FUSION_PIPELINE_DEPTH must be 1: the set/wait pairing
+// ceil(T/INTERVAL) [=AIV acks] = floor((T-1)/INTERVAL) + DEPTH [=AIC in-loop
+// waits + drain] holds for all T>=1 only at DEPTH=1. At DEPTH>1 small walks
+// (T <= DEPTH*INTERVAL) raise the in-loop wait gate above every tile index so
+// the loop does zero waits; the two counts then diverge — acks < waits —
+// exactly when ceil(T/INTERVAL) < DEPTH, i.e. T <= (DEPTH-1)*INTERVAL, and the
+// drain's trailing waits deadlock there. Deepening the pipeline needs
+// re-deriving the drain count from the AIV set count, not just bumping the
+// macro.
+#define V2C_SYNC_INTERVAL 4
+#define FUSION_PIPELINE_DEPTH 1
+
 // group_matmul + dequant fused into one MIX launch. The quant stage lives
 // OUTSIDE this kernel: in is already INT8 (produced by QuantDyn or by the MoE
 // dispatch permutation-quant hoist), so the AICs may start the matmul walk
-// immediately — the only in-kernel hand-off left is the per-tile C2V flag the
-// AIC raises after each tile's CopyToGm for the paired AIVs to dequant.
+// immediately — the in-kernel hand-offs are the per-tile C2V flag the AIC
+// raises after each tile's CopyToGm for the paired AIVs to dequant, plus the
+// V2C backpressure ack (every V2C_SYNC_INTERVAL tiles) that caps how far the
+// AIC's C2V sets may run ahead of the AIVs' waits.
 template <typename Dtype, typename MatDtype, typename OutDtype>
 class FusedGroupMatmulDequant
 {
@@ -58,11 +79,29 @@ public:
                 std::is_same<Dtype, int4b_t>::value, FUSION_GROUP_MATMUL_DQ_LINEAR_SWIZZLE);
 #if defined(__DAV_C220_CUBE__)
         this->groupMatmulOp.SetFlags();
+        int64_t tilesProcessed = 0;
         while (w.NextExpert()) {
             this->groupMatmulOp.BeginExpert(w, xQuant, ws, out, deqScales, kN, kK);
             while (w.NextTile()) {
+                // Backpressure: wait for the paired AIVs' ack every
+                // V2C_SYNC_INTERVAL tiles, one sync period behind, so the
+                // per-tile C2V sets cannot overrun the AIVs' waits on large
+                // walks (tile count spans experts; the counter never resets).
+                if (tilesProcessed % V2C_SYNC_INTERVAL == 0 &&
+                    tilesProcessed >= FUSION_PIPELINE_DEPTH * V2C_SYNC_INTERVAL) {
+                    WaitV2CFlag();
+                }
                 this->groupMatmulOp.RunTileByIdx(w.idx);
                 SetC2VFlag();
+                tilesProcessed++;
+            }
+        }
+        // The walk ends with the AIC still DEPTH sync periods ahead of the
+        // paired AIVs' acks; drain them here so the V2C set/wait counts balance
+        // (ceil(T/4) acks per AIV vs floor((T-1)/4) in-loop waits + DEPTH).
+        if (tilesProcessed > 0) {
+            for (int64_t i = 0; i < FUSION_PIPELINE_DEPTH; i++) {
+                WaitV2CFlag();
             }
         }
         this->groupMatmulOp.WaitFlags();
@@ -72,10 +111,18 @@ public:
         this->dequantOp.TaskTilesInit(out, outScale, out, nullptr, 0, static_cast<uint64_t>(kN),
                                       false);
         this->dequantOp.SetFlags();
+        int64_t tilesProcessed = 0;
         while (w.NextExpert()) {
             while (w.NextTile()) {
                 WaitC2VFlag();
                 this->dequantOp.RunGroupExpertTile(w);
+                // Reverse ack every V2C_SYNC_INTERVAL tiles, including
+                // empty-tail skips (the wait above already ran for them, so
+                // the AIC's wait count matches this counter by construction).
+                if (tilesProcessed % V2C_SYNC_INTERVAL == 0) {
+                    SetV2CFlag();
+                }
+                tilesProcessed++;
             }
         }
         this->dequantOp.WaitFlags();

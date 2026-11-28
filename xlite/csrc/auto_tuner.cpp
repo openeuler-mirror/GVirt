@@ -350,6 +350,5 @@ bool FusedMatmulDeQuantBeneficial(uint64_t m, uint64_t k, bool dynQuant)
 
 bool FusedGroupMatmulDequantBeneficial(uint64_t m, uint64_t n, uint64_t k)
 {
-    return false;
-    // return m >= 4096 && k >= 1024 && n >= 2048;
+    return m >= 4096 && k >= 1024 && n >= 2048;
 }

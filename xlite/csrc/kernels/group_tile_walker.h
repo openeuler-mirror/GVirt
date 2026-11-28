@@ -22,6 +22,15 @@
 // matmul/dequant/quant.
 #define C2V_CROSS_CORE_FLAG 8
 
+// Reverse-direction ack of the same family: the paired AIVs raise it once
+// per V2C_SYNC_INTERVAL tiles and the AIC waits on it between tile batches,
+// capping how far its C2V sets may run ahead of the AIVs' waits — without
+// this backpressure the AIC's set stream outruns the single ffts flag slot
+// on large walks, the trailing AIV waits never fire and the kernel dies with
+// an AI Core "timeout or trap" error (the !609 dense-side failure mode,
+// fixed there by !654 with the same ack scheme).
+#define V2C_CROSS_CORE_FLAG 9
+
 // Per-tile C2V hand-off calls of the fused group shells. Producer side (AIC):
 // one call per executed tile, issued right after the tile's work is enqueued —
 // the set rides the FIX pipe queue, so it fires after the tile's CopyToGm
@@ -36,6 +45,22 @@ __aicore__ inline void SetC2VFlag()
 __aicore__ inline void WaitC2VFlag()
 {
     CrossCoreWaitFlag<2>(C2V_CROSS_CORE_FLAG);
+}
+
+// Reverse backpressure hand-off, the counterpart of the per-tile pair above.
+// Consumer side (AIV): set rides the MTE2 queue, so it fires only after this
+// batch's GM loads of the in-place FP16 view have retired — the tile data the
+// AIC wrote is safely consumed. Producer side (AIC): scalar wait between
+// tile batches; the shells own the batching interval, the pipeline depth and
+// the end-of-walk drain that keeps the two counts balanced.
+__aicore__ inline void SetV2CFlag()
+{
+    CrossCoreSetFlag<0x2, PIPE_MTE2>(V2C_CROSS_CORE_FLAG);
+}
+
+__aicore__ inline void WaitV2CFlag()
+{
+    CrossCoreWaitFlag<2>(V2C_CROSS_CORE_FLAG);
 }
 
 // Shared tile-traversal swizzle (lifted from Matmul::GetMNBlockIdx, matmul.h).
