@@ -132,6 +132,7 @@ public:
                    std::vector<std::vector<at::Tensor>> &kvCache, std::vector<at::Tensor> &freqsCis,
                    at::Tensor &output, std::vector<at::Tensor> &auxOutputs, uint64_t currStream);
     size_t GetTensorPoolSize(int dbg);
+    [[nodiscard]] std::vector<int64_t> GetCollectiveMsgBytes() const;
 
     enum XModelAttnType attnType = XMODEL_ATTN_MHA;
 
@@ -1585,6 +1586,11 @@ void _CModel::ForwardV2(XRuntime &rt, at::Tensor &input, CModelAttnMetaV2 &attnM
 size_t _CModel::GetTensorPoolSize(int dbg)
 {
     return _model->GetTensorPoolSize(dbg);
+}
+
+std::vector<int64_t> _CModel::GetCollectiveMsgBytes() const
+{
+    return _model->GetCollectiveMsgBytes();
 }
 
 static void DsaCpMaterializeNzShard(const uint8_t *src, uint8_t *dst, size_t outer,
@@ -3848,9 +3854,20 @@ struct RuntimeHolder : torch::CustomClassHolder {
             rt->UpdateCoreNum(static_cast<float>(util));
         }
     }
-    int64_t initTensorPool(double sizeMB)
+    int64_t initTensorPool(double sizeMB, int64_t msgBytesTp, int64_t msgBytesDp,
+                           int64_t msgBytesEp)
     {
-        return rt ? static_cast<int64_t>(rt->InitTensorPool(static_cast<size_t>(sizeMB))) : -1;
+        if (!rt) {
+            return -1;
+        }
+        auto clampToU64 = [](int64_t v) -> uint64_t {
+            return v < 0 ? 0 : static_cast<uint64_t>(v);
+        };
+        XRuntime::CommMsgBytes sizes{};
+        sizes.tp = clampToU64(msgBytesTp);
+        sizes.dp = clampToU64(msgBytesDp);
+        sizes.ep = clampToU64(msgBytesEp);
+        return static_cast<int64_t>(rt->InitTensorPool(static_cast<size_t>(sizeMB), sizes));
     }
     void setCurrentContext()
     {
@@ -3864,7 +3881,7 @@ struct RuntimeHolder : torch::CustomClassHolder {
             rt->ConfigureSwizzle(Cast<uint32_t>::go(swizzle), useSwizzleTable);
         }
     }
-    int64_t getTaskId() const
+    [[nodiscard]] int64_t getTaskId() const
     {
         return rt ? static_cast<int64_t>(rt->taskId) : 0;
     }
@@ -3874,7 +3891,7 @@ struct RuntimeHolder : torch::CustomClassHolder {
             rt->taskId = Cast<uint32_t>::go(v);
         }
     }
-    bool getMultiTaskParallel() const
+    [[nodiscard]] bool getMultiTaskParallel() const
     {
         return rt ? rt->multiTaskParallel : false;
     }
@@ -3889,7 +3906,7 @@ struct RuntimeHolder : torch::CustomClassHolder {
     // MULTI_TASK_PARALLEL cross-wires them (rt0.peer_notify = rt1.notify).
     // Expose the raw pointer value as an int64 round-trip; Python has no type
     // that can hold the handle itself.
-    int64_t getNotify() const
+    [[nodiscard]] int64_t getNotify() const
     {
         return rt ? reinterpret_cast<int64_t>(rt->notify) : 0;
     }
@@ -3899,7 +3916,7 @@ struct RuntimeHolder : torch::CustomClassHolder {
             rt->notify = reinterpret_cast<aclrtNotify>(v);
         }
     }
-    int64_t getPeerNotify() const
+    [[nodiscard]] int64_t getPeerNotify() const
     {
         return rt ? reinterpret_cast<int64_t>(rt->peerNotify) : 0;
     }
@@ -4179,6 +4196,11 @@ static void model_init(const c10::intrusive_ptr<_CModel> &self,
 static int64_t model_get_tensor_pool_size(const c10::intrusive_ptr<_CModel> &self, int64_t dbg)
 {
     return static_cast<int64_t>(self->GetTensorPoolSize(static_cast<int>(dbg)));
+}
+
+static std::vector<int64_t> model_get_collective_msg_bytes(const c10::intrusive_ptr<_CModel> &self)
+{
+    return self->GetCollectiveMsgBytes();
 }
 
 // ===========================================================================
@@ -4529,7 +4551,9 @@ TORCH_LIBRARY(xlite_sabi, m)
               torch::arg("moe_ep_size") = 1})
         .def("synchronize", &RuntimeHolder::synchronize)
         .def("update_core_num", &RuntimeHolder::updateCoreNum, "", {torch::arg("util")})
-        .def("init_tensor_pool", &RuntimeHolder::initTensorPool, "", {torch::arg("size")})
+        .def("init_tensor_pool", &RuntimeHolder::initTensorPool, "",
+             {torch::arg("size"), torch::arg("msg_bytes_tp") = 0, torch::arg("msg_bytes_dp") = 0,
+              torch::arg("msg_bytes_ep") = 0})
         .def("set_current_context", &RuntimeHolder::setCurrentContext)
         .def("configure_swizzle", &RuntimeHolder::configureSwizzle, "",
              {torch::arg("swizzle"), torch::arg("use_swizzle_table")})
@@ -4835,7 +4859,8 @@ TORCH_LIBRARY(xlite_sabi, m)
               torch::arg("curr_stream") = static_cast<int64_t>(0),
               torch::arg("deepstack_input") = std::vector<at::Tensor>{},
               torch::arg("input_ids") = torch::arg::none()})
-        .def("get_tensor_pool_size", &model_get_tensor_pool_size, "", {torch::arg("dbg") = 0});
+        .def("get_tensor_pool_size", &model_get_tensor_pool_size, "", {torch::arg("dbg") = 0})
+        .def("get_collective_msg_bytes", &model_get_collective_msg_bytes, "");
 
     m.class_<CoreAssignerHolder>("CoreAssigner")
         .def(torch::init<double>(), "", {torch::arg("prefill_ratio")})
@@ -4843,6 +4868,33 @@ TORCH_LIBRARY(xlite_sabi, m)
         .def("release_core", &CoreAssignerHolder::releaseCore, "", {torch::arg("is_decode")});
     using opreg::op;
     opreg::OpDefs ops(m);
+    // Per-communicator HCCL buffer sizing, exposed so unit tests can check it without a device.
+    ops.def("hccl_buffer_mb",
+            [](int64_t msgBytes, int64_t nRanks) -> int64_t {
+                return static_cast<int64_t>(
+                    XliteHcclBufferMb(msgBytes < 0 ? 0 : static_cast<uint64_t>(msgBytes),
+                                      nRanks < 0 ? 0 : static_cast<uint32_t>(nRanks)));
+            },
+            {torch::arg("msg_bytes"), torch::arg("ranks")});
+    // Collective payload arithmetic, exposed so unit tests can check the formulas without
+    // loading a model (they depend only on scalar model dimensions). Returns a tuple because
+    // makeSchema infers flattened returns, so Python unpacks the three sizes directly.
+    ops.def("compute_collective_msg_bytes",
+            [](int64_t tokens, int64_t hiddenSize, int64_t nRoutedExperts, int64_t nActExperts,
+               int64_t moeEpSize, int64_t defDpSize,
+               int64_t elemBytes) -> std::tuple<int64_t, int64_t, int64_t> {
+                auto clampToU64 = [](int64_t v) -> uint64_t {
+                    return v < 0 ? 0 : static_cast<uint64_t>(v);
+                };
+                const std::vector<int64_t> sizes = ComputeCollectiveMsgBytes(
+                    clampToU64(tokens), clampToU64(hiddenSize), clampToU64(nRoutedExperts),
+                    clampToU64(nActExperts), clampToU64(moeEpSize), clampToU64(defDpSize),
+                    clampToU64(elemBytes));
+                return {sizes[0], sizes[1], sizes[2]};
+            },
+            {torch::arg("tokens"), torch::arg("hidden_size"), torch::arg("n_routed_experts"),
+             torch::arg("n_act_experts"), torch::arg("moe_ep_size"), torch::arg("def_dp_size"),
+             torch::arg("elem_bytes")});
     ops.def("add", op<&Add>, {torch::arg("rt"), torch::arg("x"), torch::arg("y"), torch::arg("z")})
         .def("all_gather", op<&AllGather>,
              {torch::arg("rt"), torch::arg("out"), torch::arg("in_"),

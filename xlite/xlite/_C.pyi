@@ -66,17 +66,36 @@ class Runtime:
             None: The runtime updates rounded AI/vector core counts.
         """
 
-    def init_tensor_pool(self, size: int) -> int:
-        """Initialize the tensor pool for this runtime.
+    def init_tensor_pool(
+        self,
+        size: int,
+        msg_bytes_tp: int = 0,
+        msg_bytes_dp: int = 0,
+        msg_bytes_ep: int = 0,
+    ) -> int:
+        """Initialize the tensor pool and report the collective payload sizes.
+
+        The payload sizes let xlite size each HCCL communicator from the largest message it
+        will actually issue, instead of inheriting the process-wide ``HCCL_BUFFSIZE``. They
+        are optional: callers that omit them keep the previous behaviour (no per-communicator
+        configuration).
 
         Args:
             size (int): Requested pool size in megabytes.
+            msg_bytes_tp (int, default=0): Largest single collective payload (bytes) the TP
+                communicator can issue. ``0`` means "unknown" and configures nothing.
+            msg_bytes_dp (int, default=0): Same for the DP communicator; ``0`` falls back to
+                ``msg_bytes_tp``.
+            msg_bytes_ep (int, default=0): Same for the EP communicator; ``0`` falls back to
+                ``msg_bytes_tp``.
 
         Returns:
             int: `0` on success.
 
         Note:
-            Passing `0` leaves the current pool unchanged.
+            Passing `0` for `size` leaves the current pool unchanged. The buffers are
+            allocated lazily on the first collective of each communicator, so a communicator
+            that never issues one costs no HBM.
         """
 
     def set_current_context(self) -> None:
@@ -1571,6 +1590,19 @@ class Model:
 
         Returns:
             int: Current tensor pool size metric returned by native code.
+        """
+
+    def get_collective_msg_bytes(self) -> list[int]:
+        """Payload size of the largest message each collective can issue.
+
+        Derived arithmetically from the model description (token budget, hidden size,
+        expert count and topK, parallelism, activation dtype), so it needs neither a
+        device nor a tensor pool. Callers use it to size the per-communicator HCCL
+        buffer, which is otherwise a process-wide guess.
+
+        Returns:
+            list[int]: ``[tp, dp, ep]`` in bytes. An entry of ``0`` means that collective
+            is not in use, which lets the runtime fall back to the TP payload size.
         """
 
 class CoreAssigner:
@@ -5114,5 +5146,59 @@ def engram_gate(
         eps (float): RMSNorm epsilon.
         hidden_residual (torch.Tensor): residual-stream-basis hidden ``[T, hc_mult, dim]``
             bf16, or undefined (aliases ``hidden``).
+    """
+    ...
+
+def hccl_buffer_mb(msg_bytes: int, ranks: int) -> int:
+    """HCCL communication buffer size (MB) for one communicator.
+
+    Mirrors the policy xlite applies when it creates the TP/DP/EP communicators: the payload
+    is split across ranks, both directions are counted and the result is rounded up to whole
+    MB with a 1 MB floor. Sizes are never clamped: a larger payload legitimately needs a
+    larger buffer, and transfers are then split rather than failed.
+
+    Args:
+        msg_bytes (int): Largest single collective payload (bytes) this communicator can
+            issue. ``0`` means "unknown" and yields ``0``: the communicator is then created
+            without a per-domain buffer size.
+        ranks (int): Rank count of that communicator (``0`` is treated as 1).
+
+    Returns:
+        int: Buffer size in MB that xlite passes to ``HcclCommInitRootInfoConfig``.
+    """
+    ...
+
+def compute_collective_msg_bytes(
+    tokens: int,
+    hidden_size: int,
+    n_routed_experts: int,
+    n_act_experts: int,
+    moe_ep_size: int,
+    def_dp_size: int,
+    elem_bytes: int,
+) -> tuple[int, int, int]:
+    """Payload bytes of the largest message each collective can issue, as ``[tp, dp, ep]``.
+
+    This is the arithmetic behind :meth:`Model.get_collective_msg_bytes`, split out so the
+    formulas can be checked without loading a model. Every argument is a plain scalar:
+
+    - ``tp``: ``tokens * hidden_size * elem_bytes`` — collectives move hidden states.
+    - ``ep``: ``tp * n_act_experts`` when both ``n_act_experts > 0`` and ``moe_ep_size > 1``,
+      else ``0`` — MoE dispatch sends each token to its topK experts.
+    - ``dp``: ``(tp + tokens*n_routed_experts*elem_bytes + tokens*n_routed_experts/8) * def_dp_size``
+      when ``def_dp_size > 1``, else ``0`` — all-gather packs activations, gate weights and
+      the BIT1 routing mask (one bit per expert), replicated once per DP rank.
+
+    Args:
+        tokens (int): Token budget for one forward, already rounded up to whole TP ranks.
+        hidden_size (int): Transformer hidden width.
+        n_routed_experts (int): Total routed experts (not the topK count).
+        n_act_experts (int): topK, the experts each token is routed to.
+        moe_ep_size (int): Expert-parallel size; ``1`` means no cross-rank dispatch.
+        def_dp_size (int): Data-parallel size; ``1`` means no all-gather.
+        elem_bytes (int): Bytes per activation element (2 for BF16/FP16).
+
+    Returns:
+        tuple[int, int, int]: ``(tp, dp, ep)`` in bytes. Negative inputs are treated as ``0``.
     """
     ...

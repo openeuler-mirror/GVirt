@@ -194,6 +194,18 @@ struct MoEAlltoAllMeta {
 #define AIC_MAX_NUM 25
 #define AIV_MAX_NUM 50
 
+// Payload bytes of the largest message each collective can issue, ordered {tp, dp, ep}.
+//
+// Pure arithmetic so it stays testable without loading a model: every input is a plain scalar,
+// and the caller passes the token budget already rounded up to a whole number of TP ranks.
+//   tp: AllReduce/AllGather/ReduceScatter move hidden states, so it is just tokens*hidden*elem
+//   ep: MoE dispatch sends every token to its topK experts, hence the topK factor
+//   dp: all-gather packs activations + gate weights + the BIT1 routing mask, per DP rank
+std::vector<int64_t> ComputeCollectiveMsgBytes(uint64_t tokens, uint64_t hiddenSize,
+                                               uint64_t nRoutedExperts, uint64_t nActExperts,
+                                               uint64_t moeEpSize, uint64_t defDpSize,
+                                               uint64_t elemBytes);
+
 class XModel
 {
 public:
@@ -227,6 +239,10 @@ public:
     }
     void RegisterForwardHandlers(XRuntime &rt);
     size_t GetTensorPoolSize(int dbg);
+    // Payload bytes of the largest message each collective can issue, ordered {tp, dp, ep}.
+    // Pure arithmetic over the model description: no device work, no side effects, and it
+    // needs no tensor pool, so callers can size HCCL buffers before creating one.
+    [[nodiscard]] std::vector<int64_t> GetCollectiveMsgBytes() const;
     // whether to use communication optimization
     void ConfigRtCommOptimize(XRuntime &rt, size_t tokenNum)
     {

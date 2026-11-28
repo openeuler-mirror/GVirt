@@ -19,6 +19,10 @@
 #define XLITE_ACTIVE_TOKENS_RATIO_PER_EP_THRESHOLD 1024
 #define XLITE_FWD_POOL_SIZE 8
 
+// Per-communicator HCCL buffer sizing (MB). Exposed so unit tests can validate the
+// sizing policy without initialising a device.
+uint32_t XliteHcclBufferMb(uint64_t msgBytes, uint32_t nRanks);
+
 typedef void *aclrtContext;
 typedef void *aclrtNotify;
 typedef void *aclrtStream;
@@ -206,7 +210,15 @@ public:
                               enum commType type);
     [[nodiscard]] bool ReduceScatterInGraphActive(enum commType type) const;
 
-    int InitTensorPool(size_t sizeMB);
+    // Largest payload (bytes) each collective kind will ever issue, used to size the
+    // per-communicator HCCL buffers. A zero field falls back to `tp`.
+    struct CommMsgBytes {
+        uint64_t tp = 0;
+        uint64_t dp = 0;
+        uint64_t ep = 0;
+    };
+    int InitTensorPool(size_t sizeMB);  // legacy: fixed default buffer size
+    int InitTensorPool(size_t sizeMB, const CommMsgBytes &msgBytes);
     XTensor &GetTensor(std::vector<size_t> shape, enum XDtype dtype, DebugSrcLoc loc);
     void InitIndexerHadamard();
     void PutTensor(XTensor &t);
@@ -264,6 +276,7 @@ public:
     std::vector<GraphCaptureEntry> _arGraphs;
     XTensor _arBuf;  // single in-place buffer: HCCL AllReduce supports send==recv (capture焊死同址)
     uint64_t _arPerTokenBytes = 0;  // hiddenSize * dtypeBytes(_arDtype)
+    CommMsgBytes _cclMsgBytes{};    // resolved at pool init, consumed when comms are created
     uint32_t _arHiddenSize = 0;     // per-token element count captured
     enum XDtype _arDtype = BF16;    // captured dtype (== inputDtype)
     uint32_t aicNum;

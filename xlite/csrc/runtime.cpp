@@ -19,6 +19,69 @@
 #include "ccl.h"
 #include "auto_tuner.h"
 
+#include <dlfcn.h>
+
+// Per-communicator HCCL buffer size in MB. Sized from the largest collective message
+// this communicator will issue: msgBytes split across nRanks, doubled for the two
+// directions and rounded up to whole MB (min 1 MB). A msgBytes of 0 means "unknown"
+// and yields 0, i.e. the communicator is created without a per-domain buffer size.
+//
+// This avoids relying on the process-wide HCCL_BUFFSIZE env, which also shrinks buffers
+// used by the vLLM prefill path. Sizes are never clamped: a future model with a larger
+// payload is a legitimate reason to exceed it, and transfers are then split instead.
+uint32_t XliteHcclBufferMb(uint64_t msgBytes, uint32_t nRanks)
+{
+    if (msgBytes == 0) {
+        return 0;
+    }
+    const uint64_t ranks = nRanks == 0 ? 1 : nRanks;
+    const uint64_t perRank = msgBytes / ranks;
+    const uint64_t needMb = (perRank * 2 + ((1ULL << 20) - 1)) >> 20;
+    // hcclBufferSize is a uint32 MB field; saturate there rather than wrap.
+    const uint64_t saturatedMb = std::min<uint64_t>(needMb, UINT32_MAX);
+    const uint64_t cappedMb = saturatedMb < 1 ? 1 : saturatedMb;
+    return static_cast<uint32_t>(cappedMb);
+}
+namespace
+{
+
+// HcclCommInitRootInfoConfig is newer than HcclCommInitRootInfo and is resolved with dlsym
+// so that a CANN build without it still loads; XliteInitComm then falls back to the plain init.
+using XliteInitRootInfoCfgFn = HcclResult (*)(uint32_t, const HcclRootInfo *, uint32_t,
+                                              const HcclCommConfig *, HcclComm *);
+using XliteInitRootInfoFn = HcclResult (*)(uint32_t, const HcclRootInfo *, uint32_t, HcclComm *);
+
+HcclResult XliteInitComm(uint32_t nRanks, const HcclRootInfo *rootInfo, uint32_t rank,
+                         HcclComm *comm, uint64_t msgBytes)
+{
+    static auto cfgFn =
+        reinterpret_cast<XliteInitRootInfoCfgFn>(dlsym(RTLD_DEFAULT, "HcclCommInitRootInfoConfig"));
+    static auto plainFn =
+        reinterpret_cast<XliteInitRootInfoFn>(dlsym(RTLD_DEFAULT, "HcclCommInitRootInfo"));
+    const uint32_t bufMb = XliteHcclBufferMb(msgBytes, nRanks);
+    if (cfgFn != nullptr && bufMb > 0) {
+        // Zero-init first: HcclCommConfigInit() fills the documented fields, this keeps any
+        // reserved/padding bytes deterministic.
+        HcclCommConfig cfg{};
+        HcclCommConfigInit(&cfg);
+        cfg.hcclBufferSize = bufMb;
+        HcclResult ret = cfgFn(nRanks, rootInfo, rank, &cfg, comm);
+        if (ret == HCCL_SUCCESS) {
+            // One line per communicator: ranks/msgBytes make TP vs DP/EP sizing auditable.
+            std::cout << "Xlite per-comm HCCL buffer: " << bufMb << " MB (ranks=" << nRanks
+                      << ", msgBytes=" << msgBytes << ")" << std::endl;
+            return ret;
+        }
+        std::cout << "Xlite per-comm HCCL config failed (ret=" << ret << "), retrying with default"
+                  << std::endl;
+    }
+    if (plainFn != nullptr) {
+        return plainFn(nRanks, rootInfo, rank, comm);
+    }
+    return HCCL_E_NOT_SUPPORT;
+}
+}  // namespace
+
 #define XLITE_DEFAULT_IP "127.0.0.1"
 #define XLITE_DP_PORT_OFFSET 200
 #define XLITE_EP_PORT_OFFSET 300
@@ -416,7 +479,7 @@ int XRuntime::InitHcclComm(void)
         if (ret != 0) {
             return ret;
         }
-        CHECK_HCCL(HcclCommInitRootInfo(_tpSize, &rootInfo, _rankId % _tpSize, &_tpComm));
+        CHECK_HCCL(XliteInitComm(_tpSize, &rootInfo, _rankId % _tpSize, &_tpComm, _cclMsgBytes.tp));
     }
 
     if (_dpSize > 1) {
@@ -431,7 +494,8 @@ int XRuntime::InitHcclComm(void)
         if (ret != 0) {
             return ret;
         }
-        CHECK_HCCL(HcclCommInitRootInfo(_dpSize, &rootInfo, _rankId / _tpSize, &_dpComm));
+        CHECK_HCCL(XliteInitComm(_dpSize, &rootInfo, _rankId / _tpSize, &_dpComm,
+                                 _cclMsgBytes.dp != 0 ? _cclMsgBytes.dp : _cclMsgBytes.tp));
     }
 
     if (_moeEpSize > 1) {
@@ -446,7 +510,8 @@ int XRuntime::InitHcclComm(void)
         if (ret != 0) {
             return ret;
         }
-        CHECK_HCCL(HcclCommInitRootInfo(_moeEpSize, &rootInfo, _rankId / _moeTpSize, &_epComm));
+        CHECK_HCCL(XliteInitComm(_moeEpSize, &rootInfo, _rankId / _moeTpSize, &_epComm,
+                                 _cclMsgBytes.ep != 0 ? _cclMsgBytes.ep : _cclMsgBytes.tp));
     }
     portOffset += 500;
 
@@ -1677,6 +1742,12 @@ void XRuntime::NotifyRecordPeerStream()
 
 int XRuntime::InitTensorPool(size_t sizeMB)
 {
+    return InitTensorPool(sizeMB, CommMsgBytes{});
+}
+
+int XRuntime::InitTensorPool(size_t sizeMB, const CommMsgBytes &msgBytes)
+{
+    _cclMsgBytes = msgBytes;
     if (sizeMB != 0) {
         Init(sizeMB);
     }
