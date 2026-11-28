@@ -7,10 +7,18 @@
 #include "acl/acl.h"
 #include "hccl/hccl.h"
 
+/* ACL_SUCCESS and ACL_ERROR_NONE are both 0; newer toolkits deprecate the
+ * latter with a compiler-level attribute, which -Werror rejects. CMake probes
+ * the header and passes XLITE_ACL_OK; the fallback below keeps manual or
+ * standalone compiles working when the probe result is absent. */
+#ifndef XLITE_ACL_OK
+#define XLITE_ACL_OK ACL_SUCCESS
+#endif
+
 #define CHECK_ACL(x)                                                                          \
     do {                                                                                      \
         aclError __ret = x;                                                                   \
-        if (__ret != ACL_ERROR_NONE) {                                                        \
+        if (__ret != XLITE_ACL_OK) {                                                          \
             throw std::runtime_error(std::string(__func__) + ":" + std::to_string(__LINE__) + \
                                      " aclError:" + std::to_string(__ret));                   \
         }                                                                                     \
@@ -19,7 +27,7 @@
 #define TRACECHECK_ACL(x, loc)                                                   \
     do {                                                                         \
         aclError __ret = x;                                                      \
-        if (__ret != ACL_ERROR_NONE) {                                           \
+        if (__ret != XLITE_ACL_OK) {                                             \
             throw std::runtime_error(loc.ToStr() + std::string(__func__) + ":" + \
                                      std::to_string(__LINE__) +                  \
                                      " aclError:" + std::to_string(__ret));      \

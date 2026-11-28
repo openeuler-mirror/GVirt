@@ -227,7 +227,7 @@ XRuntime::~XRuntime(void)
     // reference. Teardown follows reverse construction order.
     if (stream != nullptr) {
         aclError drainRet = aclrtSynchronizeStream(stream);
-        if (drainRet != ACL_ERROR_NONE) {
+        if (drainRet != XLITE_ACL_OK) {
             std::cerr << "XRuntime: stream drain failed during teardown: " << drainRet << std::endl;
         }
     }
@@ -1273,7 +1273,7 @@ void XRuntime::ForwardThreadMain()
     // stream's callbacks to its creating/subscribing thread — without this, HCCL
     // collectives on the forward thread enqueue callbacks no thread drains and hang.
     _fwdSubscribed =
-        (aclrtSubscribeReport(static_cast<uint64_t>(syscall(SYS_gettid)), stream) == ACL_SUCCESS);
+        (aclrtSubscribeReport(static_cast<uint64_t>(syscall(SYS_gettid)), stream) == XLITE_ACL_OK);
     ForwardThreadLoop();
     if (_fwdSubscribed) {
         (void)aclrtUnSubscribeReport(static_cast<uint64_t>(syscall(SYS_gettid)), stream);

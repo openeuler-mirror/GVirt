@@ -333,6 +333,30 @@ if(XLITE_BENCH_TIMED)
     ascendc_compile_definitions(xlite_kernels_common_${RUN_MODE} PRIVATE MICROBENCH_TIMED=1)
 endif()
 
+# ---------------------------------------------------------------------------
+# ACL status-code compatibility.
+#
+# ACL_SUCCESS and ACL_ERROR_NONE are both 0. Newer toolkits annotate the
+# latter with a compiler-level deprecation attribute, which -Wall -Werror turns
+# into an error, so a single hardcoded spelling cannot work everywhere. Neither
+# name is a macro, so #ifdef cannot choose between them: probe the header once
+# and let CMake pass one macro to the sources. If the probe does not find
+# ACL_SUCCESS, the build falls back to ACL_ERROR_NONE.
+# ---------------------------------------------------------------------------
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_INCLUDES "${ASCEND_CANN_PACKAGE_PATH}/include")
+check_cxx_source_compiles("
+    #include <acl/acl.h>
+    int main() { return ACL_SUCCESS; }
+" XLITE_HAS_ACL_SUCCESS)
+unset(CMAKE_REQUIRED_INCLUDES)
+if(XLITE_HAS_ACL_SUCCESS)
+    set(XLITE_ACL_OK ACL_SUCCESS)
+else()
+    set(XLITE_ACL_OK ACL_ERROR_NONE)
+endif()
+message(STATUS "ACL status code: XLITE_ACL_OK=${XLITE_ACL_OK} (ACL_SUCCESS probe: ${XLITE_HAS_ACL_SUCCESS})")
+
 # xlite
 add_library(xlite SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/base.cpp
@@ -429,6 +453,8 @@ target_compile_options(xlite PRIVATE
     -std=c++17 -O3 -Wall -Werror
 )
 
+target_compile_definitions(xlite PRIVATE XLITE_ACL_OK=${XLITE_ACL_OK})
+
 target_link_libraries(xlite PRIVATE
     xlite_kernels_common_${RUN_MODE}
     xlite_kernels_bf16_${RUN_MODE}
@@ -501,6 +527,8 @@ set_target_properties(xlite_sabi PROPERTIES SUFFIX ".abi3.so")
 target_compile_options(xlite_sabi PRIVATE
     -std=c++17 -O3 -Wall -Werror -fPIC
 )
+
+target_compile_definitions(xlite_sabi PRIVATE XLITE_ACL_OK=${XLITE_ACL_OK})
 
 # Host side of XLITE_BENCH_TIMED for the SABI module: gates the bench_timed/
 # bench_mte/bench_vec/bench_cube wrapper entry points in _C.cpp.
