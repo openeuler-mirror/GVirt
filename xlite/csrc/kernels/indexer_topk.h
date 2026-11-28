@@ -40,7 +40,9 @@ public:
                                 uint32_t kScaleCacheStride = 0, uint32_t compressRatio = 1,
                                 uint32_t weightCols = 0, uint8_t kvSplit = 0,
                                 uint8_t qTileOverride = 0, uint8_t packTail = 0, uint8_t reluQk = 1,
-                                uint32_t outStride = 0)
+                                uint32_t outStride = 0, GM_ADDR candidates = nullptr,
+                                GM_ADDR candidateRelay = nullptr, uint32_t candidateMode = 0,
+                                uint32_t candidateTopkBlocks = 0, uint32_t candidateBlockSize = 0)
     {
         KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
         this->q.SetGlobalBuffer((__gm__ Dtype *)q);
@@ -103,6 +105,18 @@ public:
         this->setNextSync = (__gm__ int32_t *)sync + blockIdx * AIV_TO_AIC + subBlockIdx;
         this->waitPrevSync = (__gm__ int32_t *)sync + prevBlockIdx * AIV_TO_AIC + subBlockIdx;
         this->kvSplit = kvSplit > 0;
+        // Candidate pre-filter (two-level top-k level 1, V4.1): mode 1 emits a -1-padded
+        // ascending group-ID row per query token into `candidates`; mode 2 reads it back
+        // to mask non-candidate scores. `candidateRelay` carries mode 1's running group
+        // topk across KV chunks (the candidates analogue of lastTopk). Mode 0 touches
+        // neither pointer.
+        this->candidates = (__gm__ int32_t *)candidates;
+        this->candidateRelay = (__gm__ int32_t *)candidateRelay;
+        this->candidateMode = candidateMode;
+        this->candidateTopkBlocks = candidateTopkBlocks;
+        this->candidateBlockSize = candidateBlockSize;
+        this->candGroupsPerChunk =
+            candidateBlockSize > 0 ? MAX_INDEXER_KV_TILE_LEN / candidateBlockSize : 0;
 
 #ifdef __DAV_C220_CUBE__
         /*
@@ -470,10 +484,431 @@ public:
 #endif
 
 #ifdef __DAV_C220_VEC__
+    // ---- candidate pre-filter (two-level top-k level 1, V4.1) ----
+    // Mode 1 follows the reference's select_candidate_blocks: group-max the scores by
+    // candidateBlockSize, pin the causal-boundary group, keep the top candidateTopkBlocks.
+    // Mode 2 degrades non-candidate scores to NEG_HUGE — above the FLOAT_MIN pads, so they
+    // leak into the top-k as fillers (the reference's where(...) behavior).
+    // NegHuge/pin/accInit stay locals: the CCE front-end mishandles static constexpr float members.
+
+    // First index in [0, n) of the ascending, -1-padded candidate row with value >= key.
+    // Reads GM scalarly: O(log n) + in-range lanes per row; no UB big enough to stage a full
+    // row is free (the position sort owns the big buffers).
+    __aicore__ inline int CandLowerBound(__gm__ int32_t *row, uint32_t n, int key) const
+    {
+        uint32_t lo = 0, hi = n;
+        while (lo < hi) {
+            uint32_t mid = (lo + hi) / 2;
+            if (row[mid] < key) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        return (int)lo;
+    }
+
+    // Mode 1, dense rows (p0 < topK): every causal group fits the budget, so the row is
+    // [-1 x (candTopkBlocks-gTotal), 0..gTotal) built as clamp(ramp - (candTopkBlocks-gTotal),
+    // -1) — no sort machinery. Full-width ops from 2048B-aligned bases: a vadds landing at
+    // candTopkBlocks-gTotal lanes would misalign VEC for gTotal % 8 != 0. mrgSortBuf1 is
+    // dead at both call sites; the write drains its MTE3 read immediately.
+    __aicore__ inline void EmitDenseCandidates(int idx, int tokenRowBase, int p0)
+    {
+        constexpr int calcPad = VECTOR_MAX_BYTESIZE / sizeof(float);
+        uint32_t candTopkBlocks = this->candidateTopkBlocks;
+        int candBlockSize = (int)this->candidateBlockSize;
+        uint32_t gTotal =
+            (uint32_t)(p0 + candBlockSize) / candBlockSize;       // ceil((p0+1)/candBlockSize)
+        __ubuf__ int32_t *row = (__ubuf__ int32_t *)mrgSortBuf1;  // [0, candTopkBlocks)
+        __ubuf__ int32_t *ramp =
+            (__ubuf__ int32_t *)(mrgSortBuf1 + candTopkBlocks);  // [0, candTopkBlocks)
+        __ubuf__ int32_t *negOne = (__ubuf__ int32_t *)(mrgSortBuf1 + 2 * candTopkBlocks);
+        uint32_t wRep = DIV_ROUND_UP(candTopkBlocks, calcPad);
+        vadds(ramp, (__ubuf__ int32_t *)sortIndices, -(int32_t)sortIndicesStart, wRep, 1, 1, 8, 8);
+        pipe_barrier(PIPE_V);
+        vector_dup(negOne, -1, wRep, 1, 1, 8, 1);
+        pipe_barrier(PIPE_V);
+        // row[j] = j - (candTopkBlocks-gTotal): [-(candTopkBlocks-gTotal), gTotal); the pad head
+        // clamps to -1
+        vadds(row, ramp, -(int32_t)(candTopkBlocks - gTotal), wRep, 1, 1, 8, 8);
+        pipe_barrier(PIPE_V);
+        vmax(row, row, negOne, wRep, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+        set_flag(PIPE_V, PIPE_MTE3, EVENT_ID7);
+        wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID7);
+        CopyUbufToGmAligned(candidates + (uint64_t)(tokenRowBase + idx) * candTopkBlocks, row,
+                            candTopkBlocks * sizeof(uint32_t));
+        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID7);
+        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID7);
+    }
+
+    // Mode 1, sparse rows: pool the staged FP32 scores (mrgSortBuf0) into group maxima,
+    // pin the causal-boundary group to FLT_MAX, mark out-of-range ids -1, run the
+    // chunk-local group top-k, and merge with the previous chunks' relay into the GM relay
+    // every chunk (the position path reuses mrgSortBuf1 right after, so GM is the only
+    // surviving accumulator). Pooled/id writes are pure vector arithmetic: scalar UB
+    // stores are not ordered against V-pipe reads.
+    __aicore__ inline void RunCandidateSource(int idx, int tokenRowBase, int kvOffset,
+                                              int validKvLen, int p0, bool isFirst, bool isFinal,
+                                              int curr, bool *candFenceWaited, bool *candMte3Hold,
+                                              bool *candRelayWritten)
+    {
+        constexpr float min = FLOAT_MIN;
+        constexpr float pinScore = FLOAT_MAX;  // the pinned group's groupMax
+        constexpr int calcPad = VECTOR_MAX_BYTESIZE / sizeof(float);
+        uint32_t groupsPerChunk = this->candGroupsPerChunk;
+        uint32_t candTopkBlocks = this->candidateTopkBlocks;
+        int candBlockSize = (int)this->candidateBlockSize;
+        int gRep = DIV_ROUND_UP(groupsPerChunk, calcPad);
+        int groups = DIV_ROUND_UP(validKvLen, candBlockSize);
+        int paddedRows = ROUND_UP(validKvLen, calcPad);
+        int groupMaxRepeat = paddedRows / calcPad;
+        int paddedGroups = paddedRows / candBlockSize;
+        int pairRepeat = ROUND_UP(paddedGroups, SORT_BLOCK_SIZE) / SORT_BLOCK_SIZE;
+        if (pairRepeat == 1) {
+            // vbitsort drops the index payload at repeat 1 (same quirk as the position
+            // path's sortRepeat guard); Step 4's gap pad fills the widened tail.
+            pairRepeat = 2;
+        }
+
+        // mrgSortBuf1 (32KB) is free between this row's score staging and position vbitsort.
+        // Layout (floats): [0, 10*groupsPerChunk) group work vectors, sort pairs + MrgSort
+        // scratch at 10*groupsPerChunk; the merge output overwrites the head once the work
+        // vectors die ((candTopkBlocks+groupsPerChunk)*2 = 10*groupsPerChunk at candBlockSize
+        // 8 / candTopkBlocks 2048 — the op-level gates pin this layout).
+        __ubuf__ float *groupMax = mrgSortBuf1;  // pooled group maxima
+        __ubuf__ int32_t *idxVec = (__ubuf__ int32_t *)(mrgSortBuf1 + groupsPerChunk);  // group ids
+        __ubuf__ int32_t *rampI =
+            (__ubuf__ int32_t *)(mrgSortBuf1 + 2 * groupsPerChunk);  // local group ramp
+        __ubuf__ float *rampF = mrgSortBuf1 + 3 * groupsPerChunk;    // local ramp, f32
+        __ubuf__ float *onesF = mrgSortBuf1 + 4 * groupsPerChunk;    // 1.0f fill
+        __ubuf__ float *scratch = mrgSortBuf1 + 5 * groupsPerChunk;  // pin/pad scratch (f32/s32)
+        __ubuf__ int32_t *zeroS = (__ubuf__ int32_t *)(mrgSortBuf1 + 6 * groupsPerChunk);  // 0 fill
+        __ubuf__ int32_t *onesS = (__ubuf__ int32_t *)(mrgSortBuf1 + 7 * groupsPerChunk);  // 1 fill
+        __ubuf__ int32_t *isPadS =
+            (__ubuf__ int32_t *)(mrgSortBuf1 + 8 * groupsPerChunk);  // pad flags
+        __ubuf__ float *localPairs =
+            mrgSortBuf1 + 10 * groupsPerChunk;  // groupsPerChunk*2 vbitsort pairs
+        __ubuf__ float *mrgScratch =
+            mrgSortBuf1 + 12 * groupsPerChunk;   // groupsPerChunk*2 MrgSort sort1 scratch
+        __ubuf__ float *mergeOut = mrgSortBuf1;  // (candTopkBlocks+groupsPerChunk)*2 merge output
+
+        if (*candMte3Hold) {
+            // the previous row's emit deferred its trailing MTE3 read; drain before
+            // this entry's V work rewrites the candidate-borrowed regions
+            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID7);
+            *candMte3Hold = false;
+        }
+
+        // 0) per-row constants: local group ramp [0..groupsPerChunk) and its f32 form, rebuilt from
+        //    the identity sortIndices head (relocated to this chunk's kvOffset).
+        vadds(rampI, (__ubuf__ int32_t *)sortIndices, -(int32_t)sortIndicesStart, gRep, 1, 1, 8, 8);
+        pipe_barrier(PIPE_V);
+        vconv_s322f32(rampF, rampI, gRep, 1, 1, 8, 8);
+        pipe_barrier(PIPE_V);
+        vector_dup(onesF, 1.0f, gRep, 1, 1, 8, 1);
+        vector_dup(zeroS, 0, gRep, 1, 1, 8, 1);
+        vector_dup(onesS, 1, gRep, 1, 1, 8, 1);
+        pipe_barrier(PIPE_V);
+
+        // 1) groupMax: per-group maxima, compact in [0, paddedGroups). The FLOAT_MIN
+        //    staging pads make pooling pad-immune (partial groups ignore pads, full-pad
+        //    groups pool to FLOAT_MIN). SetMask is per-repeat; one repeat = 64 lanes.
+        set_mask_norm();
+        SetMask(calcPad);
+        vcgmax(groupMax, mrgSortBuf0, groupMaxRepeat, 1, 1, 8);
+        set_vector_mask((uint64_t)-1, (uint64_t)-1);
+        pipe_barrier(PIPE_V);
+
+        // 2) pin the group holding the causal boundary (p0/candBlockSize, always a real group) to
+        //    FLT_MAX: notPin = min(|ramp - pinLocal|, 1); groupMax = groupMax*notPin +
+        //    isPin*FLT_MAX.
+        int pinLocal = p0 / candBlockSize - kvOffset / candBlockSize;
+        vadds(scratch, rampF, -(float)pinLocal, gRep, 1, 1, 8, 8);
+        pipe_barrier(PIPE_V);
+        vabs(scratch, scratch, gRep, 1, 1, 8, 8);
+        pipe_barrier(PIPE_V);
+        vmin(scratch, scratch, onesF, gRep, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+        vmul(groupMax, groupMax, scratch, gRep, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+        vsub(scratch, onesF, scratch, gRep, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+        vmuls(scratch, scratch, float(pinScore), gRep, 1, 1, 8, 8);
+        pipe_barrier(PIPE_V);
+        vadd(groupMax, groupMax, scratch, gRep, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+
+        // 3) group ids: gStart + j for real groups, -1 beyond (pooled pads); ids for the
+        //    sort's tie-break and the emit. id' = id - (id+1)*isPad, isPad in {0,1}.
+        int gStart = kvOffset / candBlockSize;
+        vadds(idxVec, rampI, gStart, gRep, 1, 1, 8, 8);
+        pipe_barrier(PIPE_V);
+        vadds(isPadS, rampI, -(groups - 1), gRep, 1, 1, 8, 8);
+        pipe_barrier(PIPE_V);
+        vmax(isPadS, isPadS, zeroS, gRep, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+        vmin(isPadS, isPadS, onesS, gRep, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+        vadds((__ubuf__ int32_t *)scratch, idxVec, 1, gRep, 1, 1, 8, 8);
+        pipe_barrier(PIPE_V);
+        vmul((__ubuf__ int32_t *)scratch, (__ubuf__ int32_t *)scratch, isPadS, gRep, 1, 1, 1, 8, 8,
+             8);
+        pipe_barrier(PIPE_V);
+        vsub(idxVec, idxVec, (__ubuf__ int32_t *)scratch, gRep, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+
+        // 4) vbitsort reads full SORT_BLOCK_SIZE pairs; pad the groupMax tail (up to 24
+        //    lanes) so no stale score enters the local sort. Ids there are already -1.
+        int pairLen = pairRepeat * SORT_BLOCK_SIZE;
+        int gap = pairLen - paddedGroups;
+        if (gap > 0) {
+            SetMask(gap);
+            vector_dup(groupMax + paddedGroups, float(min), 1, 1, 1, 8, 0);
+            set_vector_mask((uint64_t)-1, (uint64_t)-1);
+            pipe_barrier(PIPE_V);
+        }
+
+        // 5) chunk-local group top-k (top candTopkBlocks groups; every real group survives short
+        // chunks).
+        vbitsort(localPairs, groupMax, (__ubuf__ uint32_t *)idxVec, pairRepeat);
+        pipe_barrier(PIPE_V);
+        __ubuf__ float *candLocal;
+        MrgSort(localPairs, mrgScratch, pairRepeat, &candLocal, candTopkBlocks);
+        pipe_barrier(PIPE_V);
+        uint32_t localLen = MIN(candTopkBlocks, (uint32_t)pairLen);
+
+        uint32_t totalLen = localLen;
+        if (isFirst) {
+            // place the chunk-local top-k at the merge-output head; MrgSort cannot
+            // target mergeOut directly (a single sort proposal never leaves `sort0`).
+            // Raw byte copy, not a float add: pad id -1 (0xFFFFFFFF) is a NaN, and NaN
+            // + 0.0f canonicalizes to 0x7FFFFFFF, re-writing every pad id (real ids are
+            // small integers = denormals, preserved bit-exact). localLen is 32B-aligned.
+            copy_ubuf_to_ubuf(mergeOut, candLocal, 0, 1,
+                              DIV_ROUND_UP(localLen * 2 * sizeof(float), BLOCK_SIZE), 0, 0);
+            pipe_barrier(PIPE_V);
+        } else {
+            // 6) merge with the previous chunks' relay (serial kvSplit: same-core GM ping;
+            //    dedicated EVENT_ID4 pair keeps the position relay's E5 1:1). lastSort[1-curr]
+            //    is dead (the position merge loads lastSort[curr]): stage there, mirroring its
+            //    EVENT_ID2 protocol.
+            if (!*candFenceWaited) {
+                wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4);
+                *candFenceWaited = true;
+            }
+            uint32_t lastLen = MIN(candTopkBlocks, (uint32_t)(kvOffset / candBlockSize));
+            __ubuf__ float *relayStage = lastSort[1 - curr];
+            wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + (1 - curr));  // acquire `lastSort[1-curr]`
+            CopyGmToUbufAligned(
+                relayStage, candidateRelay + (uint64_t)(tokenRowBase + idx) * 2 * candTopkBlocks,
+                lastLen * 2 * sizeof(uint32_t));
+            set_flag(PIPE_MTE2, PIPE_V, EVENT_ID2 + (1 - curr));
+            wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID2 + (1 - curr));
+            __ubuf__ float *addrs[4] = {candLocal, relayStage};
+            vmrgsort4(mergeOut, addrs, localLen | ((uint64_t)lastLen << 16),
+                      1ull | (0x3ull << MGR_SORT_VALID_BITS_OFFSET));
+            set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2 + (1 - curr));  // release `lastSort[1-curr]`
+            pipe_barrier(PIPE_V);
+            totalLen = MIN(candTopkBlocks, localLen + lastLen);
+        }
+
+        if (isFinal) {
+            // Pad to candTopkBlocks pairs with -1 so the emit's full-width restage reads a
+            // self-describing row (short only when every real group fits — contexts below
+            // ~candTopkBlocks*candBlockSize tokens). Pad scores are never read: the sort
+            // key is the id half alone.
+            if (totalLen < candTopkBlocks) {
+                vector_dup((__ubuf__ int32_t *)(mergeOut + totalLen * 2), -1,
+                           DIV_ROUND_UP((candTopkBlocks - totalLen) * 2, calcPad), 1, 1, 8, 1);
+                pipe_barrier(PIPE_V);
+            }
+        }
+        set_flag(PIPE_V, PIPE_MTE3, EVENT_ID7);  // V done writing mergeOut, MTE3 may read
+        wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID7);
+        CopyUbufToGmAligned(
+            candidateRelay + (uint64_t)(tokenRowBase + idx) * 2 * candTopkBlocks, mergeOut,
+            (isFinal ? (uint64_t)candTopkBlocks : (uint64_t)totalLen) * 2 * sizeof(uint32_t));
+        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID7);
+        // Drain immediately, do not hold: this row's position vbitsort reuses mrgSortBuf1
+        // (= mergeOut) the moment RunCandidateSource returns, and a held MTE3 read races it
+        // — the DMA snapshots mixed bytes (observed: position-sort pairs leaking into the
+        // relay row, varying per run). The emit's trailing read, contested only by the next
+        // emit (which drains at entry), is the one that may hold.
+        wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID7);
+        if (isFinal) {
+            // the emit's MTE2 restage (after the position path) must see this write
+            set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4);
+        } else {
+            *candRelayWritten = true;  // frame end releases the next chunk's merge
+        }
+    }
+
+    // Mode 1 final: sort the accumulated group ids ascending with the -1 pads first (the
+    // mode-2 row contract) and write the candidate row. Runs AFTER the position final of
+    // the same row, reusing its dead mrgSortBuf0/1 and totalSort slot; padded pairs
+    // restaged from the GM relay row (the position path reused mrgSortBuf1 in between).
+    // totalSort layout (floats): pairs [0, 2W), keys [2W, 3W), row out [3W, 4W), W =
+    // candTopkBlocks (4W <= 4*MAX_TOPK_NUM). Sort key -f32(id): pads (-1 -> +1.0) sort
+    // ahead of every real id — a plain u32 reinterpret reads -1 as NaN.
+    __aicore__ inline void CandidateEmit(int idx, int tokenRowBase, bool *candMte3Hold)
+    {
+        constexpr int calcPad = VECTOR_MAX_BYTESIZE / sizeof(float);
+        uint32_t candTopkBlocks = this->candidateTopkBlocks;
+        int wRep = DIV_ROUND_UP(candTopkBlocks, calcPad);
+        int wRepX2 = wRep * 2;
+        int wSortRep = DIV_ROUND_UP(candTopkBlocks, SORT_BLOCK_SIZE);
+        if (*candMte3Hold) {
+            // the previous emit deferred its trailing read of totalSort[3W, 4W); this
+            // emit reuses the slot — drain before overwriting
+            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID7);
+            *candMte3Hold = false;
+        }
+        wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4);  // the final relay write is visible
+        set_flag(PIPE_V, PIPE_MTE2, EVENT_ID7);      // position-final V reads of totalSort done
+        wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID7);
+        CopyGmToUbufAligned(totalSort,
+                            candidateRelay + (uint64_t)(tokenRowBase + idx) * 2 * candTopkBlocks,
+                            (uint64_t)candTopkBlocks * 2 * sizeof(uint32_t));
+        set_flag(PIPE_MTE2, PIPE_V, EVENT_ID7);
+        wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID7);
+        pipe_barrier(PIPE_V);
+        __ubuf__ uint32_t *index0 = (__ubuf__ uint32_t *)mrgSortBuf0;
+        vreducev2(index0, (__ubuf__ uint32_t *)totalSort, nullptr, wRepX2, 1, 2, 8, 0);
+        pipe_barrier(PIPE_V);
+        vconv_s322f32(totalSort + 2 * candTopkBlocks, (__ubuf__ int32_t *)index0, wRep, 1, 1, 8, 8);
+        pipe_barrier(PIPE_V);
+        vmuls(totalSort + 2 * candTopkBlocks, totalSort + 2 * candTopkBlocks, -1.0f, wRep, 1, 1, 8,
+              8);
+        pipe_barrier(PIPE_V);
+        vbitsort(mrgSortBuf1, totalSort + 2 * candTopkBlocks, index0, wSortRep);
+        pipe_barrier(PIPE_V);
+        __ubuf__ float *indexSorted;
+        MrgSort(mrgSortBuf1, mrgSortBuf0, wSortRep, &indexSorted, candTopkBlocks);
+        pipe_barrier(PIPE_V);
+        __ubuf__ uint32_t *row = (__ubuf__ uint32_t *)(totalSort + 3 * candTopkBlocks);
+        vreducev2(row, (__ubuf__ uint32_t *)indexSorted, nullptr, wRepX2, 1, 2, 8, 0);
+        pipe_barrier(PIPE_V);
+        set_flag(PIPE_V, PIPE_MTE3, EVENT_ID7);
+        wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID7);
+        CopyUbufToGmAligned(candidates + (uint64_t)(tokenRowBase + idx) * candTopkBlocks, row,
+                            candTopkBlocks * sizeof(uint32_t));
+        set_flag(PIPE_MTE3, PIPE_V, EVENT_ID7);
+        *candMte3Hold = true;
+    }
+
+    // Mode 2: degrade non-candidate scores in mrgSortBuf0 to NEG_HUGE ahead of the position
+    // sort (still above the FLOAT_MIN pads, so they may leak into the top-k as fillers).
+    // No-op fast path when every causal group fits the budget. The candidate row is read
+    // scalarly from GM (O(log candTopkBlocks) + in-range lanes); mrgSortBuf1 (free until
+    // the position vbitsort) carries ramps+accumulators in [0, 5*groupsPerChunk), the isOut
+    // broadcast at 4096, and the degrade temp reuses [0, 4096) once phase-A is dead.
+    __aicore__ inline void RunCandidateMask(int idx, int tokenRowBase, int kvOffset, int validKvLen,
+                                            int p0)
+    {
+        constexpr int calcPad = VECTOR_MAX_BYTESIZE / sizeof(float);
+        constexpr float negHuge = -1e30f;  // native NEG_HUGE_F32
+        constexpr float accInit = 1e30f;   // > any possible |group - candidate| distance
+        uint32_t groupsPerChunk = this->candGroupsPerChunk;
+        uint32_t candTopkBlocks = this->candidateTopkBlocks;
+        int candBlockSize = (int)this->candidateBlockSize;
+        int gRep = DIV_ROUND_UP(groupsPerChunk, calcPad);
+
+        int gTotal = (p0 + candBlockSize) /
+                     candBlockSize;  // ceil((p0+1)/candBlockSize): groups in the row's causal span
+        if (gTotal <= (int)candTopkBlocks) {
+            return;  // source kept every group: no-op
+        }
+        __gm__ int32_t *row = candidates + (uint64_t)(tokenRowBase + idx) * candTopkBlocks;
+
+        int gStart = kvOffset / candBlockSize;
+        int gEnd = (kvOffset + validKvLen + candBlockSize - 1) / candBlockSize;
+        int lo = CandLowerBound(row, candTopkBlocks, gStart);
+        int hi = CandLowerBound(row, candTopkBlocks, gEnd);
+        int fullRepeat = validKvLen / calcPad;
+        int remain = validKvLen % calcPad;
+        if (hi <= lo) {
+            // no candidate group intersects this chunk: every valid lane degrades
+            if (fullRepeat > 0) {
+                vector_dup(mrgSortBuf0, float(negHuge), fullRepeat, 1, 1, 8, 1);
+                pipe_barrier(PIPE_V);
+            }
+            if (remain > 0) {
+                pipe_barrier(PIPE_V);
+                SetMask(remain);
+                vector_dup(mrgSortBuf0 + fullRepeat * calcPad, float(negHuge), 1, 1, 1, 8, 0);
+                set_vector_mask((uint64_t)-1, (uint64_t)-1);
+                pipe_barrier(PIPE_V);
+            }
+            return;
+        }
+        __ubuf__ int32_t *rampI = (__ubuf__ int32_t *)mrgSortBuf1;  // groupsPerChunk local ramp
+        __ubuf__ float *rampF = mrgSortBuf1 + groupsPerChunk;
+        __ubuf__ float *dist = mrgSortBuf1 + 2 * groupsPerChunk;
+        __ubuf__ float *acc = mrgSortBuf1 + 3 * groupsPerChunk;
+        __ubuf__ float *onesF = mrgSortBuf1 + 4 * groupsPerChunk;
+        __ubuf__ float *isOut = mrgSortBuf1 + 4096;  // 4096 lanes [16KB, 32KB)
+        __ubuf__ float *d = mrgSortBuf1;             // degrade temp [0, 16KB), phase-A dead
+        vadds(rampI, (__ubuf__ int32_t *)sortIndices, -(int32_t)sortIndicesStart, gRep, 1, 1, 8, 8);
+        pipe_barrier(PIPE_V);
+        vconv_s322f32(rampF, rampI, gRep, 1, 1, 8, 8);
+        pipe_barrier(PIPE_V);
+        vector_dup(onesF, 1.0f, gRep, 1, 1, 8, 1);
+        pipe_barrier(PIPE_V);
+        // per-group membership via min-distance over the in-range candidates in local
+        // group space; acc[j] = 0 iff group j is a candidate, else 1 after the clamp.
+        vector_dup(acc, float(accInit), gRep, 1, 1, 8, 1);
+        pipe_barrier(PIPE_V);
+        for (int i = lo; i < hi; i++) {
+            int cLocal = row[i] - gStart;
+            vector_dup(dist, (float)cLocal, gRep, 1, 1, 8, 1);
+            pipe_barrier(PIPE_V);
+            vsub(dist, rampF, dist, gRep, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
+            vabs(dist, dist, gRep, 1, 1, 8, 8);
+            pipe_barrier(PIPE_V);
+            vmin(acc, acc, dist, gRep, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
+        }
+        vmin(acc, acc, onesF, gRep, 1, 1, 1, 8, 8, 8);
+        pipe_barrier(PIPE_V);
+        // broadcast to positions: posDist[8j+i] = acc[j] (isOut per position)
+        vbrcb((__ubuf__ uint32_t *)isOut, (__ubuf__ uint32_t *)acc, 1, 8, groupsPerChunk / 8);
+        pipe_barrier(PIPE_V);
+        // degrade valid lanes: score += (NEG_HUGE - score) * isOut (== NEG_HUGE exactly).
+        // Pad lanes keep FLOAT_MIN — they rank below degraded non-candidates.
+        if (fullRepeat > 0) {
+            vector_dup(d, float(negHuge), fullRepeat, 1, 1, 8, 1);
+            pipe_barrier(PIPE_V);
+            vsub(d, d, mrgSortBuf0, fullRepeat, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
+            vmul(d, d, isOut, fullRepeat, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
+            vadd(mrgSortBuf0, mrgSortBuf0, d, fullRepeat, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
+        }
+        if (remain > 0) {
+            __ubuf__ float *scoresTail = mrgSortBuf0 + fullRepeat * calcPad;
+            __ubuf__ float *dTail = d + fullRepeat * calcPad;
+            __ubuf__ float *isOutTail = isOut + fullRepeat * calcPad;
+            SetMask(remain);
+            vector_dup(dTail, float(negHuge), 1, 1, 1, 8, 0);
+            pipe_barrier(PIPE_V);
+            vsub(dTail, dTail, scoresTail, 1, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
+            vmul(dTail, dTail, isOutTail, 1, 1, 1, 1, 8, 8, 8);
+            pipe_barrier(PIPE_V);
+            vadd(scoresTail, scoresTail, dTail, 1, 1, 1, 1, 8, 8, 8);
+            set_vector_mask((uint64_t)-1, (uint64_t)-1);
+            pipe_barrier(PIPE_V);
+        }
+    }
+
     __aicore__ inline void RunAivTopk(__gm__ ScoreDtype *scores, __gm__ uint32_t *lastTopk,
                                       int queryLen, int kvOffset, int kvLen, uint32_t topK,
                                       __gm__ uint32_t *topkIndices, int queryPosBase,
-                                      __gm__ uint32_t *blockTable)
+                                      int tokenRowBase, __gm__ uint32_t *blockTable)
     {
         assert(kvLen <= MAX_INDEXER_KV_TILE_LEN && topK <= MAX_TOPK_NUM);
         constexpr float min = FLOAT_MIN;
@@ -486,6 +921,9 @@ public:
         int curr = 0;
         bool totalSortOnHold = false;
         bool lastChunkFenceWaited = false;
+        bool candFenceWaited = false;  // candidate relay's cross-chunk flag drained once
+        bool candMte3Hold = false;     // a candidate region has an outstanding MTE3 read
+        bool candRelayWritten = false;
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);  // release `in[curr]`
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID1);
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);  // release `lastSort[curr]`
@@ -564,6 +1002,16 @@ public:
                 convert_input(mrgSortBuf0, in[curr], fullRepeat, validKvLen % calcPad);
             }
             set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0 + curr);  // release `in[curr]`
+
+            // candidate pre-filter, between score staging and the position sort: mode 1
+            // emits the top candidate groups, mode 2 degrades the rest to NEG_HUGE (above
+            // the FLOAT_MIN pads)
+            if (candidateMode == 1) {
+                RunCandidateSource(idx, tokenRowBase, kvOffset, validKvLen, p0, isFirst, isFinal,
+                                   curr, &candFenceWaited, &candMte3Hold, &candRelayWritten);
+            } else if (candidateMode == 2) {
+                RunCandidateMask(idx, tokenRowBase, kvOffset, validKvLen, p0);
+            }
 
             // sort local
             pipe_barrier(PIPE_V);
@@ -710,8 +1158,19 @@ public:
                 CopyUbufToGmAligned(topkIndices + idx * outStride, out[curr],
                                     outStride * sizeof(uint32_t));
                 set_flag(PIPE_MTE3, PIPE_V, EVENT_ID0 + curr);  // release `out[curr]`
+                if (candidateMode == 1) {
+                    // final chunk: emit the candidate row from the accumulated top-k
+                    CandidateEmit(idx, tokenRowBase, &candMte3Hold);
+                }
             }
             curr = 1 - curr;
+        }
+        if (candRelayWritten) {
+            // all relay rows of this chunk are complete; release the next chunk's wait
+            set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID4);
+        }
+        if (candMte3Hold) {
+            wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID7);
         }
         if (totalSortOnHold) {
             wait_flag(PIPE_MTE3, PIPE_V, EVENT_ID2);
@@ -827,6 +1286,10 @@ public:
                    "[%u - %u)} use %d buf\n",
                    blockIdx, batchIdx, queryStart, queryOffset, queryOffset + queryTaskLen,
                    kvOffset, kvOffset + kvLen, curr);
+        // Mask route: mode-2 consumer scores ALL KV on cube via the unmodified
+        // score-all path (candidate-unaware, matching vllm-ascend-ds4 QLI v2); the AIV
+        // RunCandidateMask degrades every non-candidate score to NEG_HUGE ahead of the
+        // position top-k.
         RunAicIndexerScores(queryTaskLen, blockTable, kvOffset, kvLen, scores[curr]);
         ffts_cross_core_sync(PIPE_FIX, a2vSyncFlag[curr]);
 #else
@@ -847,7 +1310,8 @@ public:
                    queryOffset + nWorkStart + nWorkCurCore, kvOffset, kvOffset + kvLen, curr);
         RunAivTopk((__gm__ ScoreDtype *)scores[curr][nWorkStart * tileSizeOfCachedKV].GetPhyAddr(),
                    lastTopk + lastTopkRow * 2 * topK, nWorkCurCore, kvOffset, kvLen, topK,
-                   topkIndices + lastTopkRow * outStride, queryPosBase + nWorkStart, blockTable);
+                   topkIndices + lastTopkRow * outStride, queryPosBase + nWorkStart, lastTopkRow,
+                   blockTable);
         ffts_cross_core_sync(PIPE_MTE2, v2aSyncFlag[curr]);
 #endif
     }
@@ -985,6 +1449,18 @@ public:
                     if (assignedDefaultTopk && MapPosToKv(queryPosBase) < (int32_t)topK) {
                         StoreDefaultTopkRows(this->topkIndices + queryTaskOffset * outStride,
                                              queryPosBase, queryTaskLen);
+                        if (candidateMode == 1) {
+                            // every dense candidate row is emitted exactly once here:
+                            // all-dense tiles never reach RunAivTopk, and RunAivTopk
+                            // skips dense rows up front (no per-chunk re-emit)
+                            for (int i = 0; i < queryTaskLen; i++) {
+                                int p0Row = MapPosToKv(queryPosBase + i);
+                                if (p0Row >= (int32_t)topK) {
+                                    break;
+                                }
+                                EmitDenseCandidates(i, queryTaskOffset, p0Row);
+                            }
+                        }
                     }
 #endif
                     // skip dense tiles entirely (every token's causal boundary < topK)
@@ -1064,6 +1540,14 @@ private:
     uint32_t kpool = 0;
     uint32_t outWidth = 0;   // topK, or topK*kpool + kpool-1 when packTail
     uint32_t outStride = 0;  // GM row pitch in words; 128-slot-aligned when packTail
+    // Candidate pre-filter state (two-level top-k level 1); see Init's param docs.
+    __gm__ int32_t *candidates = nullptr;
+    __gm__ int32_t *candidateRelay = nullptr;
+    uint32_t candidateMode = 0;
+    uint32_t candidateTopkBlocks = 0;
+    uint32_t candidateBlockSize = 0;
+    uint32_t candGroupsPerChunk =
+        0;  // MAX_INDEXER_KV_TILE_LEN / candidateBlockSize (512 @ candBlockSize 8)
 
 #ifdef __DAV_C220_CUBE__
     LocalTensor<Dtype> ql1Buf;                            // event 4
@@ -1101,13 +1585,17 @@ private:
         uint32_t nHeads, uint32_t headDim, uint32_t blockSize, uint32_t batch,                    \
         uint32_t blockTableStride, uint32_t maxNumBlock, uint32_t topK, uint8_t skipDenseTopk,    \
         uint32_t compressRatio, uint32_t weightCols, uint8_t kvSplit, uint8_t qTileOverride,      \
-        uint8_t packTail, uint8_t reluQk, uint32_t outStride)                                     \
+        uint8_t packTail, uint8_t reluQk, uint32_t outStride, GM_ADDR candidates,                 \
+        GM_ADDR candidateRelay, uint32_t candidateMode, uint32_t candidateTopkBlocks,             \
+        uint32_t candidateBlockSize)                                                              \
     {                                                                                             \
         IndexerTopK<dtype, float, dtype, dtype> op;                                               \
         op.Init(q, kCache, weight, queryStartLoc, queryLens, cachedLens, blockTables, scores,     \
                 lastTopk, seqPositions, topkIndices, sync, kCacheStride, nHeads, headDim,         \
                 blockSize, batch, blockTableStride, maxNumBlock, topK, skipDenseTopk, nullptr, 0, \
-                compressRatio, weightCols, kvSplit, qTileOverride, packTail, reluQk, outStride);  \
+                compressRatio, weightCols, kvSplit, qTileOverride, packTail, reluQk, outStride,   \
+                candidates, candidateRelay, candidateMode, candidateTopkBlocks,                   \
+                candidateBlockSize);                                                              \
         op.Run();                                                                                 \
     }
 
@@ -1120,13 +1608,15 @@ private:
         uint32_t block_table_stride, uint32_t max_blocks, uint32_t topk, uint8_t skip_dense_topk, \
         GM_ADDR k_scale_cache, uint32_t k_scale_cache_stride, uint32_t compress_ratio,            \
         uint32_t weight_cols, uint8_t kvSplit, uint8_t q_tile_override, uint8_t pack_tail,        \
-        uint8_t relu_qk, uint32_t out_stride)                                                     \
+        uint8_t relu_qk, uint32_t out_stride, GM_ADDR candidates, GM_ADDR candidateRelay,         \
+        uint32_t candidate_mode, uint32_t candidate_topk_blocks, uint32_t candidate_block_size)   \
     {                                                                                             \
         IndexerTopK<dtype, int32_t, half, float> op;                                              \
         op.Init(q, k_cache, weight, query_start_loc, query_lens, cached_lens, block_tables,       \
                 scores, last_topk, seq_positions, topk_indices, sync, k_cache_stride, heads, dim, \
                 block_size, batch, block_table_stride, max_blocks, topk, skip_dense_topk,         \
                 k_scale_cache, k_scale_cache_stride, compress_ratio, weight_cols, kvSplit,        \
-                q_tile_override, pack_tail, relu_qk, out_stride);                                 \
+                q_tile_override, pack_tail, relu_qk, out_stride, candidates, candidateRelay,      \
+                candidate_mode, candidate_topk_blocks, candidate_block_size);                     \
         op.Run();                                                                                 \
     }

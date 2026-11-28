@@ -2857,11 +2857,75 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                         XTensor &blockTables, XTensor &sync, uint32_t nHeads, uint32_t headDim,
                         uint32_t blockSize, uint32_t batch, uint32_t topK, uint8_t skipDenseTopk,
                         const XTensor &kScaleCache, uint32_t compressRatio, uint8_t kvSplit,
-                        uint8_t qTile, uint8_t packTail, uint8_t reluQk, uint32_t outStride)
+                        uint8_t qTile, uint8_t packTail, uint8_t reluQk, uint32_t outStride,
+                        const XTensor &candidates, const XTensor &candidateRelay,
+                        uint32_t candidateMode, uint32_t candidateTopkBlocks,
+                        uint32_t candidateBlockSize)
 {
     if (IsDummyRuntime(rt)) {
         return;
     }
+    if (candidateMode > 2 ||
+        (candidateMode > 0 && (candidates.shape.size() != 2 || candidates.dtype != INT32 ||
+                               candidateTopkBlocks == 0 || candidateBlockSize == 0))) {
+        throw std::invalid_argument(std::string(__func__) +
+                                    ": candidate mode requires an int32 [T, candidateTopkBlocks] "
+                                    "buffer, topk_blocks and block_size");
+    }
+    // The kernel addresses candidates row-wise ((tokenRowBase + idx) * W), so a buffer
+    // with fewer rows than query tokens or narrower than W is a GM OOB, not a
+    // degraded result.
+    if (candidateMode > 0 &&
+        (candidates.shape[0] < q.shape[0] || candidates.shape[1] < candidateTopkBlocks)) {
+        throw std::invalid_argument(std::string(__func__) +
+                                    ": candidates buffer must hold one row per query token and "
+                                    "be at least candidateTopkBlocks wide");
+    }
+    // Both candidate modes hardcode 8 rows per group in the kernel: the consumer's
+    // mask broadcast maps position p to group p/8 (vbrcb emits 8 lanes per source
+    // element, and the degrade reads isOut across the full 4096-wide chunk), and the
+    // source's candidate scratch borrows the position path's buffers with a layout
+    // sized for 512 groups per chunk. bs must also divide one KV chunk
+    // (MAX_INDEXER_KV_TILE_LEN) so candidate groups never straddle chunk boundaries —
+    // 8 is what the model config and the native vllm kernel both use.
+    if (candidateMode > 0 &&
+        (candidateBlockSize != 8 || MAX_INDEXER_KV_TILE_LEN % candidateBlockSize != 0)) {
+        throw std::invalid_argument(std::string(__func__) +
+                                    ": candidate modes require candidateBlockSize 8 "
+                                    "(the kernel hardcodes 8 rows per group in both the "
+                                    "source and consumer paths)");
+    }
+    // Mode 1 (source) additionally needs the per-forward relay workspace, and its
+    // accumulation width must fit the kernel's sort machinery: candidateTopkBlocks is
+    // capped by MAX_TOPK_NUM (MrgSort/vmrgsort4 field width and the emit's totalSort
+    // restage slots), and must be a multiple of 8: the VEC scratch bases the emit
+    // places in mrgSortBuf1/totalSort (mrgSortBuf1 + W, +2W; totalSort + 2W, +3W; float
+    // offsets = 4W/8W/8W/12W bytes) must stay 32B-aligned, i.e. 4*W bytes divisible
+    // by 32.
+    if (candidateMode == 1 &&
+        (candidateRelay.shape.size() != 2 || candidateRelay.dtype != INT32 ||
+         candidateRelay.shape[0] < q.shape[0] ||
+         candidateRelay.shape[1] < 2 * candidateTopkBlocks || candidateTopkBlocks > MAX_TOPK_NUM ||
+         candidateTopkBlocks % 8 != 0)) {
+        throw std::invalid_argument(std::string(__func__) +
+                                    ": candidate source mode requires an int32 "
+                                    "[batchedTokens, 2*candidateTopkBlocks] relay workspace "
+                                    "(one row per query token), "
+                                    "candidateTopkBlocks <= MAX_TOPK_NUM and a multiple of 8");
+    }
+    if (candidateMode == 1) {
+        // The block-level candidate topk relays across a tile's KV chunks through
+        // candidateRelay with the same-core GM ping the serial (kvSplit=0) mode already
+        // uses for lastTopk; extending the cross-core ring to a second payload is not
+        // worth it for one source layer per forward, so source mode always runs serial.
+        kvSplit = 0;
+    }
+    // Mask route (this variant): mode-2 consumer scores ALL KV on cube via the
+    // unmodified score-all path (cube is candidate-unaware), so every [0, kvLen) row
+    // gets a real score before the VEC's RunCandidateMask degrades non-candidates to
+    // NEG_HUGE. No launch-time Memset is needed — score-all writes every row the VEC
+    // will read ([0, validKvLen) ⊆ [0, kvLen)), and the position-sort tail pads are
+    // generated in-UB (FLOAT_MIN).
     if (qTile > MAX_INDEXER_Q_TILE_LEN) {
         throw std::runtime_error(std::string(__func__) + ": qTile must be in [0, " +
                                  std::to_string(MAX_INDEXER_Q_TILE_LEN) + "], got " +
@@ -2903,6 +2967,15 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
     if (topK >= maxNumBlocks * blockSize && !skipDenseTopk && !packTail) {
         // this kernel should not even be fired --- but let's pad the output anyways (inefficiently)
         // the dense-row template is the first `outWidth` entries of `seqPositions`
+        if (candidateMode == 1) {
+            // The dense template path skips the kernel entirely, so the candidates rows
+            // would never be emitted and later consumer layers would read garbage. V4.1
+            // cache capacities are far above topK, so this is a config error, not a
+            // supported regime.
+            throw std::runtime_error(std::string(__func__) +
+                                     ": candidate source mode is incompatible with the dense-row "
+                                     "path (topK >= cache capacity)");
+        }
         size_t topkPosBytes = DIV_ROUND_UP(outWidth * XDtypeBit(topkIndices.dtype), 8);
         for (uint64_t i = 0; i < topkIndices.shape[0]; i++) {
             aclrtMemcpyAsync(static_cast<char *>(topkIndices.ptr) + i * topkPosBytes, topkPosBytes,
@@ -2947,7 +3020,9 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                 topkIndices.ptr, sync.ptr, kCache.stride[0], nHeads, headDim, blockSize, batch,
                 blockTableStride, maxNumBlocks, topK, skipDenseTopk, kScaleCache.ptr,
                 kScaleCacheStride, compressRatio, weightCols, kvSplit, qTile, packTail, reluQk,
-                outStride);
+                outStride, candidates.shape.empty() ? nullptr : candidates.ptr,
+                candidateRelay.shape.empty() ? nullptr : candidateRelay.ptr, candidateMode,
+                candidateTopkBlocks, candidateBlockSize);
         }
         return;
     }
@@ -2968,7 +3043,10 @@ void XliteOpIndexerTopK(XRuntime &rt, XTensor &q, XTensor &kCache, XTensor &weig
                  cachedLens.ptr, blockTables.ptr, scores.ptr, lastTopk.ptr, seqPositions.ptr,
                  topkIndices.ptr, sync.ptr, kCache.stride[0], nHeads, headDim, blockSize, batch,
                  blockTableStride, maxNumBlocks, topK, skipDenseTopk, compressRatio, weightCols,
-                 kvSplit, qTile, packTail, reluQk, outStride);
+                 kvSplit, qTile, packTail, reluQk, outStride,
+                 candidates.shape.empty() ? nullptr : candidates.ptr,
+                 candidateRelay.shape.empty() ? nullptr : candidateRelay.ptr, candidateMode,
+                 candidateTopkBlocks, candidateBlockSize);
 }
 
 void XliteOpMuls(XRuntime &rt, XTensor &input, float scale, XTensor &output, uint32_t calcOffset,

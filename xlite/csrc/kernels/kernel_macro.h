@@ -57,6 +57,7 @@ using namespace AscendC;
 #define C2_DATABLOCK 64        // The data block size of C2
 #define FIXPIPE_DATABLOCK 128  // The data block size of fixpipe
 #define FLOAT_MIN -3.4028235e+38
+#define FLOAT_MAX 3.4028235e+38f
 #define SORT_BLOCK_SIZE 32ull
 #define MGR_SORT_VALID_BITS_OFFSET 8
 #define MGR_SORT_IF_EXHAUSTED_SUSPENSION_OFFSET 12
